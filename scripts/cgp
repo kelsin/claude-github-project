@@ -78,21 +78,17 @@ def gql(query, **variables):
     return res["data"]
 
 
-def rest(path, *extra, paginate=True):
-    args = ["api", path, *extra]
-    if paginate:
-        args.insert(1, "--paginate")
-    out_ = gh(*args).stdout.strip()
-    if not out_:
-        return []
-    # --paginate on arrays concatenates JSON arrays: "[..][..]"
-    try:
-        return json.loads(out_)
-    except json.JSONDecodeError:
-        merged = []
-        for chunk in re.split(r"(?<=\])\s*(?=\[)", out_):
-            merged.extend(json.loads(chunk))
-        return merged
+def rest(path, *extra):
+    sep = "&" if "?" in path else "?"
+    text = gh("api", "--paginate", f"{path}{sep}per_page=100", *extra).stdout
+    dec, i, merged = json.JSONDecoder(), 0, []
+    while True:
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text):
+            return merged
+        chunk, i = dec.raw_decode(text, i)
+        merged.extend(chunk if isinstance(chunk, list) else [chunk])
 
 
 # ------------------------------------------------------------ config + state
@@ -174,7 +170,7 @@ def check_scope():
     p = gh("auth", "status", check=False)
     text = p.stdout + p.stderr
     m = re.search(r"Token scopes:(.*)", text)
-    if m and "project" not in m.group(1).replace("read:project", "project"):
+    if m and "'project'" not in m.group(1):
         die("gh token lacks the 'project' scope. Run: gh auth refresh -s project", code=3)
 
 
@@ -200,6 +196,25 @@ def fetch_items(project_id):
         if not page["pageInfo"]["hasNextPage"]:
             return items
         after = page["pageInfo"]["endCursor"]
+
+
+ITEM_QUERY = """
+query($i:ID!){ node(id:$i){ ... on ProjectV2Item{ id isArchived
+  content{ __typename
+    ... on Issue{ number title url state repository{nameWithOwner} }
+    ... on PullRequest{ number title url state repository{nameWithOwner} }
+    ... on DraftIssue{ title body } }
+  fieldValues(first:20){ nodes{ __typename
+    ... on ProjectV2ItemFieldSingleSelectValue{ optionId name field{ ... on ProjectV2FieldCommon{ name } } }
+    ... on ProjectV2ItemFieldTextValue{ text field{ ... on ProjectV2FieldCommon{ name } } } } } } } }
+"""
+
+
+def get_item(c, item):
+    raw = gql(ITEM_QUERY, i=item)["node"]
+    if not raw:
+        die(f"item {item} not found")
+    return parse_item(raw, c)
 
 
 def parse_item(raw, c):
@@ -307,20 +322,33 @@ def cmd_setup(a):
     desired = [f"{emoji} {name}" for _, name, emoji, _ in COLUMNS]
     have = [o["name"] for o in status["options"]]
 
+    repo_id = None
+    if a.repo:  # validate before touching the board
+        repo_id = gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }",
+                      o=a.repo.split("/")[0], n=a.repo.split("/")[1])["repository"]["id"]
+
     remap = {}
     if have != desired:
+        old = {norm(o["name"]): o["id"] for o in status["options"]}
         old_names = {o["id"]: o["name"] for o in status["options"]}
+        matched = {old[norm(n)] for _, n, _, _ in COLUMNS if norm(n) in old}
         for raw in fetch_items(proj["id"]):
-            for v in raw["fieldValues"]["nodes"]:
-                if v and v.get("field", {}).get("name") == "Status":
-                    remap[raw["id"]] = old_names.get(v["optionId"], "")
-            remap.setdefault(raw["id"], "")
+            cur = next((v for v in raw["fieldValues"]["nodes"]
+                        if v and v.get("field", {}).get("name") == "Status"), None)
+            if cur and cur["optionId"] in matched:
+                continue  # option id is preserved below, so the item keeps its status
+            closed = (raw.get("content") or {}).get("state") in ("CLOSED", "MERGED")
+            remap[raw["id"]] = "Done" if closed else ""
         data = gql("""mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){
           updateProjectV2Field(input:{fieldId:$f,singleSelectOptions:$o}){ projectV2Field{
             ... on ProjectV2SingleSelectField{ id options{id name} } } } }""",
                    f=status["id"],
-                   o=[{"name": f"{e} {n}", "color": col, "description": ""} for _, n, e, col in COLUMNS])
+                   o=[{"name": f"{e} {n}", "color": col, "description": "",
+                       **({"id": old[norm(n)]} if norm(n) in old else {})} for _, n, e, col in COLUMNS])
         status = data["updateProjectV2Field"]["projectV2Field"]
+        new_opts = {norm(o["name"]): o["id"] for o in status["options"]}
+        for item, tag in remap.items():
+            set_single({"board": {"id": proj["id"]}}, item, status["id"], new_opts["done" if tag == "Done" else "todo"])
 
     options = {}
     for key, name, _, _ in COLUMNS:
@@ -331,7 +359,7 @@ def cmd_setup(a):
     def ensure(name, dtype, opts=None):
         if name in fields:
             return fields[name]
-        v = {"p": proj["id"], "t": dtype, "n": name, "o": opts or []}
+        v = {"p": proj["id"], "t": dtype, "n": name, "o": opts}
         d = gql("""mutation($p:ID!,$t:ProjectV2CustomFieldType!,$n:String!,$o:[ProjectV2SingleSelectFieldOptionInput!]){
           createProjectV2Field(input:{projectId:$p,dataType:$t,name:$n,singleSelectOptions:$o}){ projectV2Field{
             ... on ProjectV2FieldCommon{ id name } ... on ProjectV2SingleSelectField{ options{id name} } } } }""", **v)
@@ -359,8 +387,7 @@ def cmd_setup(a):
     for r in proj["repositories"]["nodes"]:
         c["repos"].setdefault(r["nameWithOwner"], None)
     if a.repo:
-        rid = gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }",
-                  o=a.repo.split("/")[0], n=a.repo.split("/")[1])["repository"]["id"]
+        rid = repo_id
         if a.repo not in c["repos"]:
             gql("""mutation($p:ID!,$r:ID!){ linkProjectV2ToRepository(input:{projectId:$p,repositoryId:$r}){
               clientMutationId } }""", p=proj["id"], r=rid)
@@ -369,13 +396,9 @@ def cmd_setup(a):
             c["repos"][a.repo] = os.path.abspath(a.repo_path)
     save_json(CONFIG, c)
 
-    moved = {}
-    for item, old_name in remap.items():
-        key = next((k for k, n, _, _ in COLUMNS if norm(n) == norm(old_name)), "todo")
-        set_single(c, item, status["id"], options[key])
-        moved[key] = moved.get(key, 0) + 1
+    moved = {"todo": sum(1 for t in remap.values() if t != "Done"), "done": sum(1 for t in remap.values() if t == "Done")}
     out({"board": c["board"], "repos": c["repos"], "itemsRemapped": moved,
-         "note": "items whose old status matched a new column name kept it; all others went to Todo"})
+         "note": "items whose old status matched a new column name kept it; closed ones went to Done, all others to Todo"})
 
 
 def cmd_repo_path(a):
@@ -425,13 +448,23 @@ def process_replies(c, items):
         replies, _ = list_replies_since(it["issueRepo"], it["number"], [QMARK])
         if replies:
             clear_field(c, it["item"], c["fields"]["waiting"]["id"])
-            it["waiting"], it["answered"] = False, True
+            it["waiting"] = False
+            update_state(lambda st, i=it["item"]: st.setdefault("answered", []).append(i))
 
 
 def snapshot(c):
     items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
     items = [i for i in items if not i["archived"] and i["kind"] in ("issue", "draft")]
     process_replies(c, items)
+    answered = set(load_json(STATE, {}).get("answered", []))
+    for i in items:
+        if i["item"] in answered:
+            i["answered"] = True
+    for i in items:  # a merged PR closes its issue: finish stories whose worker died before moving them
+        if i["closed"] and i["column"] == "pr_approved":
+            set_single(c, i["item"], c["fields"]["status"]["id"], c["fields"]["status"]["options"]["done"])
+            i["column"] = "done"
+    items = [i for i in items if not (i["closed"] and i["column"] != "done")]
     live = [i for i in items if i["column"] != "done"]
     counts = {k: sum(1 for i in items if i["column"] == k) for k in KEYS}
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"]]
@@ -487,6 +520,7 @@ def cmd_move(a):
         for w in st["workers"]:
             if w["item"] == a.item:
                 w["column"] = a.column
+        st["answered"] = [i for i in st.get("answered", []) if i != a.item]
     update_state(upd)
     out({"item": a.item, "column": a.column})
 
@@ -513,12 +547,17 @@ def cmd_comment(a):
     body = read_body()
     target_repo, target = repo, number
     if a.pr:
-        ref = parse_pr_ref(next((i["pr"] for i in [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
-                                 if i["item"] == a.item), None))
+        ref = parse_pr_ref(get_item(c, a.item)["pr"])
         if not ref:
             die("story has no PR field set")
         target_repo, target = ref
     cm = post_comment(target_repo, target, f"{MARK}\n{body}")
+
+    def commit(st):  # feedback read earlier in this run is now handled
+        if a.item in st.get("pending", {}):
+            st.setdefault("cursors", {})[a.item] = st["pending"].pop(a.item)
+    if not a.pr:
+        update_state(commit)
     out({"url": cm["html_url"]})
 
 
@@ -546,7 +585,7 @@ def cmd_answers(a):
 def cmd_feedback(a):
     c = cfg()
     repo, number, _ = item_issue(a.item)
-    it = next(i for i in [parse_item(r, c) for r in fetch_items(c["board"]["id"])] if i["item"] == a.item)
+    it = get_item(c, a.item)
     ref = parse_pr_ref(it["pr"])
     issue_comments = rest(f"repos/{repo}/issues/{number}/comments")
     sources = [("issue", issue_comments)]
@@ -559,7 +598,14 @@ def cmd_feedback(a):
         for r in reviews:
             r["created_at"] = r.get("submitted_at") or ""
         sources.append(("pr-review", reviews))
-    cursor = max([cm["created_at"] for _, cms in sources for cm in cms if is_agent(cm) and "created_at" in cm] or [""])
+    st = load_json(STATE, {})
+    cursor = st.get("cursors", {}).get(a.item) or max(
+        [cm["created_at"] for _, cms in sources for cm in cms if is_agent(cm) and "created_at" in cm] or [""])
+    seen = max([cm["created_at"] for _, cms in sources for cm in cms if "created_at" in cm] or [cursor])
+
+    def pend(st):
+        st.setdefault("pending", {})[a.item] = max(seen, cursor)
+    update_state(pend)
     found = [{"where": w, "author": (cm.get("user") or {}).get("login"), "at": cm["created_at"],
               "url": cm.get("html_url"), "path": cm.get("path"), "body": cm.get("body")}
              for w, cms in sources for cm in cms
@@ -615,15 +661,15 @@ def git(path, *args, check=True):
 
 def cmd_worktree(a):
     c = cfg()
-    it = next((i for i in [parse_item(r, c) for r in fetch_items(c["board"]["id"])] if i["item"] == a.item), None)
-    if not it or it["kind"] != "issue":
+    it = get_item(c, a.item)
+    if it["kind"] != "issue":
         die("item is not an issue on this board")
     repo = it["repo"]
     base = resolve_repo_path(c, repo)
-    slug = re.sub(r"[^a-z0-9]+", "-", it["title"].lower()).strip("-")[:40]
-    branch = f"cgp/{it['number']}-{slug}"
+    branch = f"cgp/{it['number']}"
     wt = os.path.join(HOME, "worktrees", f"{it['issueRepo'].replace('/', '-')}-{it['number']}")
     git(base, "fetch", "origin", "--prune")
+    git(base, "worktree", "prune")
     default = git(base, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "origin/main"
     if os.path.isdir(wt):
         out({"path": wt, "branch": git(wt, "branch", "--show-current"), "base": default, "repo": repo})
@@ -631,6 +677,8 @@ def cmd_worktree(a):
     os.makedirs(os.path.dirname(wt), exist_ok=True)
     if git(base, "rev-parse", "--verify", f"origin/{branch}", check=False):
         git(base, "worktree", "add", "-B", branch, wt, f"origin/{branch}")
+    elif git(base, "rev-parse", "--verify", f"refs/heads/{branch}", check=False):
+        git(base, "worktree", "add", wt, branch)
     else:
         git(base, "worktree", "add", "-b", branch, wt, default)
     out({"path": wt, "branch": branch, "base": default, "repo": repo})
@@ -638,21 +686,26 @@ def cmd_worktree(a):
 
 def cmd_worktree_remove(a):
     c = cfg()
-    it = next(i for i in [parse_item(r, c) for r in fetch_items(c["board"]["id"])] if i["item"] == a.item)
+    it = get_item(c, a.item)
     wt = os.path.join(HOME, "worktrees", f"{it['issueRepo'].replace('/', '-')}-{it['number']}")
     if os.path.isdir(wt):
-        git(resolve_repo_path(c, it["repo"]), "worktree", "remove", "--force", wt)
+        base = resolve_repo_path(c, it["repo"])
+        git(base, "worktree", "remove", "--force", wt)
+        git(base, "branch", "-D", f"cgp/{it['number']}", check=False)
     out({"removed": wt})
 
 
 # ----------------------------------------------------------------- PR / CI
 
 def pr_checks(repo, pr):
+    """Checks list; [] when none are reported; None on a transient gh failure."""
     p = gh("pr", "checks", str(pr), "-R", repo, "--json", "name,bucket,link,workflow", check=False)
-    try:
-        return json.loads(p.stdout) if p.returncode in (0, 8) else []
-    except json.JSONDecodeError:
-        return []
+    if p.returncode in (0, 8):
+        try:
+            return json.loads(p.stdout)
+        except json.JSONDecodeError:
+            return None
+    return [] if "no checks reported" in (p.stderr + p.stdout) else None
 
 
 def failed_logs(repo, failed):
@@ -670,6 +723,14 @@ def cmd_ci_wait(a):
     deadline, none_since = time.time() + a.timeout, time.time()
     while True:
         checks = pr_checks(a.repo, a.pr)
+        if checks is None:  # transient gh error: never mistake it for "no CI"
+            if time.time() >= deadline:
+                out({"state": "pending", "note": "gh errors while polling"})
+                return
+            time.sleep(a.interval)
+            continue
+        if checks:
+            none_since = time.time()
         failed = [x for x in checks if x["bucket"] in ("fail", "cancel")]
         pending = [x for x in checks if x["bucket"] == "pending"]
         if failed:
@@ -720,7 +781,7 @@ def cmd_merge_wait(a):
         if v["mergeable"] == "CONFLICTING" or v["mergeStateStatus"] == "DIRTY":
             out({"state": "conflict", "pr": v})
             return
-        if any(x["bucket"] in ("fail", "cancel") for x in pr_checks(a.repo, a.pr)):
+        if any(x["bucket"] in ("fail", "cancel") for x in (pr_checks(a.repo, a.pr) or [])):
             out({"state": "ci-red", "pr": v})
             return
         if v["mergeStateStatus"] == "BEHIND":
@@ -761,12 +822,12 @@ def main():
     p = sp.add_parser("worktree"); p.add_argument("item"); p.set_defaults(fn=cmd_worktree)
     p = sp.add_parser("worktree-remove"); p.add_argument("item"); p.set_defaults(fn=cmd_worktree_remove)
     p = sp.add_parser("ci-wait"); p.add_argument("repo"); p.add_argument("pr", type=int)
-    p.add_argument("--timeout", type=int, default=1500); p.add_argument("--interval", type=int, default=20)
-    p.add_argument("--grace", type=int, default=90); p.set_defaults(fn=cmd_ci_wait)
+    p.add_argument("--timeout", type=int, default=540); p.add_argument("--interval", type=int, default=20)
+    p.add_argument("--grace", type=int, default=120); p.set_defaults(fn=cmd_ci_wait)
     p = sp.add_parser("pr-state"); p.add_argument("repo"); p.add_argument("pr", type=int); p.set_defaults(fn=cmd_pr_state)
     p = sp.add_parser("merge"); p.add_argument("repo"); p.add_argument("pr", type=int); p.set_defaults(fn=cmd_merge)
     p = sp.add_parser("merge-wait"); p.add_argument("repo"); p.add_argument("pr", type=int)
-    p.add_argument("--timeout", type=int, default=1500); p.add_argument("--interval", type=int, default=20); p.set_defaults(fn=cmd_merge_wait)
+    p.add_argument("--timeout", type=int, default=540); p.add_argument("--interval", type=int, default=20); p.set_defaults(fn=cmd_merge_wait)
 
     a = ap.parse_args()
     a.fn(a)

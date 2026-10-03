@@ -74,9 +74,19 @@ class TestSetup(Base):
         self.assertEqual(colors["🎉 Done"], "GREEN")
         fnames = {f["name"] for f in self.read_db()["fields"]}
         self.assertTrue({"Waiting On", "Plan", "PR", "Repo"} <= fnames)
-        # Todo/Done kept, "In Progress" and the unset draft fall to Todo
-        self.assertEqual(res["itemsRemapped"], {"todo": 3, "done": 1})
+        # Todo/Done keep their option ids; "In Progress" and the unset draft fall to Todo
+        self.assertEqual(res["itemsRemapped"], {"todo": 2, "done": 0})
         self.assertEqual(res["repos"], {"acme/app": None})
+
+    def test_matching_statuses_survive_and_closed_goes_done(self):
+        d = self.read_db()
+        d["items"][1]["content"]["state"] = "CLOSED"  # i2 was "In Progress" but is closed
+        self.write_db(d)
+        res = self.setup_board()
+        self.assertEqual(res["itemsRemapped"], {"todo": 1, "done": 1})
+        cols = {i["item"]: i["column"] for i in self.cgp("list")["items"]}
+        self.assertEqual(cols["i1"], "todo")
+        self.assertEqual(cols["i3"], "done")
 
     def test_idempotent_keeps_ids(self):
         self.setup_board()
@@ -182,6 +192,44 @@ class TestQuestions(Base):
         self.write_db(d)
         fb = self.cgp("feedback", "i1")
         self.assertEqual([f["body"] for f in fb], ["please add tests"])
+
+
+class TestRobustness(Base):
+    def test_answered_survives_repeated_list(self):
+        self.setup_board()
+        self.cgp("ask", "i1", input="q")
+        d = self.read_db()
+        d["comments"]["acme/app#1"].append({"body": "a", "created_at": "2026-01-01T00:01:00Z",
+                                            "user": {"login": "k", "type": "User"}})
+        self.write_db(d)
+        self.cgp("list")
+        again = next(i for i in self.cgp("list")["items"] if i["item"] == "i1")
+        self.assertTrue(again["answered"])
+        self.cgp("move", "i1", "plan")
+        again = next(i for i in self.cgp("list")["items"] if i["item"] == "i1")
+        self.assertNotIn("answered", again)
+
+    def test_feedback_arriving_mid_run_is_not_lost(self):
+        self.setup_board()
+        d = self.read_db()
+        d["comments"]["acme/app#1"] = [{"body": "start", "created_at": "2026-01-01T00:00:00Z",
+                                        "user": {"login": "k", "type": "User"}}]
+        self.write_db(d)
+        self.assertEqual(len(self.cgp("feedback", "i1")), 1)
+        d = self.read_db()  # human writes while the worker is busy, then the worker posts its status
+        d["comments"]["acme/app#1"].append({"body": "also fix X", "created_at": "2026-01-01T00:00:30Z",
+                                            "user": {"login": "k", "type": "User"}})
+        self.write_db(d)
+        self.cgp("comment", "i1", input="done")
+        self.assertEqual([f["body"] for f in self.cgp("feedback", "i1")], ["also fix X"])
+
+    def test_paginated_json_with_bracket_pairs_in_bodies(self):
+        import importlib.machinery, types
+        m = importlib.machinery.SourceFileLoader("cgp_mod", CGP).load_module()
+        page1 = json.dumps([{"body": "see [a][b] ok"}])
+        page2 = json.dumps([{"body": "x"}])
+        m.gh = lambda *a, **k: types.SimpleNamespace(stdout=page1 + page2)
+        self.assertEqual([c["body"] for c in m.rest("repos/x/y/issues/1/comments")], ["see [a][b] ok", "x"])
 
 
 class TestWorkers(Base):

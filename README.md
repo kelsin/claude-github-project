@@ -58,7 +58,7 @@ Workers rate each story low / medium / high on complexity and risk (auth, migrat
 
 ## The mod
 
-Installing the plugin adds a band above the prompt while a loop is running (it hides itself when `state.json` has not been refreshed for 15 minutes):
+Installing the plugin adds a band above the prompt while a loop is running (it hides itself when no worker is active and `state.json` has not been refreshed for 15 minutes):
 
 ```
 📋 My Board  🙋 Plan Approval: 2  🚦 PR Approval: 1  ❓ Waiting on you: 1
@@ -85,7 +85,7 @@ Settings: `scripts/cgp config concurrency 3` (parallel workers, default 5), `scr
 
 ```bash
 python3 -m unittest discover -s tests          # CLI against a fake gh
-claude plugin validate .                       # plugin + mod (use a build that knows mods)
+claude plugin test .                           # mod tests (hooks/*.test.ts); needs a Claude Code build that knows mods
 ```
 
 Not covered by tests: the real GitHub GraphQL schema and a live agent run. Test against a throwaway board first.

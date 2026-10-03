@@ -32,11 +32,12 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
    - After all workers return: `CGP worker clear`, then go straight to the next cycle. A story's new column is handled by the next cycle, not by the same worker.
    - Print one line per story: `<emoji> <title>: <outcome>`.
 4. `status: "idle"` (nothing an agent can do: every remaining story is in Plan Approval or PR Approval or waiting on the user's answer):
-   - If the set of waiting stories changed since the last idle report, print one short list: stories in `waitingOnYou` with their links, and the Plan Approval / PR Approval counts.
+   - If the set of waiting stories changed since the last idle report, print one short list: stories in `waitingOnYou` (title and url only) and the Plan Approval / PR Approval counts.
    - `CGP wait --timeout 540` via Bash (set the Bash timeout to 560000). It polls the board every `pollSeconds` and returns as soon as a story becomes actionable (the user answered, approved, or moved something), all stories are Done, or the timeout passes. Then start the next cycle. Do not sleep any other way.
 
 ## Rules
 
 - The user decides the Plan Approval and PR Approval columns. Never move a story out of them or work on them.
-- A worker failure (agent error, crash) must not end the loop: note it in one line, leave the story where it is, and continue. If the same story fails 3 cycles in a row, run `CGP ask <item>` with the error summary so it waits on the user.
+- A worker failure (agent error, crash) must not end the loop: note it in one line, leave the story where it is, and continue.
+- Track `(item, column)` after each cycle. If a story is still in the same column after 3 consecutive cycles of being worked (crashes or no progress), run `CGP ask <item>` with a short summary so it waits on the user instead of spinning. Keep the per-cycle output short; the loop may run for days.
 - Do not do story work yourself; you only dispatch, wait and report.

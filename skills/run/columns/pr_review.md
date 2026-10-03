@@ -1,6 +1,6 @@
 # Column: PR Review
 
-1. Rule 1. `CGP worktree <item>` (so fixes can be pushed) and read the diff with `gh pr diff <pr> -R <repo>`.
+1. Rule 1. `CGP worktree <item>` (so fixes can be pushed) and size the change with `gh pr diff <pr> -R <repo> --stat` (reviewers read the full diff themselves).
 2. Rate the story (rule 4) and spawn reviewers by that rating, each with a distinct lens (correctness, security, tests, simplicity and reuse, performance, compatibility). They read the diff and the surrounding code and return concrete findings: severity, file:line, fix. They do not post to GitHub.
 3. When all reviewers are done, fix every accepted finding at once: spawn separate fix agents (disjoint files in parallel), commit, push. Include any human feedback from rule 1. Rejected findings need a one-line reason in your status comment.
 4. High risk only: spawn one more reviewer after the fixes to confirm none of the findings remain and nothing new broke.

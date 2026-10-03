@@ -32,18 +32,20 @@ export const register: Register = on => {
       try {
         const st = JSON.parse(await $.fs.read(file))
         const age = (await $.clock.now()) - Date.parse(st.updatedAt ?? '')
-        if (st.board && age < FRESH_MS) {
+        const workers = Array.isArray(st.workers) ? st.workers : []
+        // workers can run for a long time between board polls: keep showing while any is active
+        if (st.board && (workers.length > 0 || age < FRESH_MS)) {
           fresh = {
-            title: st.board.title,
-            url: st.board.url,
-            planApproval: st.counts?.plan_approval ?? 0,
-            prApproval: st.counts?.pr_approval ?? 0,
-            waiting: st.waiting ?? [],
-            workers: st.workers ?? [],
+            title: String(st.board.title ?? 'Project board'),
+            url: /^https:\/\/[\x21-\x7e]{1,2040}$/.test(st.board.url ?? '') && !st.board.url.includes('@') ? st.board.url : null,
+            planApproval: Number(st.counts?.plan_approval) || 0,
+            prApproval: Number(st.counts?.pr_approval) || 0,
+            waiting: Array.isArray(st.waiting) ? st.waiting : [],
+            workers,
           }
         }
       } catch {
-        // no state yet, or mid-write: keep the band hidden until the next poll
+        return // no state yet, or unreadable: keep what is shown until the next poll
       }
       if (JSON.stringify(fresh) !== JSON.stringify(await read($, view))) {
         await update($, view, () => fresh)
@@ -69,7 +71,7 @@ export const register: Register = on => {
       <Box flexDirection="column">
         <Box>
           <Text bold>📋 </Text>
-          <Link href={v.url} label={v.title} />
+          {v.url ? <Link href={v.url} label={v.title} /> : <Text>{v.title}</Text>}
           <Text>
             {'  '}
             {EMOJI.plan_approval} Plan Approval: {v.planApproval}
@@ -78,9 +80,9 @@ export const register: Register = on => {
             {v.waiting.length > 0 ? `  ❓ Waiting on you: ${v.waiting.length}` : ''}
           </Text>
         </Box>
-        {shown.map(w => (
-          <Text key={w.item} dimColor>
-            {EMOJI[w.column] ?? '•'} {w.title}
+        {shown.map((w, i) => (
+          <Text key={`${w.item}:${i}`} dimColor>
+            {EMOJI[w.column] ?? '•'} {w.title ?? ''}
           </Text>
         ))}
         {v.workers.length > shown.length && (

@@ -36,7 +36,7 @@ elif args[:2] == ["api", "graphql"]:
     q, v = body["query"], body["variables"]
     if "updateProjectV2Field(" in q:
         f = field("Status")
-        f["options"] = [{"id": f"new{i}", "name": o["name"], "color": o["color"]} for i, o in enumerate(v["o"])]
+        f["options"] = [{"id": o.get("id", f"new{i}"), "name": o["name"], "color": o["color"]} for i, o in enumerate(v["o"])]
         r = {"updateProjectV2Field": {"projectV2Field": {"id": f["id"], "options": f["options"]}}}
     elif "createProjectV2Field" in q:
         f = {"id": f"F_{v['n']}", "name": v["n"], "dataType": v["t"],
@@ -63,6 +63,9 @@ elif args[:2] == ["api", "graphql"]:
              "repositories": {"nodes": [{"nameWithOwner": "acme/app"}]},
              "fields": {"nodes": [dict({"__typename": "x"}, **f) for f in db["fields"]]}}
         r = {"organization": {"projectV2": p}}
+    elif "isArchived" in q and "node(id:$i)" in q:
+        it = next(i for i in db["items"] if i["id"] == v["i"])
+        r = {"node": {"id": it["id"], "isArchived": False, "content": it["content"], "fieldValues": values(it)}}
     elif "node(id:$i)" in q:
         it = next(i for i in db["items"] if i["id"] == v["i"])
         r = {"node": {"content": it["content"]}}

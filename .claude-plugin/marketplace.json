@@ -1,6 +1,7 @@
 {
   "name": "claude-github-project",
   "owner": { "name": "kelsin" },
+  "description": "Agent pipeline for GitHub Project boards",
   "plugins": [
     {
       "name": "cgp",
