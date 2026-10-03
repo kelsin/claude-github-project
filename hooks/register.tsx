@@ -20,6 +20,9 @@ const POLL_MS = 3000
 const FRESH_MS = 15 * 60 * 1000
 const MAX_ROWS = 8
 
+// Titles come from GitHub issues anyone may write: drop control characters before drawing them.
+const clean = (s: unknown) => String(s ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+
 const view = atom({ plugin: 'cgp', key: 'view' } as const, null)
 
 export const register: Register = on => {
@@ -36,8 +39,8 @@ export const register: Register = on => {
         // workers can run for a long time between board polls: keep showing while any is active
         if (st.board && (workers.length > 0 || age < FRESH_MS)) {
           fresh = {
-            title: String(st.board.title ?? 'Project board'),
-            url: /^https:\/\/[\x21-\x7e]{1,2040}$/.test(st.board.url ?? '') && !st.board.url.includes('@') ? st.board.url : null,
+            title: clean(st.board.title ?? 'Project board'),
+            url: /^https:\/\/github\.com\/[\x21-\x7e]{1,2000}$/.test(st.board.url ?? '') && !st.board.url.includes('@') ? st.board.url : null,
             planApproval: Number(st.counts?.plan_approval) || 0,
             prApproval: Number(st.counts?.pr_approval) || 0,
             waiting: Array.isArray(st.waiting) ? st.waiting : [],
@@ -84,7 +87,7 @@ export const register: Register = on => {
         </Box>
         {shown.map((w, i) => (
           <Text key={`${w.item}:${i}`} dimColor>
-            {EMOJI[w.column] ?? '•'} {w.title ?? ''}
+            {EMOJI[w.column] ?? '•'} {clean(w.title)}
           </Text>
         ))}
         {v.workers.length > shown.length && (

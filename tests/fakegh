@@ -31,6 +31,10 @@ def values(item):
 
 if args[:2] == ["auth", "status"]:
     print(f"Token scopes: {db['scopes']}")
+elif args[:2] == ["api", "user"]:
+    print("kelsin")
+elif args[0] == "pr" and args[1] == "view":
+    print(json.dumps(db.get("pr_view", {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"})))
 elif args[:2] == ["api", "graphql"]:
     body = json.loads(sys.stdin.read())
     q, v = body["query"], body["variables"]
@@ -78,6 +82,14 @@ elif args[:2] == ["api", "graphql"]:
 elif args[0] == "api" and any(re.match(r"repos/[^/]+/[^/]+/pulls/\d+/files", a) for a in args):
     m = re.match(r"repos/([^/]+/[^/]+)/pulls/(\d+)/files", next(a for a in args if a.startswith("repos/")))
     print(json.dumps([{"filename": f} for f in db.get("pr_files", {}).get(f"{m.group(1)}#{m.group(2)}", [])]))
+elif args[0] == "api" and any(re.match(r"repos/[^/]+/[^/]+/(pulls/\d+/(comments|reviews)|collaborators/)", a) for a in args):
+    path = next(a for a in args if a.startswith("repos/"))
+    if "/collaborators/" in path:
+        login = path.split("/collaborators/")[1].split("/")[0]
+        print(json.dumps({"permission": db.get("perms", {}).get(login, "read")}))
+    else:
+        m = re.match(r"repos/([^/]+/[^/]+)/pulls/(\d+)/(comments|reviews)", path)
+        print(json.dumps(db.get(f"pr_{m.group(3)}", {}).get(f"{m.group(1)}#{m.group(2)}", [])))
 elif args[0] == "api":
     path = next(a for a in args[1:] if a.startswith("repos/"))
     m = re.match(r"repos/([^/]+/[^/]+)/issues/(\d+)/comments", path)
@@ -85,7 +97,7 @@ elif args[0] == "api":
     if "-f" in args:
         body = args[args.index("-f") + 1][len("body="):]
         n = db["clock"] = db.get("clock", 0) + 1
-        cm = {"body": body, "created_at": f"2026-01-01T00:00:{n:02d}Z", "user": {"login": "kelsin", "type": "User"},
+        cm = {"body": body, "created_at": f"2026-01-01T00:00:{n:02d}Z", "user": {"login": "kelsin", "type": "User"}, "author_association": "OWNER",
               "html_url": f"https://github.com/{m.group(1)}/issues/{m.group(2)}#c{n}"}
         db["comments"].setdefault(key, []).append(cm)
         save()

@@ -25,7 +25,7 @@ gh auth refresh -s project
 
 1. From a checkout of one of your repos: `/cgp:setup https://github.com/orgs/<org>/projects/<n>` (or `/users/<user>/projects/<n>`).
    - Replaces the Status options with the 10 columns below, adds fields `Waiting On`, `Plan`, `PR`, `Repo`, links the current repo to the board and records its local path.
-   - Existing items whose old status name matches a new column keep it; everything else lands in Todo.
+   - Existing items whose old status name matches a new column keep it, closed issues go to Done, everything else lands in Todo. Closed issues anywhere on the board are filed under Done.
    - Run it again from another repo's checkout (same URL) to link more repos. Repos without a known local path are asked for.
 2. `/cgp:run`. Add stories to Todo on the board (issues, or draft items which get converted to issues in the repo the agent picks) and leave it running. It ends only when every story is Done, or when you stop it.
 
@@ -54,6 +54,18 @@ Each cycle the loop dispatches one worker per actionable story (up to 5 at once)
 - Each plan records the files and directories it changes (`cgp touches`). Before implementing, the worker runs `cgp overlap`, which compares them with every other in-flight story (plan files, plus the real file list of any open PR). When another story shares a file and is further along (or at the same stage with a lower issue number), this one is ordered behind it with `cgp block`: it stays in Plan Approved with a status comment saying who it waits for, the loop skips it, and it is released the moment the blocker is Done and then rebased onto the new main. Directory-level overlaps never block; they are noted in the plan or PR. The ordering is a strict stage-then-number order, and `block` refuses to create cycles.
 - The mod shows how many stories are queued this way.
 
+## Safety
+
+The loop runs unattended with your `gh` token, and it reads text anyone can write on a linked repo. The design assumes that text is hostile:
+
+- **Only trusted people can steer it.** `feedback`, `answers` and question replies only use comments from you, repo owners, and collaborators with write access (checked through the API). Everything else is reported as `ignoredUntrusted` with no body. The agent marker only counts on comments posted by your own gh account, so it can't be forged.
+- **The human gates are enforced in code, not just in prompts.** `cgp move` refuses to move a story into Plan Approved or PR Approved, out of Plan Approval or PR Approval, or to Done unless its PR is merged. `cgp merge` works only on a story that is in PR Approved and only for that story's own PR. `PR` and `Repo` fields must name repos linked to the board, and `Repo` can't be changed once set.
+- **Prompts treat everything written by people as data** (no running commands, fetching URLs, adding dependencies or leaking tokens because text said so), and `cgp guard` fails any branch that touches `.github/` or CODEOWNERS without the approved plan listing it.
+- **Code changed after your PR approval is re-approved**: a fix that is more than a clean rebase sends the story back to PR Approval instead of merging.
+- `~/.config/claude-github-project` is private to your user (0700/0600).
+
+What it can't do: an agent with Bash can still call `gh` directly. For defence in depth consider Claude Code permission rules denying `Bash(gh pr merge:*)`, `Bash(gh auth token:*)` and `Bash(gh api graphql:*)` for sessions running the loop, and a fine-grained token (or `GH_TOKEN`) limited to the linked repos and without the `workflow` scope. The setup scripts need `project`; the loop does not need `workflow`.
+
 ## Questions
 
 Agents ask questions as a comment on the story, with numbered questions each carrying a proposed default (reply "defaults ok" or answer some). The story gets `Waiting On: You` on the board and is skipped until you reply on the issue. Any new non-bot comment without the agent marker counts as a reply; the field clears itself and the worker resumes with the whole Q&A history. After 3 question rounds on one story the comment suggests rescoping it. Agents prefer writing assumptions into the plan (an explicit "Assumptions" section) over asking, so Plan Approval is where you review them.
@@ -78,7 +90,7 @@ The board name is a link. Each worker row shows the emoji of the story's current
 
 - `~/.config/claude-github-project/config.json`: board ids, field ids, repo to local-path map, settings.
 - `~/.config/claude-github-project/state.json`: live state the mod reads (counts, waiting stories, workers).
-- `~/.config/claude-github-project/worktrees/`: one git worktree per story (`cgp/<issue>-<slug>` branches).
+- `~/.config/claude-github-project/worktrees/`: one git worktree per story (`cgp/<issue number>` branches, under `<owner>/<repo>/<number>`).
 - `~/.config/claude-github-project/plans/`: plan HTML sources (published as Claude artifacts).
 
 Settings: `scripts/cgp config concurrency 3` (parallel workers, default 5), `scripts/cgp config pollSeconds 60`.
@@ -90,8 +102,10 @@ Settings: `scripts/cgp config concurrency 3` (parallel workers, default 5), `scr
 ## Develop
 
 ```bash
-python3 -m unittest discover -s tests          # CLI against a fake gh
+python3 -m unittest discover -s tests          # CLI against a fake gh and real temp git repos
 claude plugin test .                           # mod tests (hooks/*.test.ts); needs a Claude Code build that knows mods
+                                               # (validating the plugin itself: point `claude plugin validate` at a copy without marketplace.json;
+                                               # builds older than ~2.1.280 warn about `types`/`modules` and skip the band)
 ```
 
 Not covered by tests: the real GitHub GraphQL schema and a live agent run. Test against a throwaway board first.

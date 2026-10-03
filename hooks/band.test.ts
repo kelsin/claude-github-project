@@ -25,6 +25,7 @@ const cases: [string, string, string[], string[]][] = [
   ['bad json', '{"board":', ['HIDDEN'], ['My Board']],
   ['unlinkable url', state({ board: { title: 'My Board', url: 'https://github.com/users/kélsin/p' } }), ['My Board', 'Story A'], ['HIDDEN']],
   ['blocked count', state({ blockedCount: 2 }), ['Queued behind another story: 2'], ['HIDDEN']],
+  ['control characters in titles are stripped', state({ workers: [{ item: 'a', column: 'plan', title: 'Evil\x1b]52;c;x\x07 Title' }] }), ['Evil]52;c;x Title'], ['\x1b']],
   ['waiting count', state({ waiting: [{ title: 't', url: null, column: 'plan' }] }), ['Waiting on you: 1'], ['HIDDEN']],
 ]
 

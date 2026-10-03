@@ -101,17 +101,22 @@ def load_json(path, default):
         return default
 
 
+def ensure_home():
+    os.makedirs(HOME, mode=0o700, exist_ok=True)
+    os.chmod(HOME, 0o700)
+
+
 def save_json(path, obj):
-    os.makedirs(HOME, exist_ok=True)
+    ensure_home()
     tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w") as f:
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
     os.replace(tmp, path)
 
 
 class locked:
     def __enter__(self):
-        os.makedirs(HOME, exist_ok=True)
+        ensure_home()
         self.f = open(os.path.join(HOME, ".lock"), "w")
         fcntl.flock(self.f, fcntl.LOCK_EX)
 
@@ -237,6 +242,7 @@ def parse_item(raw, c):
         "number": content.get("number"),
         "issueRepo": issue_repo,
         "repo": text("Repo") or issue_repo,
+        "repoSet": bool(text("Repo")),
         "column": column or "todo",
         "unset": column is None,
         "plan": text("Plan"),
@@ -279,12 +285,42 @@ def item_issue(item):
     return content["repository"]["nameWithOwner"], content["number"], content["title"]
 
 
+_cache = {}
+
+
+def viewer():
+    if "viewer" not in _cache:
+        _cache["viewer"] = gh("api", "user", "-q", ".login").stdout.strip()
+    return _cache["viewer"]
+
+
 def is_bot(comment):
     return (comment.get("user") or {}).get("type") == "Bot"
 
 
 def is_agent(comment):
-    return MARK[:8] in (comment.get("body") or "")  # "<!-- cgp"
+    """An agent comment carries the marker AND was posted by this gh account (anyone can type the marker)."""
+    return MARK[:8] in (comment.get("body") or "") and (comment.get("user") or {}).get("login") == viewer()
+
+
+def trusted(repo, comment):
+    """Only the gh account itself, repo owners and collaborators with write access may give instructions."""
+    login = (comment.get("user") or {}).get("login")
+    assoc = comment.get("author_association")
+    if not login:
+        return False
+    if login == viewer() or assoc == "OWNER":
+        return True
+    if assoc not in ("MEMBER", "COLLABORATOR"):
+        return False
+    key = ("perm", repo, login)
+    if key not in _cache:
+        p = gh("api", f"repos/{repo}/collaborators/{login}/permission", check=False)
+        try:
+            _cache[key] = p.returncode == 0 and json.loads(p.stdout).get("permission") in ("admin", "maintain", "write")
+        except json.JSONDecodeError:
+            _cache[key] = False
+    return _cache[key]
 
 
 def post_comment(repo, number, body):
@@ -292,21 +328,38 @@ def post_comment(repo, number, body):
     return json.loads(p.stdout)
 
 
-def parse_pr_ref(c_item_pr):
-    m = re.search(r"github\.com/([^/]+/[^/]+)/pull/(\d+)", c_item_pr or "")
-    return (m.group(1), int(m.group(2))) if m else None
+PR_URL = re.compile(r"^https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pull/(\d+)/?$")
+
+
+def known_repo(c, repo):
+    return next((r for r in c["repos"] if r.lower() == (repo or "").lower()), None)
+
+
+def parse_pr_ref(c, url):
+    """(repo, number) for a PR URL on one of the board's linked repos, else None."""
+    m = PR_URL.match((url or "").strip())
+    repo = known_repo(c, m.group(1)) if m else None
+    return (repo, int(m.group(2))) if repo else None
+
+
+def require_repo(c, repo):
+    r = known_repo(c, repo)
+    if not r:
+        die(f"{repo} is not a repo linked to this board (see: cgp repos)")
+    return r
 
 
 def list_replies_since(repo, number, marker_ids):
-    """Human comments posted after the newest agent comment containing a marker."""
+    """Trusted human comments posted after the newest agent comment containing a marker."""
     comments = rest(f"repos/{repo}/issues/{number}/comments")
     last = None
     for cm in comments:
-        if any(m in (cm.get("body") or "") for m in marker_ids):
+        if any(m in (cm.get("body") or "") for m in marker_ids) and is_agent(cm):
             last = cm["created_at"]
     if last is None:
         return [], None
-    return [cm for cm in comments if cm["created_at"] > last and not is_agent(cm) and not is_bot(cm)], last
+    return [cm for cm in comments if cm["created_at"] > last and not is_agent(cm) and not is_bot(cm)
+            and trusted(repo, cm)], last
 
 
 # ----------------------------------------------------------------- commands
@@ -452,6 +505,17 @@ def process_replies(c, items):
             update_state(lambda st, i=it["item"]: st.setdefault("answered", []).append(i))
 
 
+def cleanup_worktree(c, it):
+    try:
+        wt = wt_path(it)
+        if os.path.isdir(wt):
+            base = resolve_repo_path(c, it["repo"])
+            git(base, "worktree", "remove", "--force", wt, check=False)
+            git(base, "branch", "-D", f"cgp/{it['number']}", check=False)
+    except SystemExit:
+        pass
+
+
 def snapshot(c):
     items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
     items = [i for i in items if not i["archived"] and i["kind"] in ("issue", "draft")]
@@ -460,18 +524,22 @@ def snapshot(c):
     for i in items:
         if i["item"] in answered:
             i["answered"] = True
-    for i in items:  # a merged PR closes its issue: finish stories whose worker died before moving them
-        if i["closed"] and i["column"] == "pr_approved":
+    for i in items:  # closed issues (merged PR, or closed by hand) are finished: file them under Done
+        if i["closed"] and i["column"] != "done" and i["kind"] == "issue":
             set_single(c, i["item"], c["fields"]["status"]["id"], c["fields"]["status"]["options"]["done"])
             i["column"] = "done"
-    items = [i for i in items if not (i["closed"] and i["column"] != "done")]
+            cleanup_worktree(c, i)
     live = [i for i in items if i["column"] != "done"]
     counts = {k: sum(1 for i in items if i["column"] == k) for k in KEYS}
-    blocks = load_json(STATE, {}).get("blocks", {})
-    live_ids = {i["item"] for i in live}
-    titles = {i["item"]: i["title"] for i in live}
+    by_id = {i["item"]: i for i in live}
+    # a block holds only while the blocker is live and still ahead of the blocked story
+    blocks = {k: [b for b in v if b in by_id and rank(by_id[b]) > rank(by_id[k])]
+              for k, v in load_json(STATE, {}).get("blocks", {}).items() if k in by_id}
+    live_ids = set(by_id)
     for i in live:
-        i["blockedBy"] = [titles[b] for b in blocks.get(i["item"], []) if b in live_ids]
+        i["blockedBy"] = [by_id[b]["title"] for b in blocks.get(i["item"], [])]
+        i["blockers"] = [{"title": by_id[b]["title"], "column": by_id[b]["column"], "waiting": by_id[b]["waiting"]}
+                         for b in blocks.get(i["item"], [])]
     blocked = [i for i in live if i["blockedBy"] and i["column"] == "plan_approved"]
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and i not in blocked]
     actionable.sort(key=lambda i: ACTIONABLE.index(i["column"]))
@@ -485,7 +553,7 @@ def snapshot(c):
         "batch": actionable[: c["settings"]["concurrency"]],
         "actionableTotal": len(actionable),
         "waitingOnYou": waiting,
-        "blocked": [{"title": i["title"], "blockedBy": i["blockedBy"]} for i in blocked],
+        "blocked": [{"title": i["title"], "blockedBy": i["blockedBy"], "blockers": i["blockers"]} for i in blocked],
         "items": items,
     }
 
@@ -494,7 +562,7 @@ def snapshot(c):
         st["counts"] = counts
         st["waiting"] = [{"title": i["title"], "url": i["url"], "column": i["column"]} for i in waiting]
         st["blockedCount"] = len(blocked)
-        st["blocks"] = {k: [b for b in v if b in live_ids] for k, v in st.get("blocks", {}).items() if k in live_ids}
+        st["blocks"] = {k: v for k, v in blocks.items() if v}
         st["touches"] = {k: v for k, v in st.get("touches", {}).items() if k in live_ids}
         st["updatedAt"] = now_iso()
     update_state(upd)
@@ -524,6 +592,15 @@ def cmd_move(a):
     c = cfg()
     if a.column not in KEYS:
         die(f"column must be one of {KEYS}")
+    it = get_item(c, a.item)
+    if a.column in ("plan_approved", "pr_approved"):
+        die(f"only the user moves stories into {a.column}; it is a human approval")
+    if it["column"] in ("plan_approval", "pr_approval"):
+        die(f"story is in {it['column']}: only the user moves it out")
+    if a.column == "done":
+        ref = parse_pr_ref(c, it["pr"])
+        if it["column"] != "pr_approved" or not ref or pr_view(*ref)["state"] != "MERGED":
+            die("a story reaches Done only from pr_approved, after its PR merged")
     set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
 
     def upd(st):
@@ -540,8 +617,16 @@ def cmd_set(a):
     key = a.field.lower()
     if key not in TEXT_FIELDS:
         die(f"field must be one of {list(TEXT_FIELDS)}")
-    set_text(c, a.item, c["fields"][key], a.value)
-    out({"item": a.item, a.field: a.value or None})
+    value = a.value
+    if key == "pr" and value and not parse_pr_ref(c, value):
+        die("PR must be https://github.com/<linked repo>/pull/<n> on a repo linked to this board")
+    if key == "repo":
+        value = require_repo(c, value)
+        cur = get_item(c, a.item)
+        if cur["repoSet"] and cur["repo"].lower() != value.lower():
+            die(f"Repo is already {cur['repo']}; only the user changes it")
+    set_text(c, a.item, c["fields"][key], value)
+    out({"item": a.item, a.field: value or None})
 
 
 def read_body():
@@ -557,17 +642,16 @@ def cmd_comment(a):
     body = read_body()
     target_repo, target = repo, number
     if a.pr:
-        ref = parse_pr_ref(get_item(c, a.item)["pr"])
+        ref = parse_pr_ref(c, get_item(c, a.item)["pr"])
         if not ref:
-            die("story has no PR field set")
+            die("story has no valid PR field set")
         target_repo, target = ref
     cm = post_comment(target_repo, target, f"{MARK}\n{body}")
 
     def commit(st):  # feedback read earlier in this run is now handled
         if a.item in st.get("pending", {}):
             st.setdefault("cursors", {})[a.item] = st["pending"].pop(a.item)
-    if not a.pr:
-        update_state(commit)
+    update_state(commit)
     out({"url": cm["html_url"]})
 
 
@@ -580,6 +664,11 @@ def cmd_ask(a):
         body += "\n\n_This story has needed several rounds of questions; consider rescoping or splitting it._"
     cm = post_comment(repo, number, f"{QMARK}\n{MARK}\n❓ **Question for you** (reply here; work resumes automatically)\n\n{body}")
     set_single(c, a.item, c["fields"]["waiting"]["id"], c["fields"]["waiting"]["you"])
+
+    def commit(st):
+        if a.item in st.get("pending", {}):
+            st.setdefault("cursors", {})[a.item] = st["pending"].pop(a.item)
+    update_state(commit)
     out({"url": cm["html_url"], "round": rounds + 1})
 
 
@@ -587,8 +676,13 @@ def cmd_answers(a):
     """Q&A history for a story: every question and the human replies after it."""
     repo, number, _ = item_issue(a.item)
     comments = rest(f"repos/{repo}/issues/{number}/comments")
-    thread = [{"who": "agent" if is_agent(cm) else "human", "at": cm["created_at"], "body": cm["body"].replace(QMARK, "").replace(MARK, "").strip()}
-              for cm in comments if not is_bot(cm)]
+    thread = []
+    for cm in comments:
+        if is_bot(cm):
+            continue
+        who = "agent" if is_agent(cm) else "human" if trusted(repo, cm) else "untrusted"
+        thread.append({"who": who, "at": cm["created_at"],
+                       "body": None if who == "untrusted" else cm["body"].replace(QMARK, "").replace(MARK, "").strip()})
     out(thread)
 
 
@@ -596,7 +690,7 @@ def cmd_feedback(a):
     c = cfg()
     repo, number, _ = item_issue(a.item)
     it = get_item(c, a.item)
-    ref = parse_pr_ref(it["pr"])
+    ref = parse_pr_ref(c, it["pr"])
     issue_comments = rest(f"repos/{repo}/issues/{number}/comments")
     sources = [("issue", issue_comments)]
     if ref:
@@ -616,11 +710,18 @@ def cmd_feedback(a):
     def pend(st):
         st.setdefault("pending", {})[a.item] = max(seen, cursor)
     update_state(pend)
-    found = [{"where": w, "author": (cm.get("user") or {}).get("login"), "at": cm["created_at"],
-              "url": cm.get("html_url"), "path": cm.get("path"), "body": cm.get("body")}
-             for w, cms in sources for cm in cms
-             if cm["created_at"] > cursor and not is_agent(cm) and not is_bot(cm)]
-    out(sorted(found, key=lambda f: f["at"]))
+    found, ignored = [], []
+    for w, cms in sources:
+        for cm in cms:
+            if cm["created_at"] <= cursor or is_agent(cm) or is_bot(cm):
+                continue
+            row = {"where": w, "author": (cm.get("user") or {}).get("login"), "at": cm["created_at"],
+                   "url": cm.get("html_url"), "path": cm.get("path")}
+            if trusted(repo if w == "issue" else ref[0], cm):
+                found.append({**row, "body": cm.get("body")})
+            else:
+                ignored.append(row)  # no body: text from people without write access is never shown to agents
+    out({"comments": sorted(found, key=lambda f: f["at"]), "ignoredUntrusted": ignored})
 
 
 def cmd_adopt(a):
@@ -670,7 +771,28 @@ def git(path, *args, check=True):
 
 
 def wt_path(it):
-    return os.path.join(HOME, "worktrees", f"{it['issueRepo'].replace('/', '-')}-{it['number']}")
+    owner, name = it["issueRepo"].split("/")
+    return os.path.join(HOME, "worktrees", owner, name, str(it["number"]))
+
+
+def fetch(path):
+    for attempt in range(3):  # concurrent workers fetching one repo can briefly lock each other out
+        p = subprocess.run(["git", "-C", path, "fetch", "origin", "--prune"], capture_output=True, text=True)
+        if p.returncode == 0:
+            return
+        time.sleep(2)
+    die(f"git fetch failed: {p.stderr.strip()}")
+
+
+def default_ref(path):
+    sym = lambda: git(path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False)
+    ref = sym()
+    if not ref:
+        git(path, "remote", "set-head", "origin", "--auto", check=False)
+        ref = sym()
+    if not ref:
+        die("cannot determine the default branch (origin/HEAD unset and remote unreachable)")
+    return ref
 
 
 def cmd_worktree(a):
@@ -682,9 +804,9 @@ def cmd_worktree(a):
     base = resolve_repo_path(c, repo)
     branch = f"cgp/{it['number']}"
     wt = wt_path(it)
-    git(base, "fetch", "origin", "--prune")
+    fetch(base)
     git(base, "worktree", "prune")
-    default = git(base, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "origin/main"
+    default = default_ref(base)
     if os.path.isdir(wt):
         out({"path": wt, "branch": git(wt, "branch", "--show-current"), "base": default, "repo": repo})
         return
@@ -698,38 +820,79 @@ def cmd_worktree(a):
     out({"path": wt, "branch": branch, "base": default, "repo": repo})
 
 
-def cmd_sync(a):
-    """Rebase the story's worktree onto the freshly fetched default branch.
+def rebase_in_progress(wt):
+    return any(os.path.isdir(os.path.join(wt, git(wt, "rev-parse", "--git-path", d)))
+               for d in ("rebase-merge", "rebase-apply"))
 
-    clean: already on top; rebased: moved (push with --force-with-lease if the branch is on the remote);
-    conflict: rebase left in progress, `files` lists unresolved paths to fix, git add, then
-    `GIT_EDITOR=true git rebase --continue`.
+
+def run_rebase(wt, target):
+    """None on success, else a result dict: conflict (rebase left in progress) or error."""
+    p = subprocess.run(["git", "-C", wt, "rebase", "--autostash", target], capture_output=True, text=True)
+    if p.returncode == 0:
+        return None
+    if rebase_in_progress(wt):
+        return {"state": "conflict", "files": git(wt, "diff", "--name-only", "--diff-filter=U", check=False).splitlines()}
+    return {"state": "error", "stderr": p.stderr.strip()}
+
+
+def cmd_sync(a):
+    """Bring the story's worktree up to date: first onto any commits others pushed to its own branch, then
+    onto the freshly fetched default branch.
+
+    clean: nothing to do; rebased: moved (push with --force-with-lease if the branch is on the remote);
+    conflict: rebase left in progress, `files` lists unresolved paths: fix, git add, then
+    `GIT_EDITOR=true git rebase --continue`, and run sync again; error: git refused (see `stderr`).
     """
+    c = cfg()
+    it = get_item(c, a.item)
+    if it["kind"] != "issue":
+        die("item is not an issue on this board")
+    wt = wt_path(it)
+    if not os.path.isdir(wt):
+        die("no worktree for this story; run: cgp worktree <item>")
+    fetch(wt)
+    default = default_ref(wt)
+    if rebase_in_progress(wt):
+        out({"state": "conflict", "base": default, "note": "an earlier rebase is still in progress",
+             "files": git(wt, "diff", "--name-only", "--diff-filter=U", check=False).splitlines()})
+        return
+    branch = git(wt, "branch", "--show-current")
+    if not branch:
+        die("worktree is on a detached HEAD; check out the story branch first")
+    moved = 0
+    remote = f"origin/{branch}"
+    if git(wt, "rev-parse", "--verify", remote, check=False):
+        ahead_of_us = int(git(wt, "rev-list", "--count", f"HEAD..{remote}") or 0)
+        if ahead_of_us:  # someone (e.g. a GitHub suggested change) pushed to the PR branch: keep their commits
+            res = run_rebase(wt, remote)
+            if res:
+                out({**res, "base": remote})
+                return
+            moved += ahead_of_us
+    behind = int(git(wt, "rev-list", "--count", f"HEAD..{default}") or 0)
+    if behind:
+        res = run_rebase(wt, default)
+        if res:
+            out({**res, "behind": behind, "base": default})
+            return
+        moved += behind
+    out({"state": "rebased" if moved else "clean", "behind": behind, "base": default})
+
+
+def cmd_guard(a):
+    """Refuse changes to CI/permission files that the approved plan does not list."""
     c = cfg()
     it = get_item(c, a.item)
     wt = wt_path(it)
     if not os.path.isdir(wt):
-        die("no worktree for this story; run: cgp worktree <item>")
-    git(wt, "fetch", "origin", "--prune")
-    default = git(wt, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "origin/main"
-
-    def unresolved():
-        return git(wt, "diff", "--name-only", "--diff-filter=U", check=False).splitlines()
-
-    in_progress = any(os.path.isdir(os.path.join(wt, git(wt, "rev-parse", "--git-path", d)))
-                      for d in ("rebase-merge", "rebase-apply"))
-    if in_progress:
-        out({"state": "conflict", "files": unresolved(), "base": default, "note": "an earlier rebase is still in progress"})
-        return
-    behind = int(git(wt, "rev-list", "--count", f"HEAD..{default}") or 0)
-    if behind == 0:
-        out({"state": "clean", "behind": 0, "base": default})
-        return
-    p = subprocess.run(["git", "-C", wt, "rebase", "--autostash", default], capture_output=True, text=True)
-    if p.returncode == 0:
-        out({"state": "rebased", "behind": behind, "base": default})
-    else:
-        out({"state": "conflict", "behind": behind, "files": unresolved(), "base": default})
+        die("no worktree for this story")
+    names = git(wt, "diff", "--name-only", f"{default_ref(wt)}...HEAD").splitlines()
+    allowed = [norm_path(t) for t in load_json(STATE, {}).get("touches", {}).get(a.item, [])]
+    bad = [n for n in names if (n.startswith(".github/") or os.path.basename(n) == "CODEOWNERS")
+           and not any(covers(t, n) for t in allowed)]
+    out({"ok": not bad, "violations": bad})
+    if bad:
+        sys.exit(4)
 
 
 # ------------------------------------------------- overlap and ordering
@@ -743,11 +906,12 @@ def covers(a, b):
     return a == b or (a.endswith("/") and b.startswith(a))
 
 
-def story_files(st, it):
+def story_files(c, st, it):
     files = set(norm_path(f) for f in st.get("touches", {}).get(it["item"], []))
-    ref = parse_pr_ref(it.get("pr"))
+    ref = parse_pr_ref(c, it.get("pr"))
     if ref:
-        files |= {f["filename"] for f in rest(f"repos/{ref[0]}/pulls/{ref[1]}/files")}
+        for f in rest(f"repos/{ref[0]}/pulls/{ref[1]}/files"):
+            files |= {f["filename"], f.get("previous_filename") or f["filename"]}
     return files
 
 
@@ -769,7 +933,7 @@ def would_cycle(blocks, item, other):
 
 def cmd_touches(a):
     if a.paths:
-        update_state(lambda st: st.setdefault("touches", {}).__setitem__(a.item, [norm_path(p) for p in a.paths]))
+        update_state(lambda st: st.setdefault("touches", {}).__setitem__(a.item, [norm_path(p) for p in a.paths if p.strip()]))
     out(load_json(STATE, {}).get("touches", {}).get(a.item, []))
 
 
@@ -777,24 +941,32 @@ def cmd_overlap(a):
     c = cfg()
     st = load_json(STATE, {})
     me = get_item(c, a.item)
-    mine = story_files(st, me)
+    mine = story_files(c, st, me)
     items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
     blocks = st.get("blocks", {})
-    found = []
+    found, unknown = [], []
     for o in items:
-        if o["item"] == a.item or o["kind"] != "issue" or o["closed"] or o["column"] in ("todo", "done"):
+        if (o["item"] == a.item or o["kind"] != "issue" or o["closed"] or o["archived"]
+                or o["column"] in ("todo", "done")):
             continue
-        theirs = story_files(st, o)
-        files = sorted(mine & theirs - {f for f in mine | theirs if f.endswith("/")})
-        areas = sorted({f"{f} ~ {g}" for f in mine for g in theirs if f != g and (covers(f, g) or covers(g, f))})
+        theirs = story_files(c, st, o)
+        if not theirs:
+            if KEYS.index(o["column"]) >= KEYS.index("plan_approved"):
+                unknown.append({"item": o["item"], "title": o["title"], "column": o["column"]})
+            continue
+        dirs = {f for f in mine | theirs if f.endswith("/")}
+        files = sorted((mine & theirs) - dirs)
+        areas = sorted({f"{f} ~ {g}" for f in mine for g in theirs if (f in dirs or g in dirs) and (covers(f, g) or covers(g, f))})
         if not files and not areas:
             continue
         found.append({"item": o["item"], "title": o["title"], "number": o["number"], "column": o["column"],
                       "pr": o["pr"], "files": files, "areas": areas, "ahead": rank(o) > rank(me),
                       "alreadyWaitsOnMe": a.item in blocks.get(o["item"], [])})
     block_on = [f["item"] for f in found if f["ahead"] and f["files"] and not f["alreadyWaitsOnMe"]]
+    suggest = ({"action": "declare", "why": "this story has no touches or PR yet: run `cgp touches` first"} if not mine
+               else {"action": "block", "on": block_on} if block_on else {"action": "proceed"})
     out({"story": {"item": a.item, "touches": sorted(mine)}, "overlaps": found,
-         "suggest": {"action": "block", "on": block_on} if block_on else {"action": "proceed"}})
+         "undeclared": unknown, "suggest": suggest})
 
 
 def cmd_block(a):
@@ -806,11 +978,9 @@ def cmd_block(a):
         return
     if not a.other:
         die("usage: cgp block <item> <other-item> | cgp block <item> --unblock")
-    st = load_json(STATE, {})
-    if would_cycle(st.get("blocks", {}), a.item, a.other):
-        die("refusing: that would create a dependency cycle")
-
     def add(st):
+        if would_cycle(st.get("blocks", {}), a.item, a.other):
+            die("refusing: that would create a dependency cycle (if the other story now ranks behind this one, run `cgp block <this> --unblock` and proceed)")
         lst = st.setdefault("blocks", {}).setdefault(a.item, [])
         if a.other not in lst:
             lst.append(a.other)
@@ -821,6 +991,8 @@ def cmd_block(a):
 def cmd_worktree_remove(a):
     c = cfg()
     it = get_item(c, a.item)
+    if it["kind"] != "issue":
+        die("item is not an issue on this board")
     wt = wt_path(it)
     if os.path.isdir(wt):
         base = resolve_repo_path(c, it["repo"])
@@ -854,6 +1026,7 @@ def failed_logs(repo, failed):
 
 
 def cmd_ci_wait(a):
+    a.repo = require_repo(cfg(), a.repo)
     deadline, none_since = time.time() + a.timeout, time.time()
     while True:
         checks = pr_checks(a.repo, a.pr)
@@ -884,15 +1057,27 @@ def cmd_ci_wait(a):
 
 def pr_view(repo, pr):
     p = gh("pr", "view", str(pr), "-R", repo, "--json",
-           "state,isDraft,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,url,mergedAt")
+           "state,isDraft,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,url,mergedAt,headRefOid")
     return json.loads(p.stdout)
 
 
 def cmd_pr_state(a):
-    out(pr_view(a.repo, a.pr))
+    out(pr_view(require_repo(cfg(), a.repo), a.pr))
+
+
+def merge_target(a):
+    """Merging is only ever done for the story's own PR, and only while the user has it in PR Approved."""
+    c = cfg()
+    it = get_item(c, a.item)
+    ref = parse_pr_ref(c, it["pr"])
+    if it["column"] != "pr_approved" or not ref:
+        die("refusing to merge: the story must be in pr_approved (set by the user) with a valid PR field")
+    a.repo, a.pr = ref
+    return a
 
 
 def cmd_merge(a):
+    a = merge_target(a)
     p = gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--auto", "--delete-branch", check=False)
     if p.returncode:
         p2 = gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--delete-branch", check=False)
@@ -903,6 +1088,7 @@ def cmd_merge(a):
 
 
 def cmd_merge_wait(a):
+    a = merge_target(a)
     deadline = time.time() + a.timeout
     while True:
         v = pr_view(a.repo, a.pr)
@@ -959,12 +1145,13 @@ def main():
     p = sp.add_parser("touches"); p.add_argument("item"); p.add_argument("paths", nargs="*"); p.set_defaults(fn=cmd_touches)
     p = sp.add_parser("overlap"); p.add_argument("item"); p.set_defaults(fn=cmd_overlap)
     p = sp.add_parser("block"); p.add_argument("item"); p.add_argument("other", nargs="?"); p.add_argument("--unblock", action="store_true"); p.set_defaults(fn=cmd_block)
+    p = sp.add_parser("guard"); p.add_argument("item"); p.set_defaults(fn=cmd_guard)
     p = sp.add_parser("ci-wait"); p.add_argument("repo"); p.add_argument("pr", type=int)
     p.add_argument("--timeout", type=int, default=540); p.add_argument("--interval", type=int, default=20)
     p.add_argument("--grace", type=int, default=120); p.set_defaults(fn=cmd_ci_wait)
     p = sp.add_parser("pr-state"); p.add_argument("repo"); p.add_argument("pr", type=int); p.set_defaults(fn=cmd_pr_state)
-    p = sp.add_parser("merge"); p.add_argument("repo"); p.add_argument("pr", type=int); p.set_defaults(fn=cmd_merge)
-    p = sp.add_parser("merge-wait"); p.add_argument("repo"); p.add_argument("pr", type=int)
+    p = sp.add_parser("merge"); p.add_argument("item"); p.set_defaults(fn=cmd_merge)
+    p = sp.add_parser("merge-wait"); p.add_argument("item")
     p.add_argument("--timeout", type=int, default=540); p.add_argument("--interval", type=int, default=20); p.set_defaults(fn=cmd_merge_wait)
 
     a = ap.parse_args()
