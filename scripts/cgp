@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 HOME = os.environ.get("CGP_HOME") or os.path.expanduser("~/.config/claude-github-project")
 CONFIG = os.path.join(HOME, "config.json")
 STATE = os.path.join(HOME, "state.json")
+STOP = os.path.join(HOME, "stop")  # "1" = finish the current cycle, then stop (written by `cgp stop` or the mod button)
 MARK = "<!-- cgp -->"
 QMARK = "<!-- cgp:question -->"
 
@@ -514,6 +515,14 @@ def cleanup_worktree(c, it):
         pass
 
 
+def stop_requested():
+    try:
+        with open(STOP) as f:
+            return f.read().strip() == "1"
+    except FileNotFoundError:
+        return False
+
+
 def snapshot(c):
     items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
     items = [i for i in items if not i["archived"] and i["kind"] in ("issue", "draft")]
@@ -545,6 +554,7 @@ def snapshot(c):
     status = "done" if not live else "work" if actionable else "idle"
     snap = {
         "status": status,
+        "stopRequested": stop_requested(),
         "board": c["board"],
         "counts": counts,
         "remaining": len(live),
@@ -579,7 +589,7 @@ def cmd_wait(a):
     deadline = time.time() + a.timeout
     while True:
         snap = snapshot(c)
-        if snap["status"] != "idle" or time.time() >= deadline:
+        if snap["status"] != "idle" or snap["stopRequested"] or time.time() >= deadline:
             snap.pop("items")
             out(snap)
             return
@@ -733,6 +743,13 @@ def cmd_repos(a):
 
 
 # ------------------------------------------------------------------ workers
+
+def cmd_stop(a):
+    ensure_home()
+    with open(STOP, "w") as f:
+        f.write("0" if a.cancel else "1")
+    out({"stopRequested": stop_requested()})
+
 
 def cmd_worker(a):
     def upd(st):
@@ -1129,6 +1146,7 @@ def main():
     p = sp.add_parser("answers"); p.add_argument("item"); p.set_defaults(fn=cmd_answers)
     p = sp.add_parser("feedback"); p.add_argument("item"); p.set_defaults(fn=cmd_feedback)
     p = sp.add_parser("adopt"); p.add_argument("item"); p.add_argument("repo"); p.set_defaults(fn=cmd_adopt)
+    p = sp.add_parser("stop"); p.add_argument("--cancel", action="store_true"); p.set_defaults(fn=cmd_stop)
     p = sp.add_parser("worker"); p.add_argument("action", choices=["start", "stop", "clear"]); p.add_argument("item", nargs="?")
     p.add_argument("column", nargs="?"); p.add_argument("title", nargs="?", default=""); p.set_defaults(fn=cmd_worker)
     p = sp.add_parser("worktree"); p.add_argument("item"); p.set_defaults(fn=cmd_worktree)

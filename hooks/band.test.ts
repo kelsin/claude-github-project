@@ -45,3 +45,28 @@ for (const surface of ['terminal', 'desktop'] as const) {
     })
   }
 }
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`${surface}: stop button toggles the stop flag`, async ($, on) => {
+    mock.env(on, { HOME: '/h' })
+    mock.clock(on, { now })
+    const writes: [string, string][] = []
+    let flag = ''
+    on('session.start', (_a: any, e: any) => ({ cwd: e.cwd }))
+    on('fs.read', async (_a: any, e: any) => ({ value: e.path.endsWith('/stop') ? flag : state({}) }) as any)
+    on('fs.write', async (_a: any, e: any) => {
+      writes.push([e.path, e.text])
+      flag = e.text
+      return { value: undefined } as any
+    })
+    await $.session.start({ cwd: '/', surface, isInteractive: true })
+    const ui = await $.ui.mount({ plugin: 'cgp', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true } as any })
+    expect(text(await ui.drawn())).toContain('Stop after this cycle')
+    await ui.press({ key: 'stop' } as any)
+    expect(writes).toEqual([['/h/.config/claude-github-project/stop', '1']])
+    expect(text(await ui.drawn())).toContain('Stopping after this cycle')
+    await ui.press({ key: 'stop' } as any)
+    expect(writes[1][1]).toBe('0')
+    expect(text(await ui.drawn())).toContain('Stop after this cycle')
+  })
+}
