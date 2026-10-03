@@ -689,17 +689,22 @@ def snapshot(c):
         i["blockers"] = [{"title": by_id[b]["title"], "column": by_id[b]["column"], "waiting": by_id[b]["waiting"]}
                          for b in blocks.get(i["item"], [])]
     blocked = [i for i in live if i["blockedBy"] and i["column"] == "plan_approved"]
-    actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and i not in blocked]
+    in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these
+    actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and i not in blocked
+                  and i["item"] not in in_flight]
     actionable.sort(key=lambda i: ACTIONABLE.index(i["column"]))
     waiting = [i for i in live if i["waiting"]]
-    status = "done" if not live else "work" if actionable else "idle"
+    cap = c["settings"]["concurrency"]
+    batch = [] if stop_requested() else actionable[: max(cap - len(in_flight), 0)] if cap > 0 else actionable  # a stop request dispatches nothing new
+    status = "done" if not live else "work" if batch else "idle"  # idle also when the cap is full
     snap = {
         "status": status,
         "stopRequested": stop_requested(),
         "board": c["board"],
         "counts": counts,
         "remaining": len(live),
-        "batch": actionable[: c["settings"]["concurrency"]] if c["settings"]["concurrency"] > 0 else actionable,
+        "batch": batch,
+        "inFlight": sorted(in_flight),
         "actionableTotal": len(actionable),
         "waitingOnYou": waiting,
         "blocked": [{"title": i["title"], "blockedBy": i["blockedBy"], "blockers": i["blockers"]} for i in blocked],
@@ -731,9 +736,15 @@ def cmd_list(a):
 def cmd_wait(a):
     c = cfg()
     deadline = time.time() + a.timeout
+    started = None
     while True:
         snap = snapshot(c)
-        if snap["status"] != "idle" or snap["stopRequested"] or time.time() >= deadline:
+        started = snap["inFlight"] if started is None else started
+        # a worker finishing frees its story for the next dispatch, so it ends the wait too
+        released = snap["inFlight"] != started
+        # with a stop requested the loop is only waiting for its workers; once none are left there is nothing to wait for
+        stopped = snap["stopRequested"] and not snap["inFlight"]
+        if snap["status"] != "idle" or released or stopped or time.time() >= deadline:
             snap.pop("items")
             out(snap)
             return
