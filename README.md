@@ -46,7 +46,7 @@ gh auth refresh -s project
 
 Colors: Todo blue, Plan yellow, Plan Review orange, Plan Approval purple, Plan Approved blue, Implement red, PR Review pink, PR Approval purple, PR Approved blue, Done green.
 
-Each cycle the loop dispatches one worker per actionable story (no cap by default) and waits for all of them; the next cycle picks up their new columns. When only stories in your columns, or waiting on your answers, are left, it polls the board every 30 seconds and resumes the moment something changes.
+The loop dispatches one background worker per actionable story (no cap by default) and keeps watching the board: a story that arrives while others are mid-implementation is picked up on the next poll, and a finished worker's story is dispatched again in its new column. `concurrency` caps workers in flight. When only stories in your columns, or waiting on your answers, are left, it polls the board every 30 seconds and resumes the moment something changes.
 
 ## Keeping up with main, and stories that collide
 

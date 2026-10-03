@@ -1,4 +1,5 @@
-import json, os, subprocess, sys, tempfile, unittest
+import json
+import os, subprocess, sys, tempfile, time, unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CGP = os.path.join(ROOT, "scripts", "cgp")
@@ -497,6 +498,42 @@ class TestWorkers(Base):
         self.cgp("worker", "start", "i1", "todo", "one")
         self.cgp("worker", "clear")
         self.assertEqual(self.state()["workers"], [])
+
+    def test_in_flight_story_is_not_redispatched(self):
+        self.setup_board()
+        self.cgp("worker", "start", "i1", "todo", "one")
+        snap = self.cgp("list")
+        self.assertEqual([i["item"] for i in snap["batch"]], ["i2", "i4"])
+        self.assertEqual(snap["inFlight"], ["i1"])
+        self.cgp("worker", "stop", "i1")
+        self.assertEqual(len(self.cgp("list")["batch"]), 3)
+
+    def test_cap_counts_in_flight_workers(self):
+        self.setup_board()
+        self.cgp("config", "concurrency", "2")
+        self.cgp("worker", "start", "i1", "todo", "one")
+        self.assertEqual(len(self.cgp("list")["batch"]), 1)
+        self.cgp("worker", "start", "i2", "todo", "two")
+        snap = self.cgp("list")
+        self.assertEqual((snap["status"], snap["batch"]), ("idle", []))
+
+    def test_all_in_flight_is_idle_not_done(self):
+        self.setup_board()
+        for i in ("i1", "i2", "i4"):
+            self.cgp("worker", "start", i, "todo", i)
+        self.assertEqual(self.cgp("list")["status"], "idle")
+
+    def test_wait_wakes_when_a_worker_finishes(self):
+        self.setup_board()
+        for i in ("i1", "i2", "i4"):
+            self.cgp("worker", "start", i, "todo", i)
+        p = subprocess.Popen([sys.executable, CGP, "wait", "--timeout", "30", "--interval", "1"],
+                             stdout=subprocess.PIPE, text=True, env=self.env)
+        time.sleep(1)
+        self.cgp("worker", "stop", "i1")
+        out, _ = p.communicate(timeout=10)
+        r = json.loads(out)
+        self.assertEqual([i["item"] for i in r["batch"]], ["i1"])
 
 
 if __name__ == "__main__":
