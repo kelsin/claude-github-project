@@ -581,6 +581,29 @@ def cmd_use(a):
     out({"board": boards[key]["board"], "session": sid()})
 
 
+def cmd_session_title(a):
+    """UserPromptSubmit hook: name the session after the board when /cgp:run or /cgp:setup starts it. Silent otherwise."""
+    try:
+        prompt = json.load(sys.stdin).get("prompt", "")
+        m = re.match(r"\s*/cgp:(run|setup)\b\s*(\S*)", prompt)
+        if not m:
+            return
+        name = None
+        boards = [load_board(k)["board"] for k in list_boards()]
+        if m.group(2).startswith("http"):
+            _, owner, number = parse_board_url(m.group(2))
+            found = next((b for b in boards if b["number"] == number and b["owner"].lower() == owner.lower()), None)
+            name = found["title"] if found else f"{owner} project {number}"
+        else:
+            key = load_json(state_path(), {}).get("boardKey")
+            found = next((b for b in boards if safe(b["id"]) == key), None) or (boards[0] if len(boards) == 1 else None)
+            name = found["title"] if found else None
+        if name:
+            out({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "sessionTitle": f"{'🚀' if m.group(1) == 'run' else '🛠️'} {name}"}})
+    except Exception:
+        return  # a naming hook must never get in the way of the prompt
+
+
 def cmd_release(a):
     key = load_json(state_path(), {}).get("boardKey")
     if key:
@@ -1290,6 +1313,7 @@ def main():
     p = sp.add_parser("setup"); p.add_argument("url"); p.add_argument("--repo"); p.add_argument("--repo-path"); p.set_defaults(fn=cmd_setup)
     p = sp.add_parser("use"); p.add_argument("url", nargs="?"); p.add_argument("--takeover", action="store_true"); p.set_defaults(fn=cmd_use)
     p = sp.add_parser("release"); p.set_defaults(fn=cmd_release)
+    p = sp.add_parser("session-title"); p.set_defaults(fn=cmd_session_title)
     p = sp.add_parser("repo-path"); p.add_argument("repo", nargs="?"); p.add_argument("path", nargs="?"); p.set_defaults(fn=cmd_repo_path)
     p = sp.add_parser("discover"); p.add_argument("roots", nargs="*"); p.set_defaults(fn=cmd_discover)
     p = sp.add_parser("config"); p.add_argument("key", nargs="?"); p.add_argument("value", nargs="?"); p.set_defaults(fn=cmd_config)

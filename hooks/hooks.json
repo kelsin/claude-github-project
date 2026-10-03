@@ -1,1 +1,8 @@
-{ "modules": ["./register.tsx"] }
+{
+  "modules": ["./register.tsx"],
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/cgp session-title" }] }
+    ]
+  }
+}
