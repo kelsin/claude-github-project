@@ -28,7 +28,13 @@ const view = atom({ plugin: 'cgp', key: 'view' } as const, null)
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const home = await $.env.get('HOME')
-    const file = `${home}/.config/claude-github-project/state.json`
+    // One id per session: exported so this session's cgp commands write their own state file, which only this band reads.
+    let session = await $.env.get('CGP_SESSION')
+    if (!session) {
+      session = `${(await $.clock.now()).toString(36)}${Math.random().toString(36).slice(2, 8)}`
+      await $.env.set('CGP_SESSION', session)
+    }
+    const file = `${home}/.config/claude-github-project/state-${session}.json`
 
     const refresh = async () => {
       let fresh: BoardView | null = null

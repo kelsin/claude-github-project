@@ -76,7 +76,7 @@ Workers rate each story low / medium / high on complexity and risk (auth, migrat
 
 ## The mod
 
-Installing the plugin adds a band above the prompt while a loop is running (it hides itself when no worker is active and `state.json` has not been refreshed for 15 minutes):
+Installing the plugin adds a band above the prompt while a loop is running (it hides itself when no worker is active and the session's state has not been refreshed for 15 minutes). The mod is loaded in every session, but each session only shows its own state:
 
 ```
 📋 My Board  🙋 Plan Approval: 2  🚦 PR Approval: 1  ❓ Waiting on you: 1
@@ -84,12 +84,21 @@ Installing the plugin adds a band above the prompt while a loop is running (it h
 🔍 Fix login redirect
 ```
 
-The board name is a link. Each worker row shows the emoji of the story's current column; it updates as the worker moves the story.
+The board name is a link.
+
+## Parallel sessions (one board per session)
+
+Run `/cgp:run` in as many sessions as you like, as long as each uses a different board (`/cgp:setup` each board once; `/cgp:run <board-url>` picks one, or it asks when several are set up).
+- **Per-session UI and state.** The mod gives each session an id (`CGP_SESSION`, exported to everything that session runs), so each band shows only that session's board, counts and workers, and one session's workers are never cleared by another. A session that never ran `/cgp:run` shows no band.
+- **One loop per board.** `cgp use` claims the board for the session (a lock file kept alive by every update the session makes; a lock untouched for 30 minutes counts as abandoned). A second session asking for the same board is refused, and offered `--takeover` if the first is gone; the session that was taken over stops at its next poll. `cgp release` frees the board (the loop does this when everything is Done).
+- **Board data outlives sessions.** Blocks, touched-file lists and feedback cursors are stored per board, so restarting a session loses nothing. Repo clone paths are shared by all boards.
+- If a session was started before the mod was loaded, `cgp` falls back to a `default` session id, which is fine for a single session. Each worker row shows the emoji of the story's current column; it updates as the worker moves the story.
 
 ## Files
 
-- `~/.config/claude-github-project/config.json`: board ids, field ids, repo to local-path map, settings.
-- `~/.config/claude-github-project/state.json`: live state the mod reads (counts, waiting stories, workers).
+- `~/.config/claude-github-project/boards/<project id>.json`: one board's ids, fields, linked repos, settings; `<project id>.data.json`: its blocks, touches and feedback cursors.
+- `~/.config/claude-github-project/paths.json`: repo to local-clone map, shared by all boards.
+- `~/.config/claude-github-project/state-<session id>.json`: one session's live state (counts, waiting stories, workers) that its mod reads; `locks/<project id>.json`: which session runs a board.
 - `~/.config/claude-github-project/worktrees/`: one git worktree per story (`cgp/<issue number>` branches, under `<owner>/<repo>/<number>`).
 - `~/.config/claude-github-project/plans/`: plan HTML sources (published as Claude artifacts).
 
@@ -97,7 +106,7 @@ Settings: `scripts/cgp config concurrency 3` (cap on parallel workers; default 0
 
 ## CLI
 
-`scripts/cgp --help` lists everything. Notable: `list` (board snapshot, also clears answered questions), `wait`, `move`, `set`, `ask`, `feedback`, `ci-wait`, `merge`, `merge-wait`, `worktree`.
+`scripts/cgp --help` lists everything. Notable: `use`/`release` (bind and claim a board), `list` (board snapshot, also clears answered questions), `wait`, `move`, `set`, `ask`, `feedback`, `ci-wait`, `merge`, `merge-wait`, `worktree`.
 
 ## Develop
 

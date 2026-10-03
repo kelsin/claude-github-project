@@ -38,8 +38,9 @@ class Base(unittest.TestCase):
         with open(self.db) as f:
             return json.load(f)
 
-    def cgp(self, *args, input=None, ok=True):
-        p = subprocess.run([sys.executable, CGP, *args], capture_output=True, text=True, env=self.env, input=input)
+    def cgp(self, *args, input=None, ok=True, env=None):
+        p = subprocess.run([sys.executable, CGP, *args], capture_output=True, text=True,
+                           env={**self.env, **(env or {})}, input=input)
         if ok:
             self.assertEqual(p.returncode, 0, p.stderr)
             return json.loads(p.stdout) if p.stdout.strip() else None
@@ -47,7 +48,9 @@ class Base(unittest.TestCase):
 
     def force(self, item, column):
         """Put a story in any column, bypassing the CLI's human-gate rules (test setup only)."""
-        with open(os.path.join(self.env["CGP_HOME"], "config.json")) as f:
+        boards = os.path.join(self.env["CGP_HOME"], "boards")
+        name = next(n for n in os.listdir(boards) if not n.endswith(".data.json"))
+        with open(os.path.join(boards, name)) as f:
             opt = json.load(f)["fields"]["status"]["options"][column]
         d = self.read_db()
         next(i for i in d["items"] if i["id"] == item)["values"]["Status"] = {"optionId": opt}
@@ -57,7 +60,7 @@ class Base(unittest.TestCase):
         return self.cgp("setup", "https://github.com/orgs/acme/projects/1", "--repo", "acme/app")
 
     def state(self):
-        with open(os.path.join(self.env["CGP_HOME"], "state.json")) as f:
+        with open(os.path.join(self.env["CGP_HOME"], "state-default.json")) as f:
             return json.load(f)
 
 
@@ -373,7 +376,7 @@ class TestGates(Base):
     def test_state_files_are_private(self):
         self.setup_board()
         self.assertEqual(os.stat(self.env["CGP_HOME"]).st_mode & 0o777, 0o700)
-        self.assertEqual(os.stat(os.path.join(self.env["CGP_HOME"], "config.json")).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(os.path.join(self.env["CGP_HOME"], "paths.json")).st_mode & 0o777, 0o600)
 
     def test_closed_issue_is_filed_under_done(self):
         self.setup_board()
@@ -484,6 +487,74 @@ class TestMoreSync(TestSync):
         self.assertEqual(json.loads(p.stdout)["violations"], [".github/workflows/ci.yml"])
         self.cgp("touches", "i1", ".github/workflows/")
         self.assertTrue(self.cgp("guard", "i1")["ok"])
+
+
+class TestSessions(Base):
+    """Parallel sessions, each on its own board."""
+
+    def setUp(self):
+        super().setUp()
+        self.db2 = os.path.join(self.tmp, "db2.json")
+        with open(self.db) as f, open(self.db2, "w") as g:
+            g.write(f.read())
+        self.a = {"CGP_SESSION": "a"}
+        self.b = {"CGP_SESSION": "b", "FAKE_GH_DB": self.db2}
+        self.cgp("setup", "https://github.com/orgs/acme/projects/1", "--repo", "acme/app")
+        self.cgp("setup", "https://github.com/orgs/acme/projects/2", "--repo", "acme/app", env={"FAKE_GH_DB": self.db2})
+
+    def file(self, name):
+        with open(os.path.join(self.env["CGP_HOME"], name)) as f:
+            return json.load(f)
+
+    def test_unbound_session_must_choose_a_board(self):
+        p = self.cgp("list", ok=False, env=self.a)
+        self.assertEqual(p.returncode, 6)
+        self.assertEqual(self.cgp("use", "https://github.com/orgs/acme/projects/1", env=self.a)["board"]["number"], 1)
+        self.assertEqual(self.cgp("list", env=self.a)["board"]["number"], 1)
+
+    def test_sessions_keep_separate_boards_and_workers(self):
+        self.cgp("use", "https://github.com/orgs/acme/projects/1", env=self.a)
+        self.cgp("use", "https://github.com/orgs/acme/projects/2", env=self.b)
+        self.cgp("worker", "start", "i1", "todo", "one", env=self.a)
+        self.assertEqual(self.cgp("list", env=self.a)["board"]["title"], "Test Board 1")
+        self.assertEqual(self.cgp("list", env=self.b)["board"]["title"], "Test Board 2")
+        self.assertEqual([w["title"] for w in self.file("state-a.json")["workers"]], ["one"])
+        self.assertEqual(self.file("state-b.json")["workers"], [])
+        self.cgp("worker", "clear", env=self.b)  # clearing one session never touches the other's workers
+        self.assertEqual(len(self.file("state-a.json")["workers"]), 1)
+
+    def test_one_live_session_per_board_with_takeover_and_release(self):
+        url = "https://github.com/orgs/acme/projects/1"
+        self.cgp("use", url, env=self.a)
+        p = self.cgp("use", url, ok=False, env={"CGP_SESSION": "c"})
+        self.assertEqual(p.returncode, 5)
+        self.cgp("use", url, "--takeover", env={"CGP_SESSION": "c"})
+        lost = self.cgp("list", ok=False, env=self.a)  # the old session notices at its next poll
+        self.assertEqual(lost.returncode, 5)
+        self.cgp("release", env={"CGP_SESSION": "c"})
+        self.cgp("use", url, env=self.a)
+
+    def test_stale_lock_is_ignored(self):
+        url = "https://github.com/orgs/acme/projects/1"
+        self.cgp("use", url, env=self.a)
+        lock = os.path.join(self.env["CGP_HOME"], "locks", "P1.json")
+        with open(lock, "w") as f:
+            json.dump({"session": "a", "at": 0}, f)  # heartbeat from 1970
+        self.cgp("use", url, env={"CGP_SESSION": "c"})
+
+    def test_blocks_and_touches_survive_a_new_session_on_the_same_board(self):
+        url = "https://github.com/orgs/acme/projects/1"
+        self.cgp("use", url, env=self.a)
+        self.cgp("touches", "i1", "src/x.py", env=self.a)
+        self.cgp("release", env=self.a)
+        self.cgp("use", url, env={"CGP_SESSION": "fresh"})
+        self.assertEqual(self.cgp("touches", "i1", env={"CGP_SESSION": "fresh"}), ["src/x.py"])
+
+    def test_repo_paths_are_shared_across_boards(self):
+        self.cgp("use", "https://github.com/orgs/acme/projects/2", env=self.b)
+        self.cgp("repo-path", "acme/app", self.tmp, env=self.b)
+        self.cgp("use", "https://github.com/orgs/acme/projects/1", env=self.a)
+        self.assertEqual(self.cgp("repo-path", env=self.a)["acme/app"], self.tmp)
 
 
 class TestWorkers(Base):

@@ -15,4 +15,4 @@ Input: a board URL (`https://github.com/orgs/<org>/projects/<n>` or `/users/<use
    - Other errors: show the message verbatim and stop.
 3. Report what setup did: the 10 columns now on the board, the fields it added (`Waiting On`, `Plan`, `PR`), and `itemsRemapped`. Say plainly that existing items whose old status name matched a new column kept it, closed issues went to Done, and everything else went to Todo.
 4. Run `CGP discover`. For every repo in `missing`, ask the user (AskUserQuestion if available, else ask in chat) for its local clone path or whether to skip it, then `CGP repo-path <owner/name> <path>`. Repos with no local path cannot be implemented in; stories for them will ask the user.
-5. Tell the user: to link more repos to this board, run `/cgp:setup <same url>` from another repo's checkout. Start working stories with `/cgp:run`.
+5. Boards are independent: setting up another board keeps the others, and repo clone paths are shared between them. Tell the user: to link more repos to this board, run `/cgp:setup <same url>` from another repo's checkout. Start working stories with `/cgp:run`.

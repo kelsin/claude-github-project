@@ -11,14 +11,18 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
 
 ## Start
 
-1. `CGP list --brief`. If it errors with "no board configured", tell the user to run `/cgp:setup <board-url>` and stop.
-2. `CGP worker clear` (drops stale workers from an earlier crashed run).
-3. Tell the user the board URL and the counts once.
+1. `CGP use [<board-url>]` (pass the URL if the user gave one). It binds this session to that board, claims its loop and clears stale workers.
+   - Error "no board configured" / "not set up yet": tell the user to run `/cgp:setup <board-url>` and stop.
+   - Exit 6 (several boards set up, none chosen): show the listed boards, ask the user which, run `CGP use <url>`.
+   - Exit 5 (another live session is running this board): tell the user and ask whether that session is gone; only then `CGP use <url> --takeover`.
+   Each session works one board; parallel sessions must use different boards.
+2. `CGP list --brief` and tell the user the board URL and the counts once.
 
 ## Cycle (repeat forever)
 
 1. `CGP list --brief` → JSON with `status`, `batch`, `counts`, `waitingOnYou`.
-2. `status: "done"`: report "all stories are Done" and stop. This is the only way the loop ends by itself.
+2. `status: "done"`: `CGP release`, report "all stories are Done" and stop. This is the only way the loop ends by itself.
+   If `list` or `wait` exits 5, another session took this board over: stop and tell the user.
 3. `status: "work"`:
    - `batch` holds every actionable story (no cap by default). If the user set a cap (`settings.concurrency` > 0) and `actionableTotal` is larger, the rest wait for a later cycle.
    - For each story in `batch`, register it so the UI shows it: `CGP worker start <item> <column> "<title>"` (one Bash call for the whole batch).

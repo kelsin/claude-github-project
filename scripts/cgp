@@ -16,8 +16,11 @@ import time
 from datetime import datetime, timezone
 
 HOME = os.environ.get("CGP_HOME") or os.path.expanduser("~/.config/claude-github-project")
-CONFIG = os.path.join(HOME, "config.json")
-STATE = os.path.join(HOME, "state.json")
+LEGACY_CONFIG = os.path.join(HOME, "config.json")  # single-board layout of earlier versions
+BOARDS = os.path.join(HOME, "boards")  # <project id>.json (config), <project id>.data.json (blocks, touches, cursors)
+PATHS = os.path.join(HOME, "paths.json")  # repo -> local clone, shared by all boards
+LOCKS = os.path.join(HOME, "locks")  # one per board: which session is running its loop
+LOCK_STALE_SECONDS = 30 * 60
 MARK = "<!-- cgp -->"
 QMARK = "<!-- cgp:question -->"
 
@@ -125,18 +128,110 @@ class locked:
         self.f.close()
 
 
-def cfg():
-    c = load_json(CONFIG, None)
-    if not c or "board" not in c:
+def sid():
+    """This session's id (exported by the mod as CGP_SESSION); 'default' when run outside a session."""
+    return re.sub(r"[^A-Za-z0-9_-]", "", os.environ.get("CGP_SESSION", "")) or "default"
+
+
+def state_path():
+    return os.path.join(HOME, f"state-{sid()}.json")  # what this session's UI shows: workers, counts, waiting
+
+
+def safe(key):
+    return re.sub(r"[^A-Za-z0-9_-]", "_", key)
+
+
+def board_file(key):
+    return os.path.join(BOARDS, f"{safe(key)}.json")
+
+
+def list_boards():
+    ensure_home()
+    keys = [f[:-5] for f in sorted(os.listdir(BOARDS))
+            if f.endswith(".json") and not f.endswith(".data.json")] if os.path.isdir(BOARDS) else []
+    legacy = load_json(LEGACY_CONFIG, None)
+    if legacy and legacy.get("board", {}).get("id") and safe(legacy["board"]["id"]) not in keys:
+        save_board(legacy)  # migrate the single-board config of earlier versions
+        keys.append(safe(legacy["board"]["id"]))
+    return keys
+
+
+def load_board(key):
+    raw = load_json(board_file(key), None)
+    if not raw:
+        die("unknown board; run /cgp:setup <board-url>")
+    paths = load_json(PATHS, {})
+    raw["repos"] = {r: paths.get(r) for r in raw["repos"]}
+    return raw
+
+
+def save_board(c):
+    os.makedirs(BOARDS, mode=0o700, exist_ok=True)
+    paths = load_json(PATHS, {})
+    paths.update({r: p for r, p in c["repos"].items() if p})
+    save_json(PATHS, paths)
+    save_json(board_file(c["board"]["id"]), {**c, "repos": {r: None for r in c["repos"]}})
+
+
+def board_key():
+    key = load_json(state_path(), {}).get("boardKey")
+    if key and os.path.exists(board_file(key)):
+        return key
+    keys = list_boards()
+    if len(keys) == 1:
+        return keys[0]
+    if not keys:
         die("no board configured; run /cgp:setup <board-url> first")
-    return c
+    die("this session is not bound to a board; run: cgp use <board-url>", code=6)
+
+
+def cfg():
+    return load_board(board_key())
+
+
+def data_path():
+    return os.path.join(BOARDS, f"{safe(board_key())}.data.json")
+
+
+def load_data():
+    return load_json(data_path(), {})
+
+
+def update_data(fn):
+    """Per-board data that outlives sessions: blocks, touches, feedback cursors, answered flags."""
+    with locked():
+        os.makedirs(BOARDS, mode=0o700, exist_ok=True)
+        d = load_json(data_path(), {})
+        fn(d)
+        save_json(data_path(), d)
+
+
+def lock_file(key):
+    return os.path.join(LOCKS, f"{safe(key)}.json")
+
+
+def lock_holder(key):
+    lk = load_json(lock_file(key), None)
+    if lk and lk.get("session") != sid() and time.time() - lk.get("at", 0) < LOCK_STALE_SECONDS:
+        return lk
+    return None
+
+
+def touch_lock(key):
+    lk = load_json(lock_file(key), None)
+    if lk and lk.get("session") == sid():
+        lk["at"] = time.time()
+        save_json(lock_file(key), lk)
 
 
 def update_state(fn):
+    """This session's display state (workers, counts, waiting). Any write is also the loop's heartbeat."""
     with locked():
-        st = load_json(STATE, {"workers": [], "counts": {}, "waiting": []})
+        st = load_json(state_path(), {"workers": [], "counts": {}, "waiting": []})
         fn(st)
-        save_json(STATE, st)
+        save_json(state_path(), st)
+        if st.get("boardKey"):
+            touch_lock(st["boardKey"])
 
 
 # ------------------------------------------------------------------- project
@@ -419,8 +514,9 @@ def cmd_setup(a):
     waiting = ensure(WAITING_FIELD, "SINGLE_SELECT", [{"name": "You", "color": "RED", "description": ""}])
     text_ids = {k: ensure(n, "TEXT")["id"] for k, n in TEXT_FIELDS.items()}
 
-    old = load_json(CONFIG, {})
-    repos = old.get("repos", {}) if old.get("board", {}).get("id") == proj["id"] else {}
+    old = load_json(board_file(proj["id"]), {})
+    paths = load_json(PATHS, {})
+    repos = {r: paths.get(r) for r in old.get("repos", {})}
     c = {
         "board": {"id": proj["id"], "url": proj["url"], "title": proj["title"],
                   "kind": kind, "owner": owner, "number": number},
@@ -445,18 +541,55 @@ def cmd_setup(a):
         c["repos"].setdefault(a.repo, None)
         if a.repo_path:
             c["repos"][a.repo] = os.path.abspath(a.repo_path)
-    save_json(CONFIG, c)
+    save_board(c)
 
     moved = {"todo": sum(1 for t in remap.values() if t != "Done"), "done": sum(1 for t in remap.values() if t == "Done")}
     out({"board": c["board"], "repos": c["repos"], "itemsRemapped": moved,
          "note": "items whose old status matched a new column name kept it; closed ones went to Done, all others to Todo"})
 
 
+def cmd_use(a):
+    """Bind this session to a board and claim its loop. Exit 5: another live session runs it; 6: which board?"""
+    keys = list_boards()
+    boards = {k: load_board(k) for k in keys}
+    if a.url:
+        kind, owner, number = parse_board_url(a.url)
+        key = next((k for k, b in boards.items()
+                    if b["board"]["number"] == number and b["board"]["owner"].lower() == owner.lower()), None)
+        if not key:
+            die(f"that board is not set up yet; run /cgp:setup {a.url} first")
+    elif load_json(state_path(), {}).get("boardKey") in boards:
+        key = load_json(state_path(), {})["boardKey"]
+    elif len(boards) == 1:
+        key = keys[0]
+    else:
+        out({"boards": [{"title": b["board"]["title"], "url": b["board"]["url"]} for b in boards.values()]})
+        die("several boards are set up; say which: cgp use <board-url>", code=6)
+    holder = lock_holder(key)
+    if holder and not a.takeover:
+        out({"heldBy": holder["session"], "minutesSinceHeartbeat": round((time.time() - holder["at"]) / 60, 1)})
+        die("another session is running this board's loop (use --takeover only if that session is gone)", code=5)
+    os.makedirs(LOCKS, mode=0o700, exist_ok=True)
+    save_json(lock_file(key), {"session": sid(), "at": time.time()})
+    update_state(lambda st: st.update(boardKey=key, board=boards[key]["board"], workers=[]))
+    out({"board": boards[key]["board"], "session": sid()})
+
+
+def cmd_release(a):
+    key = load_json(state_path(), {}).get("boardKey")
+    if key:
+        lk = load_json(lock_file(key), None)
+        if lk and lk.get("session") == sid():
+            os.remove(lock_file(key))
+    update_state(lambda st: st.update(boardKey=None, workers=[], counts={}, waiting=[], updatedAt=None))
+    out({"released": key})
+
+
 def cmd_repo_path(a):
     c = cfg()
     if a.path:
         c["repos"][a.repo] = os.path.abspath(a.path)
-        save_json(CONFIG, c)
+        save_board(c)
     out(c["repos"] if not a.repo else {a.repo: c["repos"].get(a.repo)})
 
 
@@ -477,7 +610,7 @@ def cmd_discover(a):
                 m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", url)
                 if m and m.group(1).lower() in wanted:
                     c["repos"][wanted.pop(m.group(1).lower())] = cand
-    save_json(CONFIG, c)
+    save_board(c)
     out({"found": {r: p for r, p in c["repos"].items() if p}, "missing": [r for r, p in c["repos"].items() if not p]})
 
 
@@ -487,7 +620,7 @@ def cmd_config(a):
         if a.key not in DEFAULTS:
             die(f"unknown setting; one of {list(DEFAULTS)}")
         c["settings"][a.key] = int(a.value)
-        save_json(CONFIG, c)
+        save_board(c)
     out(c["settings"])
 
 
@@ -500,7 +633,7 @@ def process_replies(c, items):
         if replies:
             clear_field(c, it["item"], c["fields"]["waiting"]["id"])
             it["waiting"] = False
-            update_state(lambda st, i=it["item"]: st.setdefault("answered", []).append(i))
+            update_data(lambda d, i=it["item"]: d.setdefault("answered", []).append(i))
 
 
 def cleanup_worktree(c, it):
@@ -515,10 +648,13 @@ def cleanup_worktree(c, it):
 
 
 def snapshot(c):
+    holder = lock_holder(c["board"]["id"])
+    if holder:
+        die("this board is now being run by another session (cgp use <url> --takeover to take it back)", code=5)
     items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
     items = [i for i in items if not i["archived"] and i["kind"] in ("issue", "draft")]
     process_replies(c, items)
-    answered = set(load_json(STATE, {}).get("answered", []))
+    answered = set(load_data().get("answered", []))
     for i in items:
         if i["item"] in answered:
             i["answered"] = True
@@ -532,7 +668,7 @@ def snapshot(c):
     by_id = {i["item"]: i for i in live}
     # a block holds only while the blocker is live and still ahead of the blocked story
     blocks = {k: [b for b in v if b in by_id and rank(by_id[b]) > rank(by_id[k])]
-              for k, v in load_json(STATE, {}).get("blocks", {}).items() if k in by_id}
+              for k, v in load_data().get("blocks", {}).items() if k in by_id}
     live_ids = set(by_id)
     for i in live:
         i["blockedBy"] = [by_id[b]["title"] for b in blocks.get(i["item"], [])]
@@ -560,10 +696,13 @@ def snapshot(c):
         st["counts"] = counts
         st["waiting"] = [{"title": i["title"], "url": i["url"], "column": i["column"]} for i in waiting]
         st["blockedCount"] = len(blocked)
-        st["blocks"] = {k: v for k, v in blocks.items() if v}
-        st["touches"] = {k: v for k, v in st.get("touches", {}).items() if k in live_ids}
         st["updatedAt"] = now_iso()
     update_state(upd)
+
+    def prune(d):
+        d["blocks"] = {k: v for k, v in blocks.items() if v}
+        d["touches"] = {k: v for k, v in d.get("touches", {}).items() if k in live_ids}
+    update_data(prune)
     return snap
 
 
@@ -605,8 +744,8 @@ def cmd_move(a):
         for w in st["workers"]:
             if w["item"] == a.item:
                 w["column"] = a.column
-        st["answered"] = [i for i in st.get("answered", []) if i != a.item]
     update_state(upd)
+    update_data(lambda d: d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]))
     out({"item": a.item, "column": a.column})
 
 
@@ -644,7 +783,7 @@ def cmd_comment(a):
     def commit(st):  # feedback read earlier in this run is now handled
         if a.item in st.get("pending", {}):
             st.setdefault("cursors", {})[a.item] = st["pending"].pop(a.item)
-    update_state(commit)
+    update_data(commit)
     out({"url": cm["html_url"]})
 
 
@@ -661,7 +800,7 @@ def cmd_ask(a):
     def commit(st):
         if a.item in st.get("pending", {}):
             st.setdefault("cursors", {})[a.item] = st["pending"].pop(a.item)
-    update_state(commit)
+    update_data(commit)
     out({"url": cm["html_url"], "round": rounds + 1})
 
 
@@ -695,14 +834,14 @@ def cmd_feedback(a):
         for r in reviews:
             r["created_at"] = r.get("submitted_at") or ""
         sources.append(("pr-review", reviews))
-    st = load_json(STATE, {})
+    st = load_data()
     cursor = st.get("cursors", {}).get(a.item) or max(
         [cm["created_at"] for _, cms in sources for cm in cms if is_agent(cm) and "created_at" in cm] or [""])
     seen = max([cm["created_at"] for _, cms in sources for cm in cms if "created_at" in cm] or [cursor])
 
     def pend(st):
         st.setdefault("pending", {})[a.item] = max(seen, cursor)
-    update_state(pend)
+    update_data(pend)
     found, ignored = [], []
     for w, cms in sources:
         for cm in cms:
@@ -743,7 +882,7 @@ def cmd_worker(a):
         update_state(lambda st: st.__setitem__("workers", []))
     else:
         update_state(upd)
-    out(load_json(STATE, {})["workers"])
+    out(load_json(state_path(), {}).get("workers", []))
 
 
 # ----------------------------------------------------------------- worktree
@@ -879,7 +1018,7 @@ def cmd_guard(a):
     if not os.path.isdir(wt):
         die("no worktree for this story")
     names = git(wt, "diff", "--name-only", f"{default_ref(wt)}...HEAD").splitlines()
-    allowed = [norm_path(t) for t in load_json(STATE, {}).get("touches", {}).get(a.item, [])]
+    allowed = [norm_path(t) for t in load_data().get("touches", {}).get(a.item, [])]
     bad = [n for n in names if (n.startswith(".github/") or os.path.basename(n) == "CODEOWNERS")
            and not any(covers(t, n) for t in allowed)]
     out({"ok": not bad, "violations": bad})
@@ -925,13 +1064,13 @@ def would_cycle(blocks, item, other):
 
 def cmd_touches(a):
     if a.paths:
-        update_state(lambda st: st.setdefault("touches", {}).__setitem__(a.item, [norm_path(p) for p in a.paths if p.strip()]))
-    out(load_json(STATE, {}).get("touches", {}).get(a.item, []))
+        update_data(lambda d: d.setdefault("touches", {}).__setitem__(a.item, [norm_path(p) for p in a.paths if p.strip()]))
+    out(load_data().get("touches", {}).get(a.item, []))
 
 
 def cmd_overlap(a):
     c = cfg()
-    st = load_json(STATE, {})
+    st = load_data()
     me = get_item(c, a.item)
     mine = story_files(c, st, me)
     items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
@@ -965,7 +1104,7 @@ def cmd_block(a):
     if a.unblock:
         def un(st):
             st.setdefault("blocks", {}).pop(a.item, None)
-        update_state(un)
+        update_data(un)
         out({"item": a.item, "blockedBy": []})
         return
     if not a.other:
@@ -976,8 +1115,8 @@ def cmd_block(a):
         lst = st.setdefault("blocks", {}).setdefault(a.item, [])
         if a.other not in lst:
             lst.append(a.other)
-    update_state(add)
-    out({"item": a.item, "blockedBy": load_json(STATE, {})["blocks"][a.item]})
+    update_data(add)
+    out({"item": a.item, "blockedBy": load_data()["blocks"][a.item]})
 
 
 def cmd_worktree_remove(a):
@@ -1116,6 +1255,8 @@ def main():
     sp = ap.add_subparsers(dest="cmd", required=True)
 
     p = sp.add_parser("setup"); p.add_argument("url"); p.add_argument("--repo"); p.add_argument("--repo-path"); p.set_defaults(fn=cmd_setup)
+    p = sp.add_parser("use"); p.add_argument("url", nargs="?"); p.add_argument("--takeover", action="store_true"); p.set_defaults(fn=cmd_use)
+    p = sp.add_parser("release"); p.set_defaults(fn=cmd_release)
     p = sp.add_parser("repo-path"); p.add_argument("repo", nargs="?"); p.add_argument("path", nargs="?"); p.set_defaults(fn=cmd_repo_path)
     p = sp.add_parser("discover"); p.add_argument("roots", nargs="*"); p.set_defaults(fn=cmd_discover)
     p = sp.add_parser("config"); p.add_argument("key", nargs="?"); p.add_argument("value", nargs="?"); p.set_defaults(fn=cmd_config)

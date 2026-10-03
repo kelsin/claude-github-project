@@ -63,7 +63,7 @@ elif args[:2] == ["api", "graphql"]:
                                 "nodes": [{"id": i["id"], "isArchived": False, "content": i["content"],
                                            "fieldValues": values(i)} for i in db["items"]]}}}
     elif "projectV2(number" in q:
-        p = {"id": "P1", "title": "Test Board", "url": "https://github.com/orgs/acme/projects/1",
+        p = {"id": f"P{v['n']}", "title": f"Test Board {v['n']}", "url": f"https://github.com/orgs/acme/projects/{v['n']}",
              "repositories": {"nodes": [{"nameWithOwner": "acme/app"}]},
              "fields": {"nodes": [dict({"__typename": "x"}, **f) for f in db["fields"]]}}
         r = {"organization": {"projectV2": p}}

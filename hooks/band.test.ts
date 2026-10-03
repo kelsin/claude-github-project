@@ -32,10 +32,10 @@ const cases: [string, string, string[], string[]][] = [
 for (const surface of ['terminal', 'desktop'] as const) {
   for (const [name, body, has, hasNot] of cases) {
     test(`${surface}: ${name}`, async ($, on) => {
-      mock.env(on, { HOME: '/h' })
+      mock.env(on, { HOME: '/h', CGP_SESSION: 'test-session' })
       mock.clock(on, { now })
       on('session.start', (_a: any, e: any) => ({ cwd: e.cwd }))
-      on('fs.read', async () => ({ value: body }) as any)
+      on('fs.read', async (_a: any, e: any) => ({ value: String(e.path).includes('state-test-session.json') ? body : '' }) as any)
       on('ui.render', () => ({ type: 'Text', props: {}, children: ['HIDDEN'] }) as any)
       await $.session.start({ cwd: '/', surface, isInteractive: true })
       const ui = await $.ui.mount({ plugin: 'cgp', surface, component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true } as any })
