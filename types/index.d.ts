@@ -8,6 +8,7 @@ export type BoardView = {
   waiting: Waiting[]
   blocked: number
   workers: Worker[]
+  stopping: boolean
 }
 
 declare module 'claude-code' {

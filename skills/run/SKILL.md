@@ -5,13 +5,13 @@ description: Use to start the agentic loop that works every story on the configu
 
 # cgp run
 
-Runs the board loop. It never stops on its own except when every story is Done; the user stops it. Be terse: no narration between cycles beyond the one-line updates below.
+Runs the board loop. It never stops on its own except when every story is Done or the user requests a stop (the mod's stop button, or `CGP stop`), which takes effect at the start of the next cycle; the user can also interrupt the session. Be terse: no narration between cycles beyond the one-line updates below.
 
 The CLI is `scripts/cgp` at the plugin root, two directories above this skill's base directory. Resolve it to an absolute path once (`CGP`) and pass that absolute path to every worker. The column prompts are in `columns/` next to this file.
 
 ## Start
 
-1. `CGP use [<board-url>]` (pass the URL if the user gave one). It binds this session to that board, claims its loop and clears stale workers.
+1. `CGP use [<board-url>]` (pass the URL if the user gave one). It binds this session to that board, claims its loop, clears stale workers and drops a stop request left from an earlier run.
    - Error "no board configured" / "not set up yet": tell the user to run `/cgp:setup <board-url>` and stop.
    - Exit 6 (several boards set up, none chosen): show the listed boards, ask the user which, run `CGP use <url>`.
    - Exit 5 (another live session is running this board): tell the user and ask whether that session is gone; only then `CGP use <url> --takeover`.
@@ -21,12 +21,13 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
 ## Cycle (repeat forever)
 
 1. `CGP list --brief` → JSON with `status`, `batch`, `counts`, `waitingOnYou`.
-2. `status: "done"`: `CGP release`, report "all stories are Done" and stop. This is the only way the loop ends by itself.
+2. `stopRequested: true` (the user pressed the stop button, or ran `CGP stop`): `batch` is empty, so nothing new is dispatched. If `inFlight` is empty, run `CGP stop --cancel` and `CGP release`, report "stopped; run /cgp:run to continue" and stop. Otherwise go to step 5 (nothing is dispatched): the running workers finish, then this step ends the loop.
+3. `status: "done"`: `CGP release`, report "all stories are Done" and stop. This is the only way the loop ends by itself.
    If `list` or `wait` exits 5, another session took this board over: stop and tell the user.
-3. `status: "work"`:
-   - `batch` holds every actionable story (no cap by default). If the user set a cap (`settings.concurrency` > 0) and `actionableTotal` is larger, the rest wait for a later cycle.
+4. `status: "work"`:
+   - `batch` holds the actionable stories that no worker owns yet. Stories already being worked (`inFlight`) are never in it. If the user set a cap (`settings.concurrency` > 0), `batch` is already trimmed to the free slots and the rest wait for a later cycle.
    - For each story in `batch`, register it so the UI shows it: `CGP worker start <item> <column> "<title>"` (one Bash call for the whole batch).
-   - Spawn ONE Agent per story, all in a single message, each with `run_in_background: false` so the call returns when every worker is done. `subagent_type: "general-purpose"`. Prompt (fill in the placeholders; do not inline the column file):
+   - Spawn ONE Agent per story, all in a single message, each with `run_in_background: true` and `subagent_type: "general-purpose"`, then go straight on to step 5 without waiting: a slow plan or implementation must not hold up stories that arrive later. Prompt (fill in the placeholders; do not inline the column file):
 
      ```
      You are the worker for one board story. CGP=<absolute path to scripts/cgp>.
@@ -34,17 +35,14 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
      Story: <the story's JSON from the batch>
      When finished (or blocked) run `CGP worker stop <item>` and reply with one line: "<title>: <outcome>".
      ```
-   - After all workers return: `CGP worker clear`, then go straight to the next cycle. A story's new column is handled by the next cycle, not by the same worker.
-   - Print one line per story: `<emoji> <title>: <outcome>`.
-4. `status: "idle"` (nothing an agent can do: every remaining story is in Plan Approval or PR Approval or waiting on the user's answer):
-   - If the set of waiting stories changed since the last idle report, print one short list: stories in `waitingOnYou` (title and url only), stories in `blocked` (title and who they wait for), and the Plan Approval / PR Approval counts.
-   - `CGP wait --timeout 540` via Bash (set the Bash timeout to 560000). It polls the board every `pollSeconds` and returns as soon as a story becomes actionable (the user answered, approved, or moved something), all stories are Done, or the timeout passes. Then start the next cycle. Do not sleep any other way.
+5. Wait: `CGP wait --timeout 540` via Bash (set the Bash timeout to 560000). It polls the board every `pollSeconds` and returns as soon as a story becomes actionable (new, answered, approved, or moved by the user), a worker is released (`worker stop`), all stories are Done, the user requests a stop and no worker is left, or the timeout passes. Then start the next cycle. Do not sleep any other way. Before waiting with `status: "idle"` and no workers in flight, print the waiting list once: if the set of waiting stories changed since the last report, one short list of `waitingOnYou` (title and url only), `blocked` (title and who they wait for), and the Plan Approval / PR Approval counts.
+6. Worker completions arrive as notifications. Print one line `<emoji> <title>: <outcome>` for each. Workers stop themselves; do not `worker stop` on a normal completion, because the story may already have been re-dispatched in its new column. Only when the notification is an error or crash run `CGP worker stop <item>` so the story is released. The story's new column is handled by the next cycle, not by the same worker.
 
 ## Rules
 
 - The user decides the Plan Approval and PR Approval columns. Never move a story out of them or work on them.
 - Stories in Plan Approved that wait on another story (`blocked` in the list output) are skipped until their blockers are Done; they do not count toward the no-progress rule.
-- A worker failure (agent error, crash) must not end the loop: note it in one line, leave the story where it is, and continue.
-- Track `(item, column)` after each cycle. If a story is still in the same column after 3 consecutive cycles of being worked (crashes or no progress), run `CGP ask <item>` with a short summary so it waits on the user instead of spinning. Keep the per-cycle output short; the loop may run for days.
+- A worker failure (agent error, crash) must not end the loop: `CGP worker stop <item>` (the crashed worker never did), note it in one line, leave the story where it is, and continue.
+- Track `(item, column)` each time a worker finishes. If a story is still in the same column after 3 consecutive worker runs (crashes or no progress), run `CGP ask <item>` with a short summary so it waits on the user instead of spinning. Keep the per-cycle output short; the loop may run for days.
 - Closed issues are filed under Done by the CLI; ignore them. An empty board reports `done`: say "no stories on the board".
 - Do not do story work yourself; you only dispatch, wait and report.

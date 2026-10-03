@@ -27,7 +27,7 @@ gh auth refresh -s project
    - Replaces the Status options with the 10 columns below, adds fields `Waiting On`, `Plan`, `PR`, links the current repo to the board and records its local path.
    - Existing items whose old status name matches a new column keep it, closed issues go to Done, everything else lands in Todo. Closed issues anywhere on the board are filed under Done.
    - Run it again from another repo's checkout (same URL) to link more repos. Repos without a known local path are asked for.
-2. `/cgp:run`. Add stories to Todo on the board (issues, or draft items which get converted to issues in the repo the agent picks) and leave it running. It ends only when every story is Done, or when you stop it.
+2. `/cgp:run`. Add stories to Todo on the board (issues, or draft items which get converted to issues in the repo the agent picks) and leave it running. It ends only when every story is Done, or when you stop it. To stop cleanly, press **Stop after this cycle** in the board band above the prompt (or run `scripts/cgp stop`): the loop lets the running workers finish, then stops before dispatching more. `/cgp:run` picks up from the board.
 
 ## Columns
 
@@ -46,7 +46,7 @@ gh auth refresh -s project
 
 Colors: Todo blue, Plan yellow, Plan Review orange, Plan Approval purple, Plan Approved blue, Implement red, PR Review pink, PR Approval purple, PR Approved blue, Done green.
 
-Each cycle the loop dispatches one worker per actionable story (no cap by default) and waits for all of them; the next cycle picks up their new columns. When only stories in your columns, or waiting on your answers, are left, it polls the board every 30 seconds and resumes the moment something changes.
+The loop dispatches one background worker per actionable story (no cap by default) and keeps watching the board: a story that arrives while others are mid-implementation is picked up on the next poll, and a finished worker's story is dispatched again in its new column. `concurrency` caps workers in flight. When only stories in your columns, or waiting on your answers, are left, it polls the board every 30 seconds and resumes the moment something changes.
 
 ## Keeping up with main, and stories that collide
 
