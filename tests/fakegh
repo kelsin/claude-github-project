@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Fake `gh` for tests: a tiny in-memory Projects v2 + issue comments, persisted in $FAKE_GH_DB."""
+import json, os, re, sys
+
+DB = os.environ["FAKE_GH_DB"]
+db = json.load(open(DB))
+args = sys.argv[1:]
+
+
+def save():
+    json.dump(db, open(DB, "w"))
+
+
+def field(name):
+    return next(f for f in db["fields"] if f["name"] == name)
+
+
+def values(item):
+    nodes = []
+    for fname, v in item["values"].items():
+        if "optionId" in v:
+            opt = next((o for o in field(fname)["options"] if o["id"] == v["optionId"]), None)
+            if opt is None:
+                continue  # option deleted
+            nodes.append({"__typename": "ProjectV2ItemFieldSingleSelectValue", "optionId": opt["id"],
+                          "name": opt["name"], "field": {"name": fname}})
+        else:
+            nodes.append({"__typename": "ProjectV2ItemFieldTextValue", "text": v["text"], "field": {"name": fname}})
+    return {"nodes": nodes}
+
+
+if args[:2] == ["auth", "status"]:
+    print(f"Token scopes: {db['scopes']}")
+elif args[:2] == ["api", "graphql"]:
+    body = json.loads(sys.stdin.read())
+    q, v = body["query"], body["variables"]
+    if "updateProjectV2Field(" in q:
+        f = field("Status")
+        f["options"] = [{"id": f"new{i}", "name": o["name"], "color": o["color"]} for i, o in enumerate(v["o"])]
+        r = {"updateProjectV2Field": {"projectV2Field": {"id": f["id"], "options": f["options"]}}}
+    elif "createProjectV2Field" in q:
+        f = {"id": f"F_{v['n']}", "name": v["n"], "dataType": v["t"],
+             "options": [{"id": f"o_{o['name']}", "name": o["name"]} for o in (v["o"] or [])]}
+        if not f["options"]:
+            del f["options"]
+        db["fields"].append(f)
+        r = {"createProjectV2Field": {"projectV2Field": f}}
+    elif "updateProjectV2ItemFieldValue" in q:
+        fname = next(x["name"] for x in db["fields"] if x["id"] == v["f"])
+        item = next(i for i in db["items"] if i["id"] == v["i"])
+        item["values"][fname] = {"optionId": v["o"]} if "o" in v and "t" not in v else {"text": v["t"]}
+        r = {}
+    elif "clearProjectV2ItemFieldValue" in q:
+        fname = next(x["name"] for x in db["fields"] if x["id"] == v["f"])
+        next(i for i in db["items"] if i["id"] == v["i"])["values"].pop(fname, None)
+        r = {}
+    elif "items(first:100" in q:
+        r = {"node": {"items": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                                "nodes": [{"id": i["id"], "isArchived": False, "content": i["content"],
+                                           "fieldValues": values(i)} for i in db["items"]]}}}
+    elif "projectV2(number" in q:
+        p = {"id": "P1", "title": "Test Board", "url": "https://github.com/orgs/acme/projects/1",
+             "repositories": {"nodes": [{"nameWithOwner": "acme/app"}]},
+             "fields": {"nodes": [dict({"__typename": "x"}, **f) for f in db["fields"]]}}
+        r = {"organization": {"projectV2": p}}
+    elif "node(id:$i)" in q:
+        it = next(i for i in db["items"] if i["id"] == v["i"])
+        r = {"node": {"content": it["content"]}}
+    elif "repository(owner" in q:
+        r = {"repository": {"id": "R1"}}
+    else:
+        r = {}
+    save()
+    print(json.dumps({"data": r}))
+elif args[0] == "api":
+    path = next(a for a in args[1:] if a.startswith("repos/"))
+    m = re.match(r"repos/([^/]+/[^/]+)/issues/(\d+)/comments", path)
+    key = f"{m.group(1)}#{m.group(2)}"
+    if "-f" in args:
+        body = args[args.index("-f") + 1][len("body="):]
+        n = db["clock"] = db.get("clock", 0) + 1
+        cm = {"body": body, "created_at": f"2026-01-01T00:00:{n:02d}Z", "user": {"login": "kelsin", "type": "User"},
+              "html_url": f"https://github.com/{m.group(1)}/issues/{m.group(2)}#c{n}"}
+        db["comments"].setdefault(key, []).append(cm)
+        save()
+        print(json.dumps(cm))
+    else:
+        print(json.dumps(db["comments"].get(key, [])))
+else:
+    sys.exit(f"fakegh: unhandled {args}")

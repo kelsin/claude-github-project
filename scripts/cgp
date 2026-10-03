@@ -1,0 +1,776 @@
+#!/usr/bin/env python3
+"""cgp: GitHub Projects v2 helper for the claude-github-project plugin.
+
+Every deterministic step of the board workflow lives here so agents only
+decide, never fiddle with GraphQL. Output is JSON on stdout; errors go to
+stderr with a non-zero exit code.
+"""
+import argparse
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+HOME = os.environ.get("CGP_HOME") or os.path.expanduser("~/.config/claude-github-project")
+CONFIG = os.path.join(HOME, "config.json")
+STATE = os.path.join(HOME, "state.json")
+MARK = "<!-- cgp -->"
+QMARK = "<!-- cgp:question -->"
+
+# key, name, emoji, color
+COLUMNS = [
+    ("todo", "Todo", "🆕", "BLUE"),
+    ("plan", "Plan", "🧠", "YELLOW"),
+    ("plan_review", "Plan Review", "🔍", "ORANGE"),
+    ("plan_approval", "Plan Approval", "🙋", "PURPLE"),
+    ("plan_approved", "Plan Approved", "✅", "BLUE"),
+    ("implement", "Implement", "🔨", "RED"),
+    ("pr_review", "PR Review", "👀", "PINK"),
+    ("pr_approval", "PR Approval", "🚦", "PURPLE"),
+    ("pr_approved", "PR Approved", "🚀", "BLUE"),
+    ("done", "Done", "🎉", "GREEN"),
+]
+KEYS = [c[0] for c in COLUMNS]
+EMOJI = {c[0]: c[2] for c in COLUMNS}
+# Later pipeline stages first, so stories finish sooner when capped.
+ACTIONABLE = ["pr_approved", "plan_approved", "pr_review", "implement", "plan_review", "plan", "todo"]
+TEXT_FIELDS = {"plan": "Plan", "pr": "PR", "repo": "Repo"}
+WAITING_FIELD = "Waiting On"
+DEFAULTS = {"concurrency": 5, "pollSeconds": 30}
+
+
+def die(msg, code=1):
+    print(f"cgp: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def out(obj):
+    print(json.dumps(obj, indent=2, ensure_ascii=False))
+
+
+def norm(s):
+    return re.sub(r"^[^A-Za-z0-9]+", "", s or "").strip().lower()
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------- gh wrappers
+
+def gh(*args, input=None, check=True):
+    p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
+    if check and p.returncode:
+        die(f"gh {' '.join(args[:4])} failed: {(p.stderr or p.stdout).strip()}")
+    return p
+
+
+def gql(query, **variables):
+    body = json.dumps({"query": query, "variables": variables})
+    p = gh("api", "graphql", "--input", "-", input=body)
+    res = json.loads(p.stdout)
+    if res.get("errors") and not res.get("data"):
+        die(f"graphql: {json.dumps(res['errors'])}")
+    return res["data"]
+
+
+def rest(path, *extra, paginate=True):
+    args = ["api", path, *extra]
+    if paginate:
+        args.insert(1, "--paginate")
+    out_ = gh(*args).stdout.strip()
+    if not out_:
+        return []
+    # --paginate on arrays concatenates JSON arrays: "[..][..]"
+    try:
+        return json.loads(out_)
+    except json.JSONDecodeError:
+        merged = []
+        for chunk in re.split(r"(?<=\])\s*(?=\[)", out_):
+            merged.extend(json.loads(chunk))
+        return merged
+
+
+# ------------------------------------------------------------ config + state
+
+def load_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+
+
+def save_json(path, obj):
+    os.makedirs(HOME, exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+class locked:
+    def __enter__(self):
+        os.makedirs(HOME, exist_ok=True)
+        self.f = open(os.path.join(HOME, ".lock"), "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+
+    def __exit__(self, *a):
+        fcntl.flock(self.f, fcntl.LOCK_UN)
+        self.f.close()
+
+
+def cfg():
+    c = load_json(CONFIG, None)
+    if not c or "board" not in c:
+        die("no board configured; run /cgp:setup <board-url> first")
+    return c
+
+
+def update_state(fn):
+    with locked():
+        st = load_json(STATE, {"workers": [], "counts": {}, "waiting": []})
+        fn(st)
+        save_json(STATE, st)
+
+
+# ------------------------------------------------------------------- project
+
+PROJECT_FRAGMENT = """
+  id title url
+  repositories(first: 50) { nodes { nameWithOwner } }
+  fields(first: 50) { nodes {
+    __typename
+    ... on ProjectV2FieldCommon { id name dataType }
+    ... on ProjectV2SingleSelectField { options { id name } }
+  } }
+"""
+
+
+def parse_board_url(url):
+    m = re.match(r"https?://github\.com/(orgs|users)/([^/]+)/projects/(\d+)", url)
+    if not m:
+        die("not a GitHub project URL (expected https://github.com/orgs/<org>/projects/<n> or /users/<user>/projects/<n>)")
+    return ("organization" if m.group(1) == "orgs" else "user"), m.group(2), int(m.group(3))
+
+
+def fetch_project(kind, owner, number):
+    q = f"query($o:String!,$n:Int!){{ {kind}(login:$o){{ projectV2(number:$n){{ {PROJECT_FRAGMENT} }} }} }}"
+    proj = gql(q, o=owner, n=number)[kind]["projectV2"]
+    if not proj:
+        die("project not found or not accessible")
+    return proj
+
+
+def fields_by_name(proj):
+    return {f["name"]: f for f in proj["fields"]["nodes"] if f.get("id")}
+
+
+def check_scope():
+    p = gh("auth", "status", check=False)
+    text = p.stdout + p.stderr
+    m = re.search(r"Token scopes:(.*)", text)
+    if m and "project" not in m.group(1).replace("read:project", "project"):
+        die("gh token lacks the 'project' scope. Run: gh auth refresh -s project", code=3)
+
+
+ITEMS_QUERY = """
+query($p:ID!,$after:String){ node(id:$p){ ... on ProjectV2{ items(first:100, after:$after){
+  pageInfo{hasNextPage endCursor}
+  nodes{ id isArchived
+    content{ __typename
+      ... on Issue{ number title url state repository{nameWithOwner} }
+      ... on PullRequest{ number title url state repository{nameWithOwner} }
+      ... on DraftIssue{ title body } }
+    fieldValues(first:20){ nodes{ __typename
+      ... on ProjectV2ItemFieldSingleSelectValue{ optionId name field{ ... on ProjectV2FieldCommon{ name } } }
+      ... on ProjectV2ItemFieldTextValue{ text field{ ... on ProjectV2FieldCommon{ name } } } } } } } } } }
+"""
+
+
+def fetch_items(project_id):
+    items, after = [], None
+    while True:
+        page = gql(ITEMS_QUERY, p=project_id, after=after)["node"]["items"]
+        items += page["nodes"]
+        if not page["pageInfo"]["hasNextPage"]:
+            return items
+        after = page["pageInfo"]["endCursor"]
+
+
+def parse_item(raw, c):
+    content = raw.get("content") or {}
+    vals = {}
+    for v in raw["fieldValues"]["nodes"]:
+        if v and v.get("field"):
+            vals[v["field"]["name"]] = v
+    by_opt = {o: k for k, o in c["fields"]["status"]["options"].items()}
+    status = vals.get("Status")
+    column = by_opt.get(status["optionId"]) if status else None
+    kind = {"Issue": "issue", "DraftIssue": "draft", "PullRequest": "pr"}.get(content.get("__typename"), "other")
+    issue_repo = (content.get("repository") or {}).get("nameWithOwner")
+    text = lambda n: (vals.get(n) or {}).get("text") or None
+    return {
+        "item": raw["id"],
+        "kind": kind,
+        "title": content.get("title", ""),
+        "url": content.get("url"),
+        "number": content.get("number"),
+        "issueRepo": issue_repo,
+        "repo": text("Repo") or issue_repo,
+        "column": column or "todo",
+        "unset": column is None,
+        "plan": text("Plan"),
+        "pr": text("PR"),
+        "waiting": bool((vals.get(WAITING_FIELD) or {}).get("name")),
+        "archived": raw["isArchived"],
+        "closed": content.get("state") in ("CLOSED", "MERGED"),
+    }
+
+
+def set_single(c, item, field_id, option_id):
+    gql("""mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{
+      projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ clientMutationId } }""",
+        p=c["board"]["id"], i=item, f=field_id, o=option_id)
+
+
+def set_text(c, item, field_id, value):
+    if value:
+        gql("""mutation($p:ID!,$i:ID!,$f:ID!,$t:String!){ updateProjectV2ItemFieldValue(input:{
+          projectId:$p,itemId:$i,fieldId:$f,value:{text:$t}}){ clientMutationId } }""",
+            p=c["board"]["id"], i=item, f=field_id, t=value)
+    else:
+        clear_field(c, item, field_id)
+
+
+def clear_field(c, item, field_id):
+    gql("""mutation($p:ID!,$i:ID!,$f:ID!){ clearProjectV2ItemFieldValue(input:{
+      projectId:$p,itemId:$i,fieldId:$f}){ clientMutationId } }""",
+        p=c["board"]["id"], i=item, f=field_id)
+
+
+# ---------------------------------------------------------------- comments
+
+def item_issue(item):
+    d = gql("""query($i:ID!){ node(id:$i){ ... on ProjectV2Item{ content{ __typename
+        ... on Issue{ number title repository{nameWithOwner} } } } } }""", i=item)
+    content = d["node"]["content"] or {}
+    if content.get("__typename") != "Issue":
+        die(f"item {item} is not an issue (draft items must be converted: cgp adopt <item> <owner/repo>)")
+    return content["repository"]["nameWithOwner"], content["number"], content["title"]
+
+
+def is_bot(comment):
+    return (comment.get("user") or {}).get("type") == "Bot"
+
+
+def is_agent(comment):
+    return MARK[:8] in (comment.get("body") or "")  # "<!-- cgp"
+
+
+def post_comment(repo, number, body):
+    p = gh("api", f"repos/{repo}/issues/{number}/comments", "-f", f"body={body}")
+    return json.loads(p.stdout)
+
+
+def parse_pr_ref(c_item_pr):
+    m = re.search(r"github\.com/([^/]+/[^/]+)/pull/(\d+)", c_item_pr or "")
+    return (m.group(1), int(m.group(2))) if m else None
+
+
+def list_replies_since(repo, number, marker_ids):
+    """Human comments posted after the newest agent comment containing a marker."""
+    comments = rest(f"repos/{repo}/issues/{number}/comments")
+    last = None
+    for cm in comments:
+        if any(m in (cm.get("body") or "") for m in marker_ids):
+            last = cm["created_at"]
+    if last is None:
+        return [], None
+    return [cm for cm in comments if cm["created_at"] > last and not is_agent(cm) and not is_bot(cm)], last
+
+
+# ----------------------------------------------------------------- commands
+
+def cmd_setup(a):
+    check_scope()
+    kind, owner, number = parse_board_url(a.url)
+    proj = fetch_project(kind, owner, number)
+    fields = fields_by_name(proj)
+    status = fields.get("Status")
+    if not status or "options" not in status:
+        die("project has no single-select Status field")
+    desired = [f"{emoji} {name}" for _, name, emoji, _ in COLUMNS]
+    have = [o["name"] for o in status["options"]]
+
+    remap = {}
+    if have != desired:
+        old_names = {o["id"]: o["name"] for o in status["options"]}
+        for raw in fetch_items(proj["id"]):
+            for v in raw["fieldValues"]["nodes"]:
+                if v and v.get("field", {}).get("name") == "Status":
+                    remap[raw["id"]] = old_names.get(v["optionId"], "")
+            remap.setdefault(raw["id"], "")
+        data = gql("""mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){
+          updateProjectV2Field(input:{fieldId:$f,singleSelectOptions:$o}){ projectV2Field{
+            ... on ProjectV2SingleSelectField{ id options{id name} } } } }""",
+                   f=status["id"],
+                   o=[{"name": f"{e} {n}", "color": col, "description": ""} for _, n, e, col in COLUMNS])
+        status = data["updateProjectV2Field"]["projectV2Field"]
+
+    options = {}
+    for key, name, _, _ in COLUMNS:
+        for o in status["options"]:
+            if norm(o["name"]) == norm(name):
+                options[key] = o["id"]
+
+    def ensure(name, dtype, opts=None):
+        if name in fields:
+            return fields[name]
+        v = {"p": proj["id"], "t": dtype, "n": name, "o": opts or []}
+        d = gql("""mutation($p:ID!,$t:ProjectV2CustomFieldType!,$n:String!,$o:[ProjectV2SingleSelectFieldOptionInput!]){
+          createProjectV2Field(input:{projectId:$p,dataType:$t,name:$n,singleSelectOptions:$o}){ projectV2Field{
+            ... on ProjectV2FieldCommon{ id name } ... on ProjectV2SingleSelectField{ options{id name} } } } }""", **v)
+        return d["createProjectV2Field"]["projectV2Field"]
+
+    waiting = ensure(WAITING_FIELD, "SINGLE_SELECT", [{"name": "You", "color": "RED", "description": ""}])
+    text_ids = {k: ensure(n, "TEXT")["id"] for k, n in TEXT_FIELDS.items()}
+
+    old = load_json(CONFIG, {})
+    repos = old.get("repos", {}) if old.get("board", {}).get("id") == proj["id"] else {}
+    c = {
+        "board": {"id": proj["id"], "url": proj["url"], "title": proj["title"],
+                  "kind": kind, "owner": owner, "number": number},
+        "fields": {"status": {"id": status["id"], "options": options},
+                   "waiting": {"id": waiting["id"], "you": waiting["options"][0]["id"] if "options" in waiting
+                               else fields[WAITING_FIELD]["options"][0]["id"]},
+                   **text_ids},
+        "repos": repos,
+        "settings": {**DEFAULTS, **old.get("settings", {})},
+    }
+    # Waiting On may pre-exist: take its option id from the fetched project.
+    if WAITING_FIELD in fields:
+        c["fields"]["waiting"]["you"] = fields[WAITING_FIELD]["options"][0]["id"]
+
+    for r in proj["repositories"]["nodes"]:
+        c["repos"].setdefault(r["nameWithOwner"], None)
+    if a.repo:
+        rid = gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }",
+                  o=a.repo.split("/")[0], n=a.repo.split("/")[1])["repository"]["id"]
+        if a.repo not in c["repos"]:
+            gql("""mutation($p:ID!,$r:ID!){ linkProjectV2ToRepository(input:{projectId:$p,repositoryId:$r}){
+              clientMutationId } }""", p=proj["id"], r=rid)
+        c["repos"].setdefault(a.repo, None)
+        if a.repo_path:
+            c["repos"][a.repo] = os.path.abspath(a.repo_path)
+    save_json(CONFIG, c)
+
+    moved = {}
+    for item, old_name in remap.items():
+        key = next((k for k, n, _, _ in COLUMNS if norm(n) == norm(old_name)), "todo")
+        set_single(c, item, status["id"], options[key])
+        moved[key] = moved.get(key, 0) + 1
+    out({"board": c["board"], "repos": c["repos"], "itemsRemapped": moved,
+         "note": "items whose old status matched a new column name kept it; all others went to Todo"})
+
+
+def cmd_repo_path(a):
+    c = cfg()
+    if a.path:
+        c["repos"][a.repo] = os.path.abspath(a.path)
+        save_json(CONFIG, c)
+    out(c["repos"] if not a.repo else {a.repo: c["repos"].get(a.repo)})
+
+
+def cmd_discover(a):
+    c = cfg()
+    roots = a.roots or [os.path.expanduser(p) for p in ("~/src", "~/code", "~/projects", "~/dev")]
+    wanted = {r.lower(): r for r in c["repos"] if not c["repos"][r]}
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for d1 in sorted(os.listdir(root)):
+            for cand in (os.path.join(root, d1), *(os.path.join(root, d1, d2) for d2 in
+                         (sorted(os.listdir(os.path.join(root, d1))) if os.path.isdir(os.path.join(root, d1)) else []))):
+                if not os.path.exists(os.path.join(cand, ".git")):
+                    continue
+                url = subprocess.run(["git", "-C", cand, "remote", "get-url", "origin"],
+                                     capture_output=True, text=True).stdout.strip()
+                m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", url)
+                if m and m.group(1).lower() in wanted:
+                    c["repos"][wanted.pop(m.group(1).lower())] = cand
+    save_json(CONFIG, c)
+    out({"found": {r: p for r, p in c["repos"].items() if p}, "missing": [r for r, p in c["repos"].items() if not p]})
+
+
+def cmd_config(a):
+    c = cfg()
+    if a.key:
+        if a.key not in DEFAULTS:
+            die(f"unknown setting; one of {list(DEFAULTS)}")
+        c["settings"][a.key] = int(a.value)
+        save_json(CONFIG, c)
+    out(c["settings"])
+
+
+def process_replies(c, items):
+    """Clear 'Waiting On' for items whose question got a human reply."""
+    for it in items:
+        if not it["waiting"] or it["kind"] != "issue":
+            continue
+        replies, _ = list_replies_since(it["issueRepo"], it["number"], [QMARK])
+        if replies:
+            clear_field(c, it["item"], c["fields"]["waiting"]["id"])
+            it["waiting"], it["answered"] = False, True
+
+
+def snapshot(c):
+    items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
+    items = [i for i in items if not i["archived"] and i["kind"] in ("issue", "draft")]
+    process_replies(c, items)
+    live = [i for i in items if i["column"] != "done"]
+    counts = {k: sum(1 for i in items if i["column"] == k) for k in KEYS}
+    actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"]]
+    actionable.sort(key=lambda i: ACTIONABLE.index(i["column"]))
+    waiting = [i for i in live if i["waiting"]]
+    status = "done" if not live else "work" if actionable else "idle"
+    snap = {
+        "status": status,
+        "board": c["board"],
+        "counts": counts,
+        "remaining": len(live),
+        "batch": actionable[: c["settings"]["concurrency"]],
+        "actionableTotal": len(actionable),
+        "waitingOnYou": waiting,
+        "items": items,
+    }
+
+    def upd(st):
+        st["board"] = c["board"]
+        st["counts"] = counts
+        st["waiting"] = [{"title": i["title"], "url": i["url"], "column": i["column"]} for i in waiting]
+        st["updatedAt"] = now_iso()
+    update_state(upd)
+    return snap
+
+
+def cmd_list(a):
+    snap = snapshot(cfg())
+    if a.brief:
+        snap = {k: v for k, v in snap.items() if k != "items"}
+    out(snap)
+
+
+def cmd_wait(a):
+    c = cfg()
+    deadline = time.time() + a.timeout
+    while True:
+        snap = snapshot(c)
+        if snap["status"] != "idle" or time.time() >= deadline:
+            snap.pop("items")
+            out(snap)
+            return
+        time.sleep(a.interval or c["settings"]["pollSeconds"])
+
+
+def cmd_move(a):
+    c = cfg()
+    if a.column not in KEYS:
+        die(f"column must be one of {KEYS}")
+    set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
+
+    def upd(st):
+        for w in st["workers"]:
+            if w["item"] == a.item:
+                w["column"] = a.column
+    update_state(upd)
+    out({"item": a.item, "column": a.column})
+
+
+def cmd_set(a):
+    c = cfg()
+    key = a.field.lower()
+    if key not in TEXT_FIELDS:
+        die(f"field must be one of {list(TEXT_FIELDS)}")
+    set_text(c, a.item, c["fields"][key], a.value)
+    out({"item": a.item, a.field: a.value or None})
+
+
+def read_body():
+    body = sys.stdin.read().strip()
+    if not body:
+        die("empty comment body (pipe it on stdin)")
+    return body
+
+
+def cmd_comment(a):
+    c = cfg()
+    repo, number, _ = item_issue(a.item)
+    body = read_body()
+    target_repo, target = repo, number
+    if a.pr:
+        ref = parse_pr_ref(next((i["pr"] for i in [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
+                                 if i["item"] == a.item), None))
+        if not ref:
+            die("story has no PR field set")
+        target_repo, target = ref
+    cm = post_comment(target_repo, target, f"{MARK}\n{body}")
+    out({"url": cm["html_url"]})
+
+
+def cmd_ask(a):
+    c = cfg()
+    repo, number, _ = item_issue(a.item)
+    rounds = sum(1 for cm in rest(f"repos/{repo}/issues/{number}/comments") if QMARK in (cm.get("body") or ""))
+    body = read_body()
+    if rounds >= 3:
+        body += "\n\n_This story has needed several rounds of questions; consider rescoping or splitting it._"
+    cm = post_comment(repo, number, f"{QMARK}\n{MARK}\n❓ **Question for you** (reply here; work resumes automatically)\n\n{body}")
+    set_single(c, a.item, c["fields"]["waiting"]["id"], c["fields"]["waiting"]["you"])
+    out({"url": cm["html_url"], "round": rounds + 1})
+
+
+def cmd_answers(a):
+    """Q&A history for a story: every question and the human replies after it."""
+    repo, number, _ = item_issue(a.item)
+    comments = rest(f"repos/{repo}/issues/{number}/comments")
+    thread = [{"who": "agent" if is_agent(cm) else "human", "at": cm["created_at"], "body": cm["body"].replace(QMARK, "").replace(MARK, "").strip()}
+              for cm in comments if not is_bot(cm)]
+    out(thread)
+
+
+def cmd_feedback(a):
+    c = cfg()
+    repo, number, _ = item_issue(a.item)
+    it = next(i for i in [parse_item(r, c) for r in fetch_items(c["board"]["id"])] if i["item"] == a.item)
+    ref = parse_pr_ref(it["pr"])
+    issue_comments = rest(f"repos/{repo}/issues/{number}/comments")
+    sources = [("issue", issue_comments)]
+    if ref:
+        prc, prn = ref
+        sources.append(("pr-comment", rest(f"repos/{prc}/issues/{prn}/comments")))
+        sources.append(("pr-inline", rest(f"repos/{prc}/pulls/{prn}/comments")))
+        reviews = [r for r in rest(f"repos/{prc}/pulls/{prn}/reviews")
+                   if (r.get("body") or "").strip() or r["state"] == "CHANGES_REQUESTED"]
+        for r in reviews:
+            r["created_at"] = r.get("submitted_at") or ""
+        sources.append(("pr-review", reviews))
+    cursor = max([cm["created_at"] for _, cms in sources for cm in cms if is_agent(cm) and "created_at" in cm] or [""])
+    found = [{"where": w, "author": (cm.get("user") or {}).get("login"), "at": cm["created_at"],
+              "url": cm.get("html_url"), "path": cm.get("path"), "body": cm.get("body")}
+             for w, cms in sources for cm in cms
+             if cm["created_at"] > cursor and not is_agent(cm) and not is_bot(cm)]
+    out(sorted(found, key=lambda f: f["at"]))
+
+
+def cmd_adopt(a):
+    c = cfg()
+    owner, name = a.repo.split("/")
+    rid = gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }", o=owner, n=name)["repository"]["id"]
+    d = gql("""mutation($i:ID!,$r:ID!){ convertProjectV2DraftIssueItemToIssue(input:{itemId:$i,repositoryId:$r}){
+      item{ content{ ... on Issue{ number url } } } } }""", i=a.item, r=rid)
+    issue = d["convertProjectV2DraftIssueItemToIssue"]["item"]["content"]
+    set_text(c, a.item, c["fields"]["repo"], a.repo)
+    out(issue)
+
+
+def cmd_repos(a):
+    c = cfg()
+    out(c["repos"])
+
+
+# ------------------------------------------------------------------ workers
+
+def cmd_worker(a):
+    def upd(st):
+        st["workers"] = [w for w in st["workers"] if w["item"] != a.item]
+        if a.action == "start":
+            st["workers"].append({"item": a.item, "column": a.column, "title": a.title, "startedAt": now_iso()})
+    if a.action == "clear":
+        update_state(lambda st: st.__setitem__("workers", []))
+    else:
+        update_state(upd)
+    out(load_json(STATE, {})["workers"])
+
+
+# ----------------------------------------------------------------- worktree
+
+def resolve_repo_path(c, repo):
+    path = c["repos"].get(repo)
+    if not path or not os.path.isdir(path):
+        die(f"no local clone known for {repo}; run: cgp repo-path {repo} <path>")
+    return path
+
+
+def git(path, *args, check=True):
+    p = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True)
+    if check and p.returncode:
+        die(f"git {' '.join(args)} failed: {p.stderr.strip()}")
+    return p.stdout.strip()
+
+
+def cmd_worktree(a):
+    c = cfg()
+    it = next((i for i in [parse_item(r, c) for r in fetch_items(c["board"]["id"])] if i["item"] == a.item), None)
+    if not it or it["kind"] != "issue":
+        die("item is not an issue on this board")
+    repo = it["repo"]
+    base = resolve_repo_path(c, repo)
+    slug = re.sub(r"[^a-z0-9]+", "-", it["title"].lower()).strip("-")[:40]
+    branch = f"cgp/{it['number']}-{slug}"
+    wt = os.path.join(HOME, "worktrees", f"{it['issueRepo'].replace('/', '-')}-{it['number']}")
+    git(base, "fetch", "origin", "--prune")
+    default = git(base, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "origin/main"
+    if os.path.isdir(wt):
+        out({"path": wt, "branch": git(wt, "branch", "--show-current"), "base": default, "repo": repo})
+        return
+    os.makedirs(os.path.dirname(wt), exist_ok=True)
+    if git(base, "rev-parse", "--verify", f"origin/{branch}", check=False):
+        git(base, "worktree", "add", "-B", branch, wt, f"origin/{branch}")
+    else:
+        git(base, "worktree", "add", "-b", branch, wt, default)
+    out({"path": wt, "branch": branch, "base": default, "repo": repo})
+
+
+def cmd_worktree_remove(a):
+    c = cfg()
+    it = next(i for i in [parse_item(r, c) for r in fetch_items(c["board"]["id"])] if i["item"] == a.item)
+    wt = os.path.join(HOME, "worktrees", f"{it['issueRepo'].replace('/', '-')}-{it['number']}")
+    if os.path.isdir(wt):
+        git(resolve_repo_path(c, it["repo"]), "worktree", "remove", "--force", wt)
+    out({"removed": wt})
+
+
+# ----------------------------------------------------------------- PR / CI
+
+def pr_checks(repo, pr):
+    p = gh("pr", "checks", str(pr), "-R", repo, "--json", "name,bucket,link,workflow", check=False)
+    try:
+        return json.loads(p.stdout) if p.returncode in (0, 8) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def failed_logs(repo, failed):
+    seen = set()
+    for f in failed[:3]:
+        m = re.search(r"/runs/(\d+)", f.get("link") or "")
+        if m and m.group(1) not in seen:
+            seen.add(m.group(1))
+            log = gh("run", "view", m.group(1), "-R", repo, "--log-failed", check=False).stdout
+            f["log"] = "\n".join(log.strip().splitlines()[-60:])
+    return failed
+
+
+def cmd_ci_wait(a):
+    deadline, none_since = time.time() + a.timeout, time.time()
+    while True:
+        checks = pr_checks(a.repo, a.pr)
+        failed = [x for x in checks if x["bucket"] in ("fail", "cancel")]
+        pending = [x for x in checks if x["bucket"] == "pending"]
+        if failed:
+            out({"state": "red", "failed": failed_logs(a.repo, failed)})
+            return
+        if checks and not pending:
+            out({"state": "green", "checks": len(checks)})
+            return
+        if not checks and time.time() - none_since > a.grace:
+            out({"state": "none", "note": "no CI checks reported; treat as green"})
+            return
+        if time.time() >= deadline:
+            out({"state": "pending", "pending": [x["name"] for x in pending]})
+            return
+        time.sleep(a.interval)
+
+
+def pr_view(repo, pr):
+    p = gh("pr", "view", str(pr), "-R", repo, "--json",
+           "state,isDraft,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,url,mergedAt")
+    return json.loads(p.stdout)
+
+
+def cmd_pr_state(a):
+    out(pr_view(a.repo, a.pr))
+
+
+def cmd_merge(a):
+    p = gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--auto", "--delete-branch", check=False)
+    if p.returncode:
+        p2 = gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--delete-branch", check=False)
+        if p2.returncode:
+            out({"requested": False, "error": (p2.stderr or p.stderr).strip()})
+            return
+    out({"requested": True})
+
+
+def cmd_merge_wait(a):
+    deadline = time.time() + a.timeout
+    while True:
+        v = pr_view(a.repo, a.pr)
+        if v["state"] == "MERGED":
+            out({"state": "merged"})
+            return
+        if v["state"] == "CLOSED":
+            out({"state": "closed"})
+            return
+        if v["mergeable"] == "CONFLICTING" or v["mergeStateStatus"] == "DIRTY":
+            out({"state": "conflict", "pr": v})
+            return
+        if any(x["bucket"] in ("fail", "cancel") for x in pr_checks(a.repo, a.pr)):
+            out({"state": "ci-red", "pr": v})
+            return
+        if v["mergeStateStatus"] == "BEHIND":
+            gh("pr", "update-branch", str(a.pr), "-R", a.repo, check=False)
+        elif v["reviewDecision"] in ("CHANGES_REQUESTED", "REVIEW_REQUIRED") and v["mergeStateStatus"] == "BLOCKED":
+            out({"state": "blocked", "pr": v})
+            return
+        elif v["mergeStateStatus"] == "CLEAN" and not v.get("autoMergeRequest"):
+            gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--delete-branch", check=False)
+        if time.time() >= deadline:
+            out({"state": "pending", "pr": v})
+            return
+        time.sleep(a.interval)
+
+
+# --------------------------------------------------------------------- main
+
+def main():
+    ap = argparse.ArgumentParser(prog="cgp")
+    sp = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sp.add_parser("setup"); p.add_argument("url"); p.add_argument("--repo"); p.add_argument("--repo-path"); p.set_defaults(fn=cmd_setup)
+    p = sp.add_parser("repo-path"); p.add_argument("repo", nargs="?"); p.add_argument("path", nargs="?"); p.set_defaults(fn=cmd_repo_path)
+    p = sp.add_parser("discover"); p.add_argument("roots", nargs="*"); p.set_defaults(fn=cmd_discover)
+    p = sp.add_parser("config"); p.add_argument("key", nargs="?"); p.add_argument("value", nargs="?"); p.set_defaults(fn=cmd_config)
+    p = sp.add_parser("repos"); p.set_defaults(fn=cmd_repos)
+    p = sp.add_parser("list"); p.add_argument("--brief", action="store_true"); p.set_defaults(fn=cmd_list)
+    p = sp.add_parser("wait"); p.add_argument("--timeout", type=int, default=540); p.add_argument("--interval", type=int, default=0); p.set_defaults(fn=cmd_wait)
+    p = sp.add_parser("move"); p.add_argument("item"); p.add_argument("column"); p.set_defaults(fn=cmd_move)
+    p = sp.add_parser("set"); p.add_argument("item"); p.add_argument("field"); p.add_argument("value"); p.set_defaults(fn=cmd_set)
+    p = sp.add_parser("comment"); p.add_argument("item"); p.add_argument("--pr", action="store_true"); p.set_defaults(fn=cmd_comment)
+    p = sp.add_parser("ask"); p.add_argument("item"); p.set_defaults(fn=cmd_ask)
+    p = sp.add_parser("answers"); p.add_argument("item"); p.set_defaults(fn=cmd_answers)
+    p = sp.add_parser("feedback"); p.add_argument("item"); p.set_defaults(fn=cmd_feedback)
+    p = sp.add_parser("adopt"); p.add_argument("item"); p.add_argument("repo"); p.set_defaults(fn=cmd_adopt)
+    p = sp.add_parser("worker"); p.add_argument("action", choices=["start", "stop", "clear"]); p.add_argument("item", nargs="?")
+    p.add_argument("column", nargs="?"); p.add_argument("title", nargs="?", default=""); p.set_defaults(fn=cmd_worker)
+    p = sp.add_parser("worktree"); p.add_argument("item"); p.set_defaults(fn=cmd_worktree)
+    p = sp.add_parser("worktree-remove"); p.add_argument("item"); p.set_defaults(fn=cmd_worktree_remove)
+    p = sp.add_parser("ci-wait"); p.add_argument("repo"); p.add_argument("pr", type=int)
+    p.add_argument("--timeout", type=int, default=1500); p.add_argument("--interval", type=int, default=20)
+    p.add_argument("--grace", type=int, default=90); p.set_defaults(fn=cmd_ci_wait)
+    p = sp.add_parser("pr-state"); p.add_argument("repo"); p.add_argument("pr", type=int); p.set_defaults(fn=cmd_pr_state)
+    p = sp.add_parser("merge"); p.add_argument("repo"); p.add_argument("pr", type=int); p.set_defaults(fn=cmd_merge)
+    p = sp.add_parser("merge-wait"); p.add_argument("repo"); p.add_argument("pr", type=int)
+    p.add_argument("--timeout", type=int, default=1500); p.add_argument("--interval", type=int, default=20); p.set_defaults(fn=cmd_merge_wait)
+
+    a = ap.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

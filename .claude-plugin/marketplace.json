@@ -1,0 +1,11 @@
+{
+  "name": "claude-github-project",
+  "owner": { "name": "kelsin" },
+  "plugins": [
+    {
+      "name": "cgp",
+      "source": "./",
+      "description": "Run GitHub Project board stories through plan, review, implement and merge with parallel agents"
+    }
+  ]
+}
