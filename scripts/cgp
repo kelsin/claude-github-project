@@ -38,7 +38,7 @@ KEYS = [c[0] for c in COLUMNS]
 EMOJI = {c[0]: c[2] for c in COLUMNS}
 # Later pipeline stages first, so stories finish sooner when capped.
 ACTIONABLE = ["pr_approved", "plan_approved", "pr_review", "implement", "plan_review", "plan", "todo"]
-TEXT_FIELDS = {"plan": "Plan", "pr": "PR", "repo": "Repo"}
+TEXT_FIELDS = {"plan": "Plan", "pr": "PR"}
 WAITING_FIELD = "Waiting On"
 DEFAULTS = {"concurrency": 0, "pollSeconds": 30}  # concurrency 0 = no cap
 
@@ -241,8 +241,6 @@ def parse_item(raw, c):
         "url": content.get("url"),
         "number": content.get("number"),
         "issueRepo": issue_repo,
-        "repo": text("Repo") or issue_repo,
-        "repoSet": bool(text("Repo")),
         "column": column or "todo",
         "unset": column is None,
         "plan": text("Plan"),
@@ -509,7 +507,7 @@ def cleanup_worktree(c, it):
     try:
         wt = wt_path(it)
         if os.path.isdir(wt):
-            base = resolve_repo_path(c, it["repo"])
+            base = resolve_repo_path(c, it["issueRepo"])
             git(base, "worktree", "remove", "--force", wt, check=False)
             git(base, "branch", "-D", f"cgp/{it['number']}", check=False)
     except SystemExit:
@@ -620,11 +618,6 @@ def cmd_set(a):
     value = a.value
     if key == "pr" and value and not parse_pr_ref(c, value):
         die("PR must be https://github.com/<linked repo>/pull/<n> on a repo linked to this board")
-    if key == "repo":
-        value = require_repo(c, value)
-        cur = get_item(c, a.item)
-        if cur["repoSet"] and cur["repo"].lower() != value.lower():
-            die(f"Repo is already {cur['repo']}; only the user changes it")
     set_text(c, a.item, c["fields"][key], value)
     out({"item": a.item, a.field: value or None})
 
@@ -731,7 +724,6 @@ def cmd_adopt(a):
     d = gql("""mutation($i:ID!,$r:ID!){ convertProjectV2DraftIssueItemToIssue(input:{itemId:$i,repositoryId:$r}){
       item{ content{ ... on Issue{ number url } } } } }""", i=a.item, r=rid)
     issue = d["convertProjectV2DraftIssueItemToIssue"]["item"]["content"]
-    set_text(c, a.item, c["fields"]["repo"], a.repo)
     out(issue)
 
 
@@ -800,7 +792,7 @@ def cmd_worktree(a):
     it = get_item(c, a.item)
     if it["kind"] != "issue":
         die("item is not an issue on this board")
-    repo = it["repo"]
+    repo = it["issueRepo"]
     base = resolve_repo_path(c, repo)
     branch = f"cgp/{it['number']}"
     wt = wt_path(it)
@@ -995,7 +987,7 @@ def cmd_worktree_remove(a):
         die("item is not an issue on this board")
     wt = wt_path(it)
     if os.path.isdir(wt):
-        base = resolve_repo_path(c, it["repo"])
+        base = resolve_repo_path(c, it["issueRepo"])
         git(base, "worktree", "remove", "--force", wt)
         git(base, "branch", "-D", f"cgp/{it['number']}", check=False)
     out({"removed": wt})

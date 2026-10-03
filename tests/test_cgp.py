@@ -81,7 +81,7 @@ class TestSetup(Base):
         self.assertEqual(colors["🔍 Plan Review"], "ORANGE")
         self.assertEqual(colors["🎉 Done"], "GREEN")
         fnames = {f["name"] for f in self.read_db()["fields"]}
-        self.assertTrue({"Waiting On", "Plan", "PR", "Repo"} <= fnames)
+        self.assertTrue({"Waiting On", "Plan", "PR"} <= fnames)
         # Todo/Done keep their option ids; "In Progress" and the unset draft fall to Todo
         self.assertEqual(res["itemsRemapped"], {"todo": 2, "done": 0})
         self.assertEqual(res["repos"], {"acme/app": None})
@@ -112,7 +112,7 @@ class TestListAndMove(Base):
         self.assertEqual(snap["status"], "work")
         self.assertEqual([i["item"] for i in snap["batch"]], ["i1", "i4"])  # pr_approved before todo
         self.assertEqual(snap["counts"]["plan_approval"], 1)
-        self.assertEqual(snap["batch"][0]["repo"], "acme/app")
+        self.assertEqual(snap["batch"][0]["issueRepo"], "acme/app")
         self.assertEqual(self.state()["counts"]["plan_approval"], 1)
 
     def test_concurrency_cap(self):
@@ -145,9 +145,6 @@ class TestListAndMove(Base):
         self.cgp("set", "i1", "plan", "https://claude.ai/artifact/x")
         it = next(i for i in self.cgp("list")["items"] if i["item"] == "i1")
         self.assertEqual(it["plan"], "https://claude.ai/artifact/x")
-        self.cgp("set", "i1", "repo", "acme/app")
-        it = next(i for i in self.cgp("list")["items"] if i["item"] == "i1")
-        self.assertTrue(it["repoSet"])
 
 
 class TestQuestions(Base):
@@ -342,11 +339,9 @@ class TestSync(Base):
 class TestGates(Base):
     def test_set_validation(self):
         self.setup_board()
-        self.assertNotEqual(self.cgp("set", "i1", "repo", "evil/other", ok=False).returncode, 0)
         self.assertNotEqual(self.cgp("set", "i1", "pr", "https://github.com/evil/x/pull/1", ok=False).returncode, 0)
         self.assertNotEqual(self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/1?x=../..", ok=False).returncode, 0)
         self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/1")
-        self.cgp("set", "i1", "repo", "acme/app")
         d = self.read_db(); d["fields"].append({"id": "x"}); d["fields"].pop()
         self.write_db(d)
 

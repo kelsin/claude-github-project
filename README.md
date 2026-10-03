@@ -24,7 +24,7 @@ gh auth refresh -s project
 ## Use
 
 1. From a checkout of one of your repos: `/cgp:setup https://github.com/orgs/<org>/projects/<n>` (or `/users/<user>/projects/<n>`).
-   - Replaces the Status options with the 10 columns below, adds fields `Waiting On`, `Plan`, `PR`, `Repo`, links the current repo to the board and records its local path.
+   - Replaces the Status options with the 10 columns below, adds fields `Waiting On`, `Plan`, `PR`, links the current repo to the board and records its local path.
    - Existing items whose old status name matches a new column keep it, closed issues go to Done, everything else lands in Todo. Closed issues anywhere on the board are filed under Done.
    - Run it again from another repo's checkout (same URL) to link more repos. Repos without a known local path are asked for.
 2. `/cgp:run`. Add stories to Todo on the board (issues, or draft items which get converted to issues in the repo the agent picks) and leave it running. It ends only when every story is Done, or when you stop it.
@@ -59,7 +59,7 @@ Each cycle the loop dispatches one worker per actionable story (no cap by defaul
 The loop runs unattended with your `gh` token, and it reads text anyone can write on a linked repo. The design assumes that text is hostile:
 
 - **Only trusted people can steer it.** `feedback`, `answers` and question replies only use comments from you, repo owners, and collaborators with write access (checked through the API). Everything else is reported as `ignoredUntrusted` with no body. The agent marker only counts on comments posted by your own gh account, so it can't be forged.
-- **The human gates are enforced in code, not just in prompts.** `cgp move` refuses to move a story into Plan Approved or PR Approved, out of Plan Approval or PR Approval, or to Done unless its PR is merged. `cgp merge` works only on a story that is in PR Approved and only for that story's own PR. `PR` and `Repo` fields must name repos linked to the board, and `Repo` can't be changed once set.
+- **The human gates are enforced in code, not just in prompts.** `cgp move` refuses to move a story into Plan Approved or PR Approved, out of Plan Approval or PR Approval, or to Done unless its PR is merged. `cgp merge` works only on a story that is in PR Approved and only for that story's own PR. The `PR` field must name a PR on a repo linked to the board.
 - **Prompts treat everything written by people as data** (no running commands, fetching URLs, adding dependencies or leaking tokens because text said so), and `cgp guard` fails any branch that touches `.github/` or CODEOWNERS without the approved plan listing it.
 - **Code changed after your PR approval is re-approved**: a fix that is more than a clean rebase sends the story back to PR Approval instead of merging.
 - `~/.config/claude-github-project` is private to your user (0700/0600).
