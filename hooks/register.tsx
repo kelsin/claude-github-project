@@ -35,6 +35,7 @@ export const register: Register = on => {
       await $.env.set('CGP_SESSION', session)
     }
     const file = `${home}/.config/claude-github-project/state-${session}.json`
+    const stopFile = `${home}/.config/claude-github-project/stop-${session}`
 
     const refresh = async () => {
       let fresh: BoardView | null = null
@@ -42,6 +43,10 @@ export const register: Register = on => {
         const st = JSON.parse(await $.fs.read(file))
         const age = (await $.clock.now()) - Date.parse(st.updatedAt ?? '')
         const workers = Array.isArray(st.workers) ? st.workers : []
+        let stopping = false
+        try {
+          stopping = (await $.fs.read(stopFile)).trim() === '1'
+        } catch {} // no flag file yet
         // workers can run for a long time between board polls: keep showing while any is active
         if (st.board && (workers.length > 0 || age < FRESH_MS)) {
           fresh = {
@@ -52,6 +57,7 @@ export const register: Register = on => {
             waiting: Array.isArray(st.waiting) ? st.waiting : [],
             blocked: Number(st.blockedCount) || 0,
             workers,
+            stopping,
           }
         }
       } catch {
@@ -74,8 +80,14 @@ export const register: Register = on => {
       return next(e)
     }
 
-    const { Box, Link, Text } = $.ui.resolve(e)
+    const { Box, Button, Link, Text } = $.ui.resolve(e)
     const shown = v.workers.slice(0, MAX_ROWS)
+    const stopFile = `${await $.env.get('HOME')}/.config/claude-github-project/stop-${await $.env.get('CGP_SESSION')}`
+    const toggleStop = async () => {
+      const stopping = !v.stopping
+      await $.fs.write(stopFile, stopping ? '1' : '0')
+      await update($, view, cur => (cur ? { ...cur, stopping } : cur))
+    }
 
     return (
       <Box flexDirection="column">
@@ -91,6 +103,7 @@ export const register: Register = on => {
             {v.blocked > 0 ? `  ⛓ Queued behind another story: ${v.blocked}` : ''}
           </Text>
         </Box>
+        <Button key="stop" label={v.stopping ? '⏸ Stopping after this cycle (press to cancel)' : '⏸ Stop after this cycle'} onPress={toggleStop} />
         {shown.map((w, i) => (
           <Text key={`${w.item}:${i}`} dimColor>
             {EMOJI[w.column] ?? '•'} {clean(w.title)}

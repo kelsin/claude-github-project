@@ -1,4 +1,4 @@
-import json, os, subprocess, sys, tempfile, unittest
+import json, os, subprocess, sys, tempfile, time, unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CGP = os.path.join(ROOT, "scripts", "cgp")
@@ -142,6 +142,20 @@ class TestListAndMove(Base):
             self.force(i, "pr_approval")
         r = self.cgp("wait", "--timeout", "0")
         self.assertEqual(r["status"], "idle")
+
+    def test_stop_request_is_reported_and_wakes_wait(self):
+        self.setup_board()
+        for i in ("i1", "i2", "i4"):
+            self.force(i, "pr_approval")
+        self.assertFalse(self.cgp("list")["stopRequested"])
+        self.assertTrue(self.cgp("stop")["stopRequested"])
+        self.assertTrue(self.cgp("list")["stopRequested"])
+        t = time.time()
+        r = self.cgp("wait", "--timeout", "60")  # returns at once instead of waiting out the timeout
+        self.assertLess(time.time() - t, 30)
+        self.assertTrue(r["stopRequested"])
+        self.assertFalse(self.cgp("stop", "--cancel")["stopRequested"])
+        self.assertFalse(self.cgp("list")["stopRequested"])
 
     def test_set_text_field(self):
         self.setup_board()
