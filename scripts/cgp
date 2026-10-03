@@ -467,7 +467,13 @@ def snapshot(c):
     items = [i for i in items if not (i["closed"] and i["column"] != "done")]
     live = [i for i in items if i["column"] != "done"]
     counts = {k: sum(1 for i in items if i["column"] == k) for k in KEYS}
-    actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"]]
+    blocks = load_json(STATE, {}).get("blocks", {})
+    live_ids = {i["item"] for i in live}
+    titles = {i["item"]: i["title"] for i in live}
+    for i in live:
+        i["blockedBy"] = [titles[b] for b in blocks.get(i["item"], []) if b in live_ids]
+    blocked = [i for i in live if i["blockedBy"] and i["column"] == "plan_approved"]
+    actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and i not in blocked]
     actionable.sort(key=lambda i: ACTIONABLE.index(i["column"]))
     waiting = [i for i in live if i["waiting"]]
     status = "done" if not live else "work" if actionable else "idle"
@@ -479,6 +485,7 @@ def snapshot(c):
         "batch": actionable[: c["settings"]["concurrency"]],
         "actionableTotal": len(actionable),
         "waitingOnYou": waiting,
+        "blocked": [{"title": i["title"], "blockedBy": i["blockedBy"]} for i in blocked],
         "items": items,
     }
 
@@ -486,6 +493,9 @@ def snapshot(c):
         st["board"] = c["board"]
         st["counts"] = counts
         st["waiting"] = [{"title": i["title"], "url": i["url"], "column": i["column"]} for i in waiting]
+        st["blockedCount"] = len(blocked)
+        st["blocks"] = {k: [b for b in v if b in live_ids] for k, v in st.get("blocks", {}).items() if k in live_ids}
+        st["touches"] = {k: v for k, v in st.get("touches", {}).items() if k in live_ids}
         st["updatedAt"] = now_iso()
     update_state(upd)
     return snap
@@ -659,6 +669,10 @@ def git(path, *args, check=True):
     return p.stdout.strip()
 
 
+def wt_path(it):
+    return os.path.join(HOME, "worktrees", f"{it['issueRepo'].replace('/', '-')}-{it['number']}")
+
+
 def cmd_worktree(a):
     c = cfg()
     it = get_item(c, a.item)
@@ -667,7 +681,7 @@ def cmd_worktree(a):
     repo = it["repo"]
     base = resolve_repo_path(c, repo)
     branch = f"cgp/{it['number']}"
-    wt = os.path.join(HOME, "worktrees", f"{it['issueRepo'].replace('/', '-')}-{it['number']}")
+    wt = wt_path(it)
     git(base, "fetch", "origin", "--prune")
     git(base, "worktree", "prune")
     default = git(base, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "origin/main"
@@ -684,10 +698,130 @@ def cmd_worktree(a):
     out({"path": wt, "branch": branch, "base": default, "repo": repo})
 
 
+def cmd_sync(a):
+    """Rebase the story's worktree onto the freshly fetched default branch.
+
+    clean: already on top; rebased: moved (push with --force-with-lease if the branch is on the remote);
+    conflict: rebase left in progress, `files` lists unresolved paths to fix, git add, then
+    `GIT_EDITOR=true git rebase --continue`.
+    """
+    c = cfg()
+    it = get_item(c, a.item)
+    wt = wt_path(it)
+    if not os.path.isdir(wt):
+        die("no worktree for this story; run: cgp worktree <item>")
+    git(wt, "fetch", "origin", "--prune")
+    default = git(wt, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "origin/main"
+
+    def unresolved():
+        return git(wt, "diff", "--name-only", "--diff-filter=U", check=False).splitlines()
+
+    in_progress = any(os.path.isdir(os.path.join(wt, git(wt, "rev-parse", "--git-path", d)))
+                      for d in ("rebase-merge", "rebase-apply"))
+    if in_progress:
+        out({"state": "conflict", "files": unresolved(), "base": default, "note": "an earlier rebase is still in progress"})
+        return
+    behind = int(git(wt, "rev-list", "--count", f"HEAD..{default}") or 0)
+    if behind == 0:
+        out({"state": "clean", "behind": 0, "base": default})
+        return
+    p = subprocess.run(["git", "-C", wt, "rebase", "--autostash", default], capture_output=True, text=True)
+    if p.returncode == 0:
+        out({"state": "rebased", "behind": behind, "base": default})
+    else:
+        out({"state": "conflict", "behind": behind, "files": unresolved(), "base": default})
+
+
+# ------------------------------------------------- overlap and ordering
+
+def norm_path(path):
+    return re.sub(r"^(\./)+", "", path.strip())
+
+
+def covers(a, b):
+    """True when path a (file, or directory ending in /) contains or equals path b."""
+    return a == b or (a.endswith("/") and b.startswith(a))
+
+
+def story_files(st, it):
+    files = set(norm_path(f) for f in st.get("touches", {}).get(it["item"], []))
+    ref = parse_pr_ref(it.get("pr"))
+    if ref:
+        files |= {f["filename"] for f in rest(f"repos/{ref[0]}/pulls/{ref[1]}/files")}
+    return files
+
+
+def rank(it):
+    return (KEYS.index(it["column"]), -(it["number"] or 0))
+
+
+def would_cycle(blocks, item, other):
+    seen, todo = set(), [other]
+    while todo:
+        n = todo.pop()
+        if n == item:
+            return True
+        if n not in seen:
+            seen.add(n)
+            todo += blocks.get(n, [])
+    return False
+
+
+def cmd_touches(a):
+    if a.paths:
+        update_state(lambda st: st.setdefault("touches", {}).__setitem__(a.item, [norm_path(p) for p in a.paths]))
+    out(load_json(STATE, {}).get("touches", {}).get(a.item, []))
+
+
+def cmd_overlap(a):
+    c = cfg()
+    st = load_json(STATE, {})
+    me = get_item(c, a.item)
+    mine = story_files(st, me)
+    items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
+    blocks = st.get("blocks", {})
+    found = []
+    for o in items:
+        if o["item"] == a.item or o["kind"] != "issue" or o["closed"] or o["column"] in ("todo", "done"):
+            continue
+        theirs = story_files(st, o)
+        files = sorted(mine & theirs - {f for f in mine | theirs if f.endswith("/")})
+        areas = sorted({f"{f} ~ {g}" for f in mine for g in theirs if f != g and (covers(f, g) or covers(g, f))})
+        if not files and not areas:
+            continue
+        found.append({"item": o["item"], "title": o["title"], "number": o["number"], "column": o["column"],
+                      "pr": o["pr"], "files": files, "areas": areas, "ahead": rank(o) > rank(me),
+                      "alreadyWaitsOnMe": a.item in blocks.get(o["item"], [])})
+    block_on = [f["item"] for f in found if f["ahead"] and f["files"] and not f["alreadyWaitsOnMe"]]
+    out({"story": {"item": a.item, "touches": sorted(mine)}, "overlaps": found,
+         "suggest": {"action": "block", "on": block_on} if block_on else {"action": "proceed"}})
+
+
+def cmd_block(a):
+    if a.unblock:
+        def un(st):
+            st.setdefault("blocks", {}).pop(a.item, None)
+        update_state(un)
+        out({"item": a.item, "blockedBy": []})
+        return
+    if not a.other:
+        die("usage: cgp block <item> <other-item> | cgp block <item> --unblock")
+    st = load_json(STATE, {})
+    if would_cycle(st.get("blocks", {}), a.item, a.other):
+        die("refusing: that would create a dependency cycle")
+
+    def add(st):
+        lst = st.setdefault("blocks", {}).setdefault(a.item, [])
+        if a.other not in lst:
+            lst.append(a.other)
+    update_state(add)
+    out({"item": a.item, "blockedBy": load_json(STATE, {})["blocks"][a.item]})
+
+
 def cmd_worktree_remove(a):
     c = cfg()
     it = get_item(c, a.item)
-    wt = os.path.join(HOME, "worktrees", f"{it['issueRepo'].replace('/', '-')}-{it['number']}")
+    wt = wt_path(it)
     if os.path.isdir(wt):
         base = resolve_repo_path(c, it["repo"])
         git(base, "worktree", "remove", "--force", wt)
@@ -821,6 +955,10 @@ def main():
     p.add_argument("column", nargs="?"); p.add_argument("title", nargs="?", default=""); p.set_defaults(fn=cmd_worker)
     p = sp.add_parser("worktree"); p.add_argument("item"); p.set_defaults(fn=cmd_worktree)
     p = sp.add_parser("worktree-remove"); p.add_argument("item"); p.set_defaults(fn=cmd_worktree_remove)
+    p = sp.add_parser("sync"); p.add_argument("item"); p.set_defaults(fn=cmd_sync)
+    p = sp.add_parser("touches"); p.add_argument("item"); p.add_argument("paths", nargs="*"); p.set_defaults(fn=cmd_touches)
+    p = sp.add_parser("overlap"); p.add_argument("item"); p.set_defaults(fn=cmd_overlap)
+    p = sp.add_parser("block"); p.add_argument("item"); p.add_argument("other", nargs="?"); p.add_argument("--unblock", action="store_true"); p.set_defaults(fn=cmd_block)
     p = sp.add_parser("ci-wait"); p.add_argument("repo"); p.add_argument("pr", type=int)
     p.add_argument("--timeout", type=int, default=540); p.add_argument("--interval", type=int, default=20)
     p.add_argument("--grace", type=int, default=120); p.set_defaults(fn=cmd_ci_wait)

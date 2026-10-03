@@ -48,6 +48,12 @@ Colors: Todo blue, Plan yellow, Plan Review orange, Plan Approval purple, Plan A
 
 Each cycle the loop dispatches one worker per actionable story (up to 5 at once) and waits for all of them; the next cycle picks up their new columns. When only stories in your columns, or waiting on your answers, are left, it polls the board every 30 seconds and resumes the moment something changes.
 
+## Keeping up with main, and stories that collide
+
+- Every time a worker is about to write code (implement, fix review findings, address PR feedback, resolve a merge problem) it runs `scripts/cgp sync <story>`, which fetches and rebases the story's worktree onto the latest default branch. Conflicts are resolved by the worker (a sub-agent for big ones), tested, and force-pushed with lease; if it can't resolve one with confidence it asks you.
+- Each plan records the files and directories it changes (`cgp touches`). Before implementing, the worker runs `cgp overlap`, which compares them with every other in-flight story (plan files, plus the real file list of any open PR). When another story shares a file and is further along (or at the same stage with a lower issue number), this one is ordered behind it with `cgp block`: it stays in Plan Approved with a status comment saying who it waits for, the loop skips it, and it is released the moment the blocker is Done and then rebased onto the new main. Directory-level overlaps never block; they are noted in the plan or PR. The ordering is a strict stage-then-number order, and `block` refuses to create cycles.
+- The mod shows how many stories are queued this way.
+
 ## Questions
 
 Agents ask questions as a comment on the story, with numbered questions each carrying a proposed default (reply "defaults ok" or answer some). The story gets `Waiting On: You` on the board and is skipped until you reply on the issue. Any new non-bot comment without the agent marker counts as a reply; the field clears itself and the worker resumes with the whole Q&A history. After 3 question rounds on one story the comment suggests rescoping it. Agents prefer writing assumptions into the plan (an explicit "Assumptions" section) over asking, so Plan Approval is where you review them.

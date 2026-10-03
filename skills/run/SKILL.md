@@ -38,6 +38,7 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
 ## Rules
 
 - The user decides the Plan Approval and PR Approval columns. Never move a story out of them or work on them.
+- Stories in Plan Approved that wait on another story (`blocked` in the list output) are skipped until their blockers are Done; they do not count toward the no-progress rule.
 - A worker failure (agent error, crash) must not end the loop: note it in one line, leave the story where it is, and continue.
 - Track `(item, column)` after each cycle. If a story is still in the same column after 3 consecutive cycles of being worked (crashes or no progress), run `CGP ask <item>` with a short summary so it waits on the user instead of spinning. Keep the per-cycle output short; the loop may run for days.
 - Do not do story work yourself; you only dispatch, wait and report.

@@ -75,6 +75,9 @@ elif args[:2] == ["api", "graphql"]:
         r = {}
     save()
     print(json.dumps({"data": r}))
+elif args[0] == "api" and any(re.match(r"repos/[^/]+/[^/]+/pulls/\d+/files", a) for a in args):
+    m = re.match(r"repos/([^/]+/[^/]+)/pulls/(\d+)/files", next(a for a in args if a.startswith("repos/")))
+    print(json.dumps([{"filename": f} for f in db.get("pr_files", {}).get(f"{m.group(1)}#{m.group(2)}", [])]))
 elif args[0] == "api":
     path = next(a for a in args[1:] if a.startswith("repos/"))
     m = re.match(r"repos/([^/]+/[^/]+)/issues/(\d+)/comments", path)

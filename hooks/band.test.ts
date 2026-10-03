@@ -24,6 +24,7 @@ const cases: [string, string, string[], string[]][] = [
   ['stale but workers active', state({ updatedAt: '2026-10-03T10:00:00Z' }), ['Story A'], ['HIDDEN']],
   ['bad json', '{"board":', ['HIDDEN'], ['My Board']],
   ['unlinkable url', state({ board: { title: 'My Board', url: 'https://github.com/users/kélsin/p' } }), ['My Board', 'Story A'], ['HIDDEN']],
+  ['blocked count', state({ blockedCount: 2 }), ['Queued behind another story: 2'], ['HIDDEN']],
   ['waiting count', state({ waiting: [{ title: 't', url: null, column: 'plan' }] }), ['Waiting on you: 1'], ['HIDDEN']],
 ]
 

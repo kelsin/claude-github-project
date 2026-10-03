@@ -41,6 +41,7 @@ export const register: Register = on => {
             planApproval: Number(st.counts?.plan_approval) || 0,
             prApproval: Number(st.counts?.pr_approval) || 0,
             waiting: Array.isArray(st.waiting) ? st.waiting : [],
+            blocked: Number(st.blockedCount) || 0,
             workers,
           }
         }
@@ -78,6 +79,7 @@ export const register: Register = on => {
             {'  '}
             {EMOJI.pr_approval} PR Approval: {v.prApproval}
             {v.waiting.length > 0 ? `  ❓ Waiting on you: ${v.waiting.length}` : ''}
+            {v.blocked > 0 ? `  ⛓ Queued behind another story: ${v.blocked}` : ''}
           </Text>
         </Box>
         {shown.map((w, i) => (

@@ -232,6 +232,100 @@ class TestRobustness(Base):
         self.assertEqual([c["body"] for c in m.rest("repos/x/y/issues/1/comments")], ["see [a][b] ok", "x"])
 
 
+class TestOverlap(Base):
+    def test_overlap_orders_by_stage_then_number_and_blocks_gate_the_loop(self):
+        self.setup_board()
+        self.cgp("move", "i1", "plan_approved")
+        self.cgp("move", "i2", "pr_review")
+        self.cgp("move", "i4", "plan_review")  # draft: ignored by overlap (not an issue)
+        self.cgp("set", "i2", "pr", "https://github.com/acme/app/pull/9")
+        d = self.read_db(); d["pr_files"] = {"acme/app#9": ["src/a.py", "src/b.py"]}; self.write_db(d)
+        self.cgp("touches", "i1", "src/a.py", "docs/")
+        r = self.cgp("overlap", "i1")
+        self.assertEqual([o["item"] for o in r["overlaps"]], ["i2"])
+        self.assertEqual(r["overlaps"][0]["files"], ["src/a.py"])
+        self.assertTrue(r["overlaps"][0]["ahead"])
+        self.assertEqual(r["suggest"], {"action": "block", "on": ["i2"]})
+        # blocked story is skipped by the loop but still counts as remaining work
+        self.cgp("block", "i1", "i2")
+        snap = self.cgp("list")
+        self.assertNotIn("i1", [i["item"] for i in snap["batch"]])
+        self.assertEqual(snap["blocked"][0]["blockedBy"], ["two"])
+        self.assertEqual(self.state()["blockedCount"], 1)
+        # the blocker finishing releases it
+        self.cgp("move", "i2", "done")
+        snap = self.cgp("list")
+        self.assertIn("i1", [i["item"] for i in snap["batch"]])
+        self.assertEqual(snap["blocked"], [])
+
+    def test_directory_only_overlap_proceeds(self):
+        self.setup_board()
+        self.cgp("move", "i1", "plan_approved")
+        self.cgp("move", "i2", "implement")
+        self.cgp("touches", "i1", "src/x.py")
+        self.cgp("touches", "i2", "src/")
+        r = self.cgp("overlap", "i1")
+        self.assertEqual(r["overlaps"][0]["areas"], ["src/x.py ~ src/"])
+        self.assertEqual(r["suggest"], {"action": "proceed"})
+
+    def test_block_refuses_cycles(self):
+        self.setup_board()
+        self.cgp("block", "i1", "i2")
+        p = self.cgp("block", "i2", "i1", ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("cycle", p.stderr)
+        self.cgp("block", "i1", "--unblock")
+        self.cgp("block", "i2", "i1")
+
+
+class TestSync(Base):
+    def git(self, path, *args):
+        subprocess.run(["git", "-C", path, *args], check=True, capture_output=True, text=True,
+                       env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+    def setUp(self):
+        super().setUp()
+        self.origin = os.path.join(self.tmp, "origin.git")
+        self.clone = os.path.join(self.tmp, "clone")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", self.origin], check=True)
+        subprocess.run(["git", "clone", "-q", self.origin, self.clone], check=True, capture_output=True)
+        with open(os.path.join(self.clone, "f.txt"), "w") as f:
+            f.write("one\n")
+        self.git(self.clone, "add", "."); self.git(self.clone, "commit", "-qm", "init")
+        self.git(self.clone, "push", "-q", "origin", "HEAD:main")
+        self.git(self.clone, "remote", "set-head", "origin", "main")
+        self.cgp("setup", "https://github.com/orgs/acme/projects/1", "--repo", "acme/app", "--repo-path", self.clone)
+        self.wt = self.cgp("worktree", "i1")["path"]
+
+    def push_to_main(self, text):
+        with open(os.path.join(self.clone, "f.txt"), "w") as f:
+            f.write(text)
+        self.git(self.clone, "commit", "-qam", "main moves")
+        self.git(self.clone, "push", "-q", "origin", "HEAD:main")
+
+    def test_clean_then_rebased(self):
+        self.assertEqual(self.cgp("sync", "i1")["state"], "clean")
+        with open(os.path.join(self.wt, "g.txt"), "w") as f:
+            f.write("mine\n")
+        self.git(self.wt, "add", "."); self.git(self.wt, "commit", "-qm", "mine")
+        self.push_to_main("one\ntwo\n")
+        r = self.cgp("sync", "i1")
+        self.assertEqual((r["state"], r["behind"]), ("rebased", 1))
+        self.assertTrue(os.path.exists(os.path.join(self.wt, "g.txt")))
+        self.assertEqual(open(os.path.join(self.wt, "f.txt")).read(), "one\ntwo\n")
+
+    def test_conflict_reports_files_and_stays_in_progress(self):
+        with open(os.path.join(self.wt, "f.txt"), "w") as f:
+            f.write("mine\n")
+        self.git(self.wt, "commit", "-qam", "mine")
+        self.push_to_main("theirs\n")
+        r = self.cgp("sync", "i1")
+        self.assertEqual((r["state"], r["files"]), ("conflict", ["f.txt"]))
+        again = self.cgp("sync", "i1")  # re-running mid-conflict reports it instead of failing
+        self.assertEqual((again["state"], again["files"]), ("conflict", ["f.txt"]))
+
+
 class TestWorkers(Base):
     def test_worker_lifecycle_and_move_updates_column(self):
         self.setup_board()

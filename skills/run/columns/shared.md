@@ -11,6 +11,10 @@ You own exactly one story for this run. `CGP` is the absolute path you were give
 - `CGP answers <item>`: the full question and answer history.
 - `CGP feedback <item>`: human comments since your last comment, across the issue, the PR, inline review comments and reviews.
 - `CGP repos`, `CGP adopt <item> <owner/repo>` (turn a draft item into an issue), `CGP worktree <item>`, `CGP worktree-remove <item>`.
+- `CGP sync <item>`: rebase the worktree onto the freshly fetched default branch. Returns `clean`, `rebased` or `conflict` (with `files`).
+- `CGP touches <item> [paths...]`: record (or read) the files/directories (directories end in `/`, paths relative to the repo root) this story changes.
+- `CGP overlap <item>`: scan the board for stories touching the same files; returns `overlaps` and a `suggest` of `proceed` or `block on [...]`.
+- `CGP block <item> <other-item>` / `CGP block <item> --unblock`: make a story wait until another is Done.
 - `CGP ci-wait <repo> <pr>`, `CGP pr-state <repo> <pr>`, `CGP merge <repo> <pr>`, `CGP merge-wait <repo> <pr>`.
 
 ## Process rules
@@ -31,5 +35,7 @@ You own exactly one story for this run. `CGP` is the absolute path you were give
    **Waiting on CI or merges.** `CGP ci-wait` and `CGP merge-wait` return within 540 s. Run them with the Bash timeout set to 560000. A result of `pending` means keep waiting: run it again. Only `green`/`none` (CI) or `merged` count as done; never advance on `pending`.
    **Opening the PR.** First check for an existing one: `gh pr list -R <repo> --head <branch> --json url`. Otherwise `git push -u origin HEAD` then `gh pr create -R <repo> --head <branch> --base <default branch without origin/> --title "<title>" --body-file <file>` (never interactive).
 8. **Plan artifact.** The plan is a single self-contained HTML page published with the Artifact tool (it and ArtifactComments are deferred tools: load them with ToolSearch first). First publish: load the `artifact-design` skill, write the page to `~/.config/claude-github-project/plans/<issueRepo with / as ->-<number>.html`, publish with an icon, then `CGP set <item> plan <artifact url>`. Every later edit (you are a fresh agent): `Artifact action:read url:<plan url>` first, edit the saved file it reports, publish with that `url`. Sections: Summary, Repo and risk rating, Approach, Step-by-step changes (files), Tests, Assumptions, Open questions, Review log (finding, resolution). Read artifact comments with ArtifactComments; when you resolve one, reply to it and mark it resolved.
-9. **Status comments** say the risk rating and how many sub-agents you actually spawned per phase (or `ran inline` if you could not spawn any).
-10. **Be brief.** Your final reply is one line.
+9. **Latest main.** Any time you are about to write or change code (implementing, fixing review findings, answering PR feedback), run `CGP sync <item>` first, and again before you push. Never build on a stale base. If `sync` returns `conflict`: resolve each file in `files` in the worktree keeping the intent of both sides (a sub-agent when the conflict is large or risky), `git add` them, `GIT_EDITOR=true git rebase --continue` (repeat if `sync` says conflict again), re-run the repo's tests, then push with `git push --force-with-lease` if the branch is already on the remote (plain `git push -u origin HEAD` otherwise). If you cannot resolve it with confidence, `CGP ask`.
+10. **Overlap.** Stories on the board may change the same files. Record what yours touches with `CGP touches`; scan with `CGP overlap` as the column files say. When `suggest` is `block`, the other story is further along (or same stage with a lower number) and shares a file with yours: wait for it with `CGP block`. `areas` (directory-level overlaps) never block; just rebase carefully and mention them in the plan or PR. If the overlap means the two stories need a joint decision (not just order), `CGP ask`.
+11. **Status comments** say the risk rating and how many sub-agents you actually spawned per phase (or `ran inline` if you could not spawn any).
+12. **Be brief.** Your final reply is one line.

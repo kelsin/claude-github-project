@@ -6,6 +6,7 @@ export type BoardView = {
   planApproval: number
   prApproval: number
   waiting: Waiting[]
+  blocked: number
   workers: Worker[]
 }
 
