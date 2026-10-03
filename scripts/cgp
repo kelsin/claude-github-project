@@ -599,7 +599,7 @@ def cmd_session_title(a):
             found = next((b for b in boards if safe(b["id"]) == key), None) or (boards[0] if len(boards) == 1 else None)
             name = found["title"] if found else None
         if name:
-            out({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "sessionTitle": f"cgp {m.group(1)}: {name}"}})
+            out({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "sessionTitle": f"{'🚀' if m.group(1) == 'run' else '🛠️'} {name}"}})
     except Exception:
         return  # a naming hook must never get in the way of the prompt
 
