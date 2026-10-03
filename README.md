@@ -46,7 +46,7 @@ gh auth refresh -s project
 
 Colors: Todo blue, Plan yellow, Plan Review orange, Plan Approval purple, Plan Approved blue, Implement red, PR Review pink, PR Approval purple, PR Approved blue, Done green.
 
-Each cycle the loop dispatches one worker per actionable story (up to 5 at once) and waits for all of them; the next cycle picks up their new columns. When only stories in your columns, or waiting on your answers, are left, it polls the board every 30 seconds and resumes the moment something changes.
+Each cycle the loop dispatches one worker per actionable story (no cap by default) and waits for all of them; the next cycle picks up their new columns. When only stories in your columns, or waiting on your answers, are left, it polls the board every 30 seconds and resumes the moment something changes.
 
 ## Keeping up with main, and stories that collide
 
@@ -93,7 +93,7 @@ The board name is a link. Each worker row shows the emoji of the story's current
 - `~/.config/claude-github-project/worktrees/`: one git worktree per story (`cgp/<issue number>` branches, under `<owner>/<repo>/<number>`).
 - `~/.config/claude-github-project/plans/`: plan HTML sources (published as Claude artifacts).
 
-Settings: `scripts/cgp config concurrency 3` (parallel workers, default 5), `scripts/cgp config pollSeconds 60`.
+Settings: `scripts/cgp config concurrency 3` (cap on parallel workers; default 0 = no cap), `scripts/cgp config pollSeconds 60`.
 
 ## CLI
 

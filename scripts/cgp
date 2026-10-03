@@ -40,7 +40,7 @@ EMOJI = {c[0]: c[2] for c in COLUMNS}
 ACTIONABLE = ["pr_approved", "plan_approved", "pr_review", "implement", "plan_review", "plan", "todo"]
 TEXT_FIELDS = {"plan": "Plan", "pr": "PR", "repo": "Repo"}
 WAITING_FIELD = "Waiting On"
-DEFAULTS = {"concurrency": 5, "pollSeconds": 30}
+DEFAULTS = {"concurrency": 0, "pollSeconds": 30}  # concurrency 0 = no cap
 
 
 def die(msg, code=1):
@@ -550,7 +550,7 @@ def snapshot(c):
         "board": c["board"],
         "counts": counts,
         "remaining": len(live),
-        "batch": actionable[: c["settings"]["concurrency"]],
+        "batch": actionable[: c["settings"]["concurrency"]] if c["settings"]["concurrency"] > 0 else actionable,
         "actionableTotal": len(actionable),
         "waitingOnYou": waiting,
         "blocked": [{"title": i["title"], "blockedBy": i["blockedBy"], "blockers": i["blockers"]} for i in blocked],

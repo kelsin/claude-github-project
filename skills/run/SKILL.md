@@ -20,7 +20,7 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
 1. `CGP list --brief` → JSON with `status`, `batch`, `counts`, `waitingOnYou`.
 2. `status: "done"`: report "all stories are Done" and stop. This is the only way the loop ends by itself.
 3. `status: "work"`:
-   - `batch` holds at most `settings.concurrency` stories (default 5, chosen by the user); if `actionableTotal` is larger, the rest simply wait for a later cycle.
+   - `batch` holds every actionable story (no cap by default). If the user set a cap (`settings.concurrency` > 0) and `actionableTotal` is larger, the rest wait for a later cycle.
    - For each story in `batch`, register it so the UI shows it: `CGP worker start <item> <column> "<title>"` (one Bash call for the whole batch).
    - Spawn ONE Agent per story, all in a single message, each with `run_in_background: false` so the call returns when every worker is done. `subagent_type: "general-purpose"`. Prompt (fill in the placeholders; do not inline the column file):
 

@@ -120,6 +120,10 @@ class TestListAndMove(Base):
         self.cgp("config", "concurrency", "1")
         self.assertEqual(len(self.cgp("list")["batch"]), 1)
 
+    def test_no_cap_by_default(self):
+        self.setup_board()
+        self.assertEqual(len(self.cgp("list")["batch"]), 3)  # i1, i2 and the draft are all actionable
+
     def test_idle_and_done(self):
         self.setup_board()
         for i in ("i1", "i2", "i4"):
