@@ -639,5 +639,25 @@ class TestWorkers(Base):
         self.assertFalse(self.cgp("list")["stopRequested"])
 
 
+class TestSessionTitle(Base):
+    def title(self, prompt):
+        p = self.cgp("session-title", input=json.dumps({"prompt": prompt}), ok=False)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)["hookSpecificOutput"]["sessionTitle"] if p.stdout.strip() else None
+
+    def test_titles_run_and_setup_after_the_board(self):
+        self.setup_board()
+        board = self.cgp("list")["board"]["title"]
+        self.assertEqual(self.title("/cgp:run"), f"cgp run: {board}")  # the only board
+        self.assertEqual(self.title("/cgp:run https://github.com/orgs/acme/projects/1"), f"cgp run: {board}")
+        self.assertEqual(self.title("/cgp:setup https://github.com/orgs/other/projects/7"), "cgp setup: other project 7")
+
+    def test_other_prompts_and_unknown_board_are_left_alone(self):
+        self.assertIsNone(self.title("/cgp:run"))  # nothing set up yet
+        self.setup_board()
+        self.assertIsNone(self.title("fix the bug"))
+        self.assertIsNone(self.title("/cgp:runner"))
+
+
 if __name__ == "__main__":
     unittest.main()
