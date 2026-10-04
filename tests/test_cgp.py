@@ -297,6 +297,21 @@ class TestOverlap(Base):
         self.assertIn("i1", [i["item"] for i in snap["batch"]])
         self.assertEqual(snap["blocked"], [])
 
+    def test_blocked_story_shows_another_story_on_the_board_until_released(self):
+        self.setup_board()
+        waiting_on = lambda i: next(x for x in self.read_db()["items"] if x["id"] == i)["values"].get("Waiting On")
+        self.force("i1", "plan_approved")
+        self.cgp("move", "i2", "implement")
+        self.cgp("block", "i1", "i2")
+        self.cgp("list")
+        opts = {o["id"]: o["name"] for o in next(f for f in self.read_db()["fields"] if f["name"] == "Waiting On")["options"]}
+        self.assertEqual(opts[waiting_on("i1")["optionId"]], "Another story")
+        self.assertIsNone(waiting_on("i2"))
+        self.assertEqual(self.state()["waiting"], [])  # queued behind a story is not waiting on you
+        self.force("i2", "done")
+        self.cgp("list")
+        self.assertIsNone(waiting_on("i1"))
+
     def test_shared_file_overlap_does_not_block(self):
         self.setup_board()
         self.force("i1", "plan_approved")

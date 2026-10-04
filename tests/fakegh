@@ -76,7 +76,7 @@ elif args[:2] == ["api", "graphql"]:
     q, v = body["query"], body["variables"]
     errors = None
     if "updateProjectV2Field(" in q:
-        f = field("Status")
+        f = next(x for x in db["fields"] if x["id"] == v["f"])
         f["options"] = [{"id": o.get("id", f"new{i}"), "name": o["name"], "color": o["color"]} for i, o in enumerate(v["o"])]
         r = {"updateProjectV2Field": {"projectV2Field": {"id": f["id"], "options": f["options"]}}}
     elif "createProjectV2Field" in q:

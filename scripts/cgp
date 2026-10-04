@@ -53,6 +53,7 @@ DEFAULT_PHASE = {"todo": "planning", "plan": "planning", "plan_review": "plannin
 ACTIONABLE = ["pr_approved", "plan_approved", "pr_review", "implement", "plan_review", "plan", "todo"]  # the review ones: unmigrated boards only
 TEXT_FIELDS = {"plan": "Plan", "pr": "PR", "preview": "Preview"}
 WAITING_FIELD = "Waiting On"
+STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a blocker; "You" is the user
 # concurrency 0 = no cap; sharedFiles: fnmatch globs for files many stories edit (registries, lockfiles): overlaps on them never block
 # remoteControl 1: /cgp:run turns on Remote Control for its session (desktop app only), so the loop can be followed from claude.ai or the phone
 # autoMigrate 1: `cgp use` brings a board from an older column layout up to date (cgp migrate does it by hand)
@@ -268,7 +269,7 @@ PROJECT_FRAGMENT = """
   fields(first: 50) { nodes {
     __typename
     ... on ProjectV2FieldCommon { id name dataType }
-    ... on ProjectV2SingleSelectField { options { id name } }
+    ... on ProjectV2SingleSelectField { options { id name color description } }
   } }
 """
 
@@ -356,6 +357,7 @@ def parse_item(raw, c):
     kind = {"Issue": "issue", "DraftIssue": "draft", "PullRequest": "pr"}.get(content.get("__typename"), "other")
     issue_repo = (content.get("repository") or {}).get("nameWithOwner")
     text = lambda n: (vals.get(n) or {}).get("text") or None
+    waiting_on = (vals.get(WAITING_FIELD) or {}).get("name") or None
     return {
         "item": raw["id"],
         "kind": kind,
@@ -368,7 +370,8 @@ def parse_item(raw, c):
         "plan": text("Plan"),
         "pr": text("PR"),
         "preview": text("Preview"),
-        "waiting": bool((vals.get(WAITING_FIELD) or {}).get("name")),
+        "waitingOn": waiting_on,
+        "waiting": bool(waiting_on) and waiting_on != STORY_OPTION,  # on the user, not merely queued behind a story
         "archived": raw["isArchived"],
         "closed": content.get("state") in ("CLOSED", "MERGED"),
     }
@@ -501,6 +504,20 @@ def waiting_you(field):
     return you
 
 
+def ensure_story_option(field):
+    """Add the 'Another story' option to the Waiting On field (existing options keep their ids); returns its option id."""
+    have = next((o["id"] for o in field["options"] if o["name"] == STORY_OPTION), None)
+    if have:
+        return have
+    opts = [{"id": o["id"], "name": o["name"], "color": o.get("color") or "GRAY", "description": o.get("description") or ""}
+            for o in field["options"]]
+    opts.append({"name": STORY_OPTION, "color": "YELLOW", "description": ""})
+    data = gql("""mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){
+      updateProjectV2Field(input:{fieldId:$f,singleSelectOptions:$o}){ projectV2Field{
+        ... on ProjectV2SingleSelectField{ id options{id name} } } } }""", f=field["id"], o=opts)
+    return next(o["id"] for o in data["updateProjectV2Field"]["projectV2Field"]["options"] if o["name"] == STORY_OPTION)
+
+
 def board_keys(c):
     """The columns this board actually has, in pipeline order (an unmigrated board still has plan_review and pr_review)."""
     return [k for k in ALL_KEYS if k in c["fields"]["status"]["options"]]
@@ -600,7 +617,8 @@ def cmd_setup(a):
             ... on ProjectV2FieldCommon{ id name } ... on ProjectV2SingleSelectField{ options{id name} } } } }""", **v)
         return d["createProjectV2Field"]["projectV2Field"]
 
-    waiting = ensure(WAITING_FIELD, "SINGLE_SELECT", [{"name": "You", "color": "RED", "description": ""}])
+    waiting = ensure(WAITING_FIELD, "SINGLE_SELECT", [{"name": "You", "color": "RED", "description": ""},
+                                                      {"name": STORY_OPTION, "color": "YELLOW", "description": ""}])
     text_ids = {k: ensure(n, "TEXT")["id"] for k, n in TEXT_FIELDS.items()}
 
     old = load_json(board_file(proj["id"]), {})
@@ -611,7 +629,8 @@ def cmd_setup(a):
                   "kind": kind, "owner": owner, "number": number},
         "schema": SCHEMA,
         "fields": {"status": {"id": status["id"], "options": options},
-                   "waiting": {"id": waiting["id"], "you": waiting_you(waiting)},
+                   "waiting": {"id": waiting["id"], "you": waiting_you(waiting),
+                               "story": ensure_story_option(waiting)},
                    **text_ids},
         "repos": repos,
         "settings": {**DEFAULTS, **old.get("settings", {})},
@@ -787,7 +806,7 @@ def process_replies(c, items):
         replies, _ = list_replies_since(it["issueRepo"], it["number"], [QMARK])
         if replies:
             clear_field(c, it["item"], c["fields"]["waiting"]["id"])
-            it["waiting"] = False
+            it["waiting"] = it["waitingOn"] = False
             update_data(lambda d, i=it["item"]: d.setdefault("answered", []).append(i))
 
 
@@ -808,6 +827,23 @@ def stop_requested():
             return f.read().strip() == "1"
     except FileNotFoundError:
         return False
+
+
+def sync_story_field(c, live):
+    """Show the hierarchy on the board: Waiting On = 'Another story' while a story has live blockers (and is not waiting on you)."""
+    w = c["fields"]["waiting"]
+    if not w.get("story"):  # a config from before this option existed: add it to the board now
+        b = c["board"]
+        field = fields_by_name(fetch_project(b["kind"], b["owner"], b["number"]))[WAITING_FIELD]
+        w["story"] = ensure_story_option(field)
+        save_board(c)
+    for i in live:
+        if i["blockedBy"] and not i["waitingOn"]:
+            set_single(c, i["item"], w["id"], w["story"])
+            i["waitingOn"] = STORY_OPTION
+        elif not i["blockedBy"] and i["waitingOn"] == STORY_OPTION:
+            clear_field(c, i["item"], w["id"])
+            i["waitingOn"] = None
 
 
 def snapshot(c):
@@ -839,6 +875,7 @@ def snapshot(c):
         i["blockedBy"] = [by_id[b]["title"] for b in blocks.get(i["item"], [])]
         i["blockers"] = [{"title": by_id[b]["title"], "column": by_id[b]["column"], "waiting": by_id[b]["waiting"]}
                          for b in blocks.get(i["item"], [])]
+    sync_story_field(c, live)
     # a block gates a story that is about to start work: plan approved, or implementing with no PR yet
     blocked = [i for i in live if i["blockedBy"] and (i["column"] == "plan_approved"
                                                       or (i["column"] == "implement" and not i["pr"]))]
