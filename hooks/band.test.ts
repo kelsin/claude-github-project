@@ -27,6 +27,8 @@ const cases: [string, string, string[], string[]][] = [
   ['blocked count', state({ blockedCount: 2 }), ['Queued behind another story: 2'], ['HIDDEN']],
   ['control characters in titles are stripped', state({ workers: [{ item: 'a', column: 'plan', title: 'Evil\x1b]52;c;x\x07 Title' }] }), ['Evil]52;c;x Title'], ['\x1b']],
   ['waiting count', state({ waiting: [{ title: 't', url: null, column: 'plan' }] }), ['Waiting on you: 1'], ['HIDDEN']],
+  ['waiting story is listed by title', state({ waiting: [{ title: 'Add login', url: 'https://github.com/o/r/issues/4', column: 'plan' }] }), ['❓ Add login waiting on you'], ['HIDDEN']],
+  ['waiting titles are stripped of control characters', state({ waiting: [{ title: 'Bad\x1b[2J Q', url: null, column: 'plan' }] }), ['Bad[2J Q'], ['\x1b']],
 ]
 
 // Mocks the world beneath the plugin; `files` is read live so tests can change it between draws.
@@ -166,5 +168,28 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await mount($, surface)
     await ui.press({ key: 'stop' } as any)
     expect(toasts).toEqual(['cgp: could not write stop flag'])
+  })
+
+  test(`${surface}: a newly waiting story toasts once, not at startup`, async ($, on) => {
+    const files: Record<string, string> = {
+      'state-test-session.json': state({ waiting: [{ title: 'Old', url: 'https://github.com/o/r/issues/1', column: 'plan' }] }),
+    }
+    const { clock } = world(on, files)
+    const toasts: string[] = []
+    on('ui.toast', async (_a: any, e: any) => {
+      toasts.push(e.text)
+      return { value: undefined } as any
+    })
+    await $.session.start({ cwd: '/', surface, isInteractive: true })
+    expect(toasts).toEqual([])
+    files['state-test-session.json'] = state({
+      waiting: [
+        { title: 'Old', url: 'https://github.com/o/r/issues/1', column: 'plan' },
+        { title: 'New', url: 'https://github.com/o/r/issues/2', column: 'implement' },
+      ],
+    })
+    await clock.advance(3000)
+    await clock.advance(3000)
+    expect(toasts).toEqual(['❓ Question for you: New'])
   })
 }

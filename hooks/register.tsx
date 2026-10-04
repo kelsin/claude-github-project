@@ -23,10 +23,13 @@ const MAX_ROWS = 8
 // Titles come from GitHub issues anyone may write: drop control characters before drawing them.
 const clean = (s: unknown) => String(s ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '')
 
+const safeUrl = (u: unknown) => (/^https:\/\/github\.com\/[\x21-\x7e]{1,2000}$/.test(String(u ?? '')) && !String(u).includes('@') ? String(u) : null)
+
 const view = atom({ plugin: 'cgp', key: 'view' } as const, null)
 
 export const register: Register = on => {
   let stopFile = ''
+  let seenWaiting: Set<string> | null = null // null until the first board read, so a restart does not toast old questions
 
   on('session.start', async ($, e, next) => {
     const home = (await $.env.get('CGP_HOME')) || `${await $.env.get('HOME')}/.config/claude-github-project`
@@ -50,10 +53,14 @@ export const register: Register = on => {
         if (st.board && age < FRESH_MS) {
           fresh = {
             title: clean(st.board.title ?? 'Project board'),
-            url: /^https:\/\/github\.com\/[\x21-\x7e]{1,2000}$/.test(st.board.url ?? '') && !st.board.url.includes('@') ? st.board.url : null,
+            url: safeUrl(st.board.url),
             planApproval: Number(st.counts?.plan_approval) || 0,
             prApproval: Number(st.counts?.pr_approval) || 0,
-            waiting: Array.isArray(st.waiting) ? st.waiting : [],
+            waiting: (Array.isArray(st.waiting) ? st.waiting : []).map((w: any) => ({
+              title: clean(w?.title),
+              url: safeUrl(w?.url),
+              column: String(w?.column ?? ''),
+            })),
             blocked: Number(st.blockedCount) || 0,
             workers,
             stopping,
@@ -61,6 +68,14 @@ export const register: Register = on => {
         }
       } catch {
         return // no state yet, or unreadable: keep what is shown until the next poll
+      }
+      if (fresh) {
+        const keys = new Set(fresh.waiting.map(w => w.url ?? w.title))
+        const added = fresh.waiting.filter(w => seenWaiting && !seenWaiting.has(w.url ?? w.title))
+        seenWaiting = keys
+        for (const w of added) {
+          await $.ui.toast(`❓ Question for you: ${w.title}`)
+        }
       }
       if (JSON.stringify(fresh) !== JSON.stringify(await read($, view))) {
         await update($, view, () => fresh)
@@ -81,6 +96,7 @@ export const register: Register = on => {
 
     const { Box, Button, Link, Text } = $.ui.resolve(e)
     const shown = v.workers.slice(0, MAX_ROWS)
+    const asking = v.waiting.slice(0, MAX_ROWS)
     const toggleStop = async () => {
       let stopping = false
       await update($, view, cur => {
@@ -109,6 +125,16 @@ export const register: Register = on => {
           </Text>
         </Box>
         <Button key="stop" label={v.stopping ? '⏸ Stopping after this cycle (press to cancel)' : '⏸ Stop after this cycle'} onPress={toggleStop} />
+        {asking.map((w, i) => (
+          <Box key={`ask:${w.url ?? w.title}:${i}`}>
+            <Text>❓ </Text>
+            {w.url ? <Link href={w.url} label={w.title} /> : <Text>{w.title}</Text>}
+            <Text dimColor> waiting on you</Text>
+          </Box>
+        ))}
+        {v.waiting.length > asking.length && (
+          <Text dimColor>… +{v.waiting.length - asking.length} more waiting on you</Text>
+        )}
         {shown.map((w, i) => (
           <Text key={`${w.item}:${i}`} dimColor>
             {EMOJI[w.column] ?? '•'} {clean(w.title)}

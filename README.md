@@ -81,11 +81,12 @@ Installing the plugin adds a band above the prompt while a loop is running (it h
 
 ```
 📋 My Board  🙋 Plan Approval: 2  🚦 PR Approval: 1  ❓ Waiting on you: 1
+❓ Rename the export flag waiting on you
 🔨 Add CSV export
 🔍 Fix login redirect
 ```
 
-The board name is a link.
+The board name and each waiting story are links (the story link opens the issue with the question). A toast appears when a story newly starts waiting on you; stories already waiting when the session starts are shown but not toasted.
 
 ## Parallel sessions (one board per session)
 
