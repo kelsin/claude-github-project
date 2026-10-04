@@ -1182,7 +1182,7 @@ def cmd_prepare(a):
 
 
 def cmd_adopt(a):
-    c = cfg()
+    cfg()  # dies unless a board is configured
     owner, name = split_repo(a.repo)
     rid = gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }", o=owner, n=name)["repository"]["id"]
     d = gql("""mutation($i:ID!,$r:ID!){ convertProjectV2DraftIssueItemToIssue(input:{itemId:$i,repositoryId:$r}){

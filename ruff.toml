@@ -1,0 +1,3 @@
+[lint]
+# correctness only: the codebase is deliberately dense (semicolons, one-line lambdas)
+select = ["E9", "F"]
