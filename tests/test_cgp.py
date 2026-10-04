@@ -312,6 +312,19 @@ class TestOverlap(Base):
         self.cgp("config", "sharedFiles", "src/defaults.json, *.x")
         self.assertEqual(self.cgp("config")["sharedFiles"], ["src/defaults.json", "*.x"])
 
+    def test_config_saved_without_shared_files_uses_defaults(self):
+        self.setup_board()
+        boards = os.path.join(self.env["CGP_HOME"], "boards")
+        path = os.path.join(boards, next(n for n in os.listdir(boards) if not n.endswith(".data.json")))
+        with open(path) as f:
+            c = json.load(f)
+        del c["settings"]["sharedFiles"]
+        with open(path, "w") as f:
+            json.dump(c, f)
+        self.force("i1", "plan_approved")
+        self.cgp("touches", "i1", "src/a.py")
+        self.assertEqual(self.cgp("overlap", "i1")["suggest"], {"action": "proceed"})
+
     def test_directory_only_overlap_proceeds(self):
         self.setup_board()
         self.force("i1", "plan_approved")
