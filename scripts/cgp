@@ -7,6 +7,7 @@ stderr with a non-zero exit code.
 """
 import argparse
 import fcntl
+import fnmatch
 import json
 import os
 import re
@@ -43,7 +44,10 @@ EMOJI = {c[0]: c[2] for c in COLUMNS}
 ACTIONABLE = ["pr_approved", "plan_approved", "pr_review", "implement", "plan_review", "plan", "todo"]
 TEXT_FIELDS = {"plan": "Plan", "pr": "PR"}
 WAITING_FIELD = "Waiting On"
-DEFAULTS = {"concurrency": 0, "pollSeconds": 30}  # concurrency 0 = no cap
+# concurrency 0 = no cap; sharedFiles: fnmatch globs for files many stories edit (registries, lockfiles): overlaps on them never block
+DEFAULTS = {"concurrency": 0, "pollSeconds": 30,
+            "sharedFiles": ["*package-lock.json", "*yarn.lock", "*pnpm-lock.yaml", "*.schema.json", "*locales/*",
+                            "*__snapshots__/*", "*.md"]}
 
 
 def die(msg, code=1):
@@ -671,9 +675,14 @@ def cmd_config(a):
     if a.key:
         if a.key not in DEFAULTS:
             die(f"unknown setting; one of {list(DEFAULTS)}")
-        if a.value is None or not re.fullmatch(r"\d+", a.value):
-            die(f"usage: cgp config {a.key} <non-negative integer>")
-        c["settings"][a.key] = int(a.value)
+        if a.key == "sharedFiles":
+            if a.value is None:
+                die("usage: cgp config sharedFiles <comma-separated globs, or empty for none>")
+            c["settings"][a.key] = [g.strip() for g in a.value.split(",") if g.strip()]
+        else:
+            if a.value is None or not re.fullmatch(r"\d+", a.value):
+                die(f"usage: cgp config {a.key} <non-negative integer>")
+            c["settings"][a.key] = int(a.value)
         save_board(c)
     out(c["settings"])
 
@@ -1198,6 +1207,7 @@ def cmd_overlap(a):
     items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
     blocks = st.get("blocks", {})
     found, unknown = [], []
+    patterns = c["settings"]["sharedFiles"]
     for o in items:
         if (o["item"] == a.item or o["kind"] != "issue" or o["closed"] or o["archived"]
                 or o["column"] in ("todo", "done")):
@@ -1208,12 +1218,14 @@ def cmd_overlap(a):
                 unknown.append({"item": o["item"], "title": o["title"], "column": o["column"]})
             continue
         dirs = {f for f in mine | theirs if f.endswith("/")}
-        files = sorted((mine & theirs) - dirs)
+        both = (mine & theirs) - dirs
+        shared = sorted(f for f in both if any(fnmatch.fnmatchcase(f, g) for g in patterns))
+        files = sorted(both - set(shared))
         areas = sorted({f"{f} ~ {g}" for f in mine for g in theirs if (f in dirs or g in dirs) and (covers(f, g) or covers(g, f))})
-        if not files and not areas:
+        if not files and not areas and not shared:
             continue
         found.append({"item": o["item"], "title": o["title"], "number": o["number"], "column": o["column"],
-                      "pr": o["pr"], "files": files, "areas": areas, "ahead": rank(o) > rank(me),
+                      "pr": o["pr"], "files": files, "shared": shared, "areas": areas, "ahead": rank(o) > rank(me),
                       "alreadyWaitsOnMe": a.item in blocks.get(o["item"], [])})
     block_on = [f["item"] for f in found if f["ahead"] and f["files"] and not f["alreadyWaitsOnMe"]]
     suggest = ({"action": "declare", "why": "this story has no touches or PR yet: run `cgp touches` first"} if not mine

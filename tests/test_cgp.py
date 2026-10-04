@@ -296,6 +296,22 @@ class TestOverlap(Base):
         self.assertIn("i1", [i["item"] for i in snap["batch"]])
         self.assertEqual(snap["blocked"], [])
 
+    def test_shared_file_overlap_does_not_block(self):
+        self.setup_board()
+        self.force("i1", "plan_approved")
+        self.cgp("move", "i2", "implement")
+        self.cgp("touches", "i1", "src/schemas/game.schema.json", "src/a.py")
+        self.cgp("touches", "i2", "src/schemas/game.schema.json", "src/b.py")
+        r = self.cgp("overlap", "i1")
+        self.assertEqual(r["overlaps"][0]["shared"], ["src/schemas/game.schema.json"])
+        self.assertEqual(r["overlaps"][0]["files"], [])
+        self.assertEqual(r["suggest"], {"action": "proceed"})
+        self.cgp("config", "sharedFiles", "")  # no shared files: the same overlap blocks
+        r = self.cgp("overlap", "i1")
+        self.assertEqual(r["suggest"], {"action": "block", "on": ["i2"]})
+        self.cgp("config", "sharedFiles", "src/defaults.json, *.x")
+        self.assertEqual(self.cgp("config")["sharedFiles"], ["src/defaults.json", "*.x"])
+
     def test_directory_only_overlap_proceeds(self):
         self.setup_board()
         self.force("i1", "plan_approved")
