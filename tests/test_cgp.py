@@ -1108,6 +1108,13 @@ class TestMigration(Base):
         self.cgp("release")
         self.assertNotIn("migration", self.cgp("use"))  # nothing left to do
 
+    def test_use_reports_whether_to_turn_on_remote_control(self):
+        self.setup_board()
+        self.assertTrue(self.cgp("use")["remoteControl"])
+        self.cgp("config", "remoteControl", "0")
+        self.cgp("release")
+        self.assertFalse(self.cgp("use")["remoteControl"])
+
     def test_old_agent_review_option_is_never_matched_to_the_human_column_by_name(self):
         self.make_legacy({"i1": "plan_review", "i2": "pr_review"})
         self.setup_board()  # re-running setup migrates the same way

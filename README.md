@@ -109,7 +109,7 @@ Run `/cgp:run` in as many sessions as you like, as long as each uses a different
 - `~/.config/claude-github-project/worktrees/`: one git worktree per story (`cgp/<issue number>` branches, under `<owner>/<repo>/<number>`).
 - `~/.config/claude-github-project/plans/`: plan HTML sources (published as Claude artifacts).
 
-Settings: `scripts/cgp config concurrency 3` (cap on parallel workers; default 0 = no cap), `scripts/cgp config pollSeconds 60`, `scripts/cgp config sharedFiles 'package-lock.json,*.schema.json,src/defaults.json'` (comma-separated fnmatch globs for files many stories edit, whose overlaps are reported under `shared` instead of blocking; empty disables).
+Settings: `scripts/cgp config remoteControl 0` (`/cgp:run` turns on Remote Control for its session when it runs in the Claude desktop app, so you can follow and steer the loop from claude.ai or the phone; 0 skips that), `scripts/cgp config concurrency 3` (cap on parallel workers; default 0 = no cap), `scripts/cgp config pollSeconds 60`, `scripts/cgp config sharedFiles 'package-lock.json,*.schema.json,src/defaults.json'` (comma-separated fnmatch globs for files many stories edit, whose overlaps are reported under `shared` instead of blocking; empty disables).
 
 ## CLI
 

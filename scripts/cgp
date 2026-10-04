@@ -54,8 +54,9 @@ ACTIONABLE = ["pr_approved", "plan_approved", "pr_review", "implement", "plan_re
 TEXT_FIELDS = {"plan": "Plan", "pr": "PR", "preview": "Preview"}
 WAITING_FIELD = "Waiting On"
 # concurrency 0 = no cap; sharedFiles: fnmatch globs for files many stories edit (registries, lockfiles): overlaps on them never block
+# remoteControl 1: /cgp:run turns on Remote Control for its session (desktop app only), so the loop can be followed from claude.ai or the phone
 # autoMigrate 1: `cgp use` brings a board from an older column layout up to date (cgp migrate does it by hand)
-DEFAULTS = {"concurrency": 0, "pollSeconds": 30, "autoMigrate": 1,
+DEFAULTS = {"concurrency": 0, "pollSeconds": 30, "autoMigrate": 1, "remoteControl": 1,
             "sharedFiles": ["*package-lock.json", "*yarn.lock", "*pnpm-lock.yaml", "*.schema.json", "*locales/*",
                             "*__snapshots__/*", "*.md"]}
 
@@ -684,8 +685,8 @@ def cmd_use(a):
     update_state(lambda st: st.update(boardKey=key, board=boards[key]["board"], workers=[]))
     if os.path.exists(stop_path()):
         os.remove(stop_path())  # a stop request left from an earlier run
-    res = {"board": boards[key]["board"], "session": sid()}
     c = boards[key]
+    res = {"board": c["board"], "session": sid(), "remoteControl": bool(c["settings"].get("remoteControl", 1))}
     if c.get("schema", 1) < SCHEMA:  # under the lock just claimed, so no loop can be running on the old columns
         if not c["settings"].get("autoMigrate", 1):
             res["migration"] = {"skipped": "autoMigrate is 0; this board keeps its old columns until: cgp migrate"}

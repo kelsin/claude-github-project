@@ -17,7 +17,8 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
    - Exit 5 (another live session is running this board): tell the user and ask whether that session is gone; only then `CGP use <url> --takeover`.
    Each session works one board; parallel sessions must use different boards.
    - If the output has `migration` with `changed: true`, the board's columns were just brought up to date (the agent-side Plan Review / PR Review columns are gone: review now happens inside Plan and Implement; Plan Approval / PR Approval are now called Plan Review / PR Review). Tell the user in one line, with `movedToReview` stories moved. `migration.error` or `skipped`: tell the user and carry on, the board keeps working in its old layout.
-2. `CGP list --brief` and tell the user the board URL and the counts once.
+2. If the output has `remoteControl: true` and you have the `set_remote_control` tool of the ccd_session_mgmt server (a deferred tool: load it with ToolSearch; it exists only in the Claude desktop app), call it with `session_id: "self"` and `enabled: true` so the user can follow and steer the loop from claude.ai/code or the mobile app. The app asks the user to approve it. Best effort: no tool, a refusal or a declined approval is mentioned in one line and never stops the run. Skip it when `remoteControl` is false.
+3. `CGP list --brief` and tell the user the board URL and the counts once.
 
 ## Cycle (repeat forever)
 
