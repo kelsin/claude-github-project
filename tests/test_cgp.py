@@ -96,7 +96,7 @@ class TestSetup(Base):
         self.assertEqual(colors["🔍 Plan Review"], "ORANGE")
         self.assertEqual(colors["🎉 Done"], "GREEN")
         fnames = {f["name"] for f in self.read_db()["fields"]}
-        self.assertTrue({"Waiting On", "Plan", "PR"} <= fnames)
+        self.assertTrue({"Waiting On", "Plan", "PR", "Preview"} <= fnames)
         # Todo/Done keep their option ids; "In Progress" and the unset draft fall to Todo
         self.assertEqual(res["itemsRemapped"], {"todo": 2, "done": 0})
         self.assertEqual(res["repos"], {"acme/app": None})
@@ -798,7 +798,7 @@ class TestGraphQL(Base):
     def test_item_fields_are_asked_for_by_name_not_position(self):
         m = load_cgp()
         self.assertNotIn("fieldValues(first", m.ITEMS_QUERY + m.ITEM_QUERY)
-        for name in ("Status", "Waiting On", "Plan", "PR"):
+        for name in ("Status", "Waiting On", "Plan", "PR", "Preview"):
             self.assertIn(f'fieldValueByName(name:"{name}")', m.ITEMS_QUERY)
 
     def test_pagination_follows_every_page(self):
@@ -876,6 +876,25 @@ class PRBase(Base):
 
     def calls(self, sub):
         return [c for c in self.read_db().get("calls", []) if c[:2] == ["pr", sub]]
+
+
+class TestPreview(PRBase):
+    def comment(self, login, body):
+        d = self.read_db()
+        d["comments"].setdefault("acme/app#1", []).append(
+            {"body": body, "created_at": "2026-01-01T00:00:01Z", "user": {"login": login, "type": "Bot"}})
+        self.write_db(d)
+
+    def test_copies_the_netlify_bot_url_into_the_field(self):
+        url = "https://deploy-preview-1--site.netlify.app"
+        self.assertIsNone(self.cgp("preview", "i1")["preview"])
+        self.comment("mallory", "try https://deploy-preview-1--evil.netlify.app")
+        self.comment("netlify[bot]", "https://deploy-preview-7--other.netlify.app")
+        self.assertIsNone(self.cgp("preview", "i1")["preview"])
+        self.comment("netlify[bot]", f"Deploy Preview ready! {url}")
+        self.assertEqual(self.cgp("preview", "i1")["preview"], url)
+        self.assertEqual(self.cgp("list")["items"][0]["preview"], url)
+        self.assertNotEqual(self.cgp("set", "i1", "preview", "https://x.example", ok=False).returncode, 0)
 
 
 class TestMerge(PRBase):

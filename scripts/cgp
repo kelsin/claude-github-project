@@ -42,7 +42,7 @@ KEYS = [c[0] for c in COLUMNS]
 EMOJI = {c[0]: c[2] for c in COLUMNS}
 # Later pipeline stages first, so stories finish sooner when capped.
 ACTIONABLE = ["pr_approved", "plan_approved", "pr_review", "implement", "plan_review", "plan", "todo"]
-TEXT_FIELDS = {"plan": "Plan", "pr": "PR"}
+TEXT_FIELDS = {"plan": "Plan", "pr": "PR", "preview": "Preview"}
 WAITING_FIELD = "Waiting On"
 # concurrency 0 = no cap; sharedFiles: fnmatch globs for files many stories edit (registries, lockfiles): overlaps on them never block
 DEFAULTS = {"concurrency": 0, "pollSeconds": 30,
@@ -288,8 +288,9 @@ def check_scope():
         die("gh token lacks the 'project' scope. Run: gh auth refresh -s project", code=3)
 
 
-# Status, Waiting On, Plan and PR are asked for by name: a positional fieldValues(first:N) can miss them on boards with many fields.
-VALUE_FIELDS = (("fvStatus", "Status"), ("fvWaiting", WAITING_FIELD), ("fvPlan", TEXT_FIELDS["plan"]), ("fvPr", TEXT_FIELDS["pr"]))
+# Status, Waiting On, Plan, PR and Preview are asked for by name: a positional fieldValues(first:N) can miss them on boards with many fields.
+VALUE_FIELDS = (("fvStatus", "Status"), ("fvWaiting", WAITING_FIELD), ("fvPlan", TEXT_FIELDS["plan"]), ("fvPr", TEXT_FIELDS["pr"]),
+                ("fvPreview", TEXT_FIELDS["preview"]))
 FIELD_VALUES = " ".join(
     f'{alias}: fieldValueByName(name:"{name}"){{ __typename'
     " ... on ProjectV2ItemFieldSingleSelectValue{ optionId name } ... on ProjectV2ItemFieldTextValue{ text } }"
@@ -354,6 +355,7 @@ def parse_item(raw, c):
         "unset": column is None,
         "plan": text("Plan"),
         "pr": text("PR"),
+        "preview": text("Preview"),
         "waiting": bool((vals.get(WAITING_FIELD) or {}).get("name")),
         "archived": raw["isArchived"],
         "closed": content.get("state") in ("CLOSED", "MERGED"),
@@ -844,13 +846,36 @@ def cmd_move(a):
 def cmd_set(a):
     c = cfg()
     key = a.field.lower()
-    if key not in TEXT_FIELDS:
-        die(f"field must be one of {list(TEXT_FIELDS)}")
+    if key not in TEXT_FIELDS or key == "preview":
+        die(f"field must be one of {[k for k in TEXT_FIELDS if k != 'preview']} (Preview is written by: cgp preview)")
     value = a.value
     if key == "pr" and value and not parse_pr_ref(c, value):
         die("PR must be https://github.com/<linked repo>/pull/<n> on a repo linked to this board")
     set_text(c, a.item, c["fields"][key], value)
     out({"item": a.item, a.field: value or None})
+
+
+NETLIFY_BOT = "netlify[bot]"
+
+
+def cmd_preview(a):
+    """Copy the Netlify deploy preview URL from the story's PR into the Preview field, once Netlify has posted it."""
+    c = cfg()
+    if "preview" not in c["fields"]:
+        die("this board has no Preview field; run /cgp:setup again to add it")
+    ref = parse_pr_ref(c, get_item(c, a.item)["pr"])
+    if not ref:
+        die("story has no valid PR field set")
+    repo, pr = ref
+    url_re = re.compile(rf"https://deploy-preview-{pr}--[a-z0-9-]+\.netlify\.app\b")
+    urls = [m.group(0) for cm in rest(f"repos/{repo}/issues/{pr}/comments")
+            if (cm.get("user") or {}).get("login") == NETLIFY_BOT  # only Netlify's own bot: anyone can type a URL
+            for m in [url_re.search(cm.get("body") or "")] if m]
+    if not urls:
+        out({"item": a.item, "preview": None, "note": "no Netlify deploy preview on the PR yet"})
+        return
+    set_text(c, a.item, c["fields"]["preview"], urls[-1])
+    out({"item": a.item, "preview": urls[-1]})
 
 
 def read_body():
@@ -1424,6 +1449,7 @@ def main():
     p = sp.add_parser("wait"); p.add_argument("--timeout", type=int, default=540); p.add_argument("--interval", type=int, default=0); p.set_defaults(fn=cmd_wait)
     p = sp.add_parser("move"); p.add_argument("item"); p.add_argument("column"); p.set_defaults(fn=cmd_move)
     p = sp.add_parser("set"); p.add_argument("item"); p.add_argument("field"); p.add_argument("value"); p.set_defaults(fn=cmd_set)
+    p = sp.add_parser("preview"); p.add_argument("item"); p.set_defaults(fn=cmd_preview)
     p = sp.add_parser("comment"); p.add_argument("item"); p.add_argument("--pr", action="store_true"); p.set_defaults(fn=cmd_comment)
     p = sp.add_parser("ask"); p.add_argument("item"); p.set_defaults(fn=cmd_ask)
     p = sp.add_parser("answers"); p.add_argument("item"); p.set_defaults(fn=cmd_answers)
