@@ -176,6 +176,7 @@ def load_board(key):
         die("unknown board; run /cgp:setup <board-url>")
     paths = load_json(PATHS, {})
     raw["repos"] = {r: paths.get(r) for r in raw["repos"]}
+    raw["settings"] = {**DEFAULTS, **raw.get("settings", {})}  # configs saved before a setting existed lack it
     return raw
 
 
