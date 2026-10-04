@@ -16,6 +16,7 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
    - Exit 6 (several boards set up, none chosen): show the listed boards, ask the user which, run `CGP use <url>`.
    - Exit 5 (another live session is running this board): tell the user and ask whether that session is gone; only then `CGP use <url> --takeover`.
    Each session works one board; parallel sessions must use different boards.
+   - If the output has `migration` with `changed: true`, the board's columns were just brought up to date (the agent-side Plan Review / PR Review columns are gone: review now happens inside Plan and Implement; Plan Approval / PR Approval are now called Plan Review / PR Review). Tell the user in one line, with `movedToReview` stories moved. `migration.error` or `skipped`: tell the user and carry on, the board keeps working in its old layout.
 2. `CGP list --brief` and tell the user the board URL and the counts once.
 
 ## Cycle (repeat forever)
@@ -36,12 +37,12 @@ If `list` or `wait` exits 5, another session took this board over: stop and tell
      Story: <the story's JSON from the batch>
      When finished (or blocked) run `CGP worker stop <item>` and reply with one line: "<title>: <outcome>".
      ```
-5. Wait: `CGP wait --timeout 540` via Bash (set the Bash timeout to 560000). It polls the board every `pollSeconds` and returns as soon as a story becomes actionable (new, answered, approved, or moved by the user), a worker is released (`worker stop`), all stories are Done, the user requests a stop and no worker is left, or the timeout passes. Then start the next cycle. Do not sleep any other way. Before waiting with `status: "idle"` and no workers in flight, print the waiting list once: if the set of waiting stories changed since the last report, one short list of `waitingOnYou` (title and url only), `blocked` (title and who they wait for), and the Plan Approval / PR Approval counts.
+5. Wait: `CGP wait --timeout 540` via Bash (set the Bash timeout to 560000). It polls the board every `pollSeconds` and returns as soon as a story becomes actionable (new, answered, approved, or moved by the user), a worker is released (`worker stop`), all stories are Done, the user requests a stop and no worker is left, or the timeout passes. Then start the next cycle. Do not sleep any other way. Before waiting with `status: "idle"` and no workers in flight, print the waiting list once: if the set of waiting stories changed since the last report, one short list of `waitingOnYou` (title and url only), `blocked` (title and who they wait for), and the Plan Review / PR Review counts.
 6. Worker completions arrive as notifications. Print one line `<emoji> <title>: <outcome>` for each. Workers stop themselves; do not `worker stop` on a normal completion, because the story may already have been re-dispatched in its new column. Only when the notification is an error or crash run `CGP worker stop <item>` so the story is released. The story's new column is handled by the next cycle, not by the same worker.
 
 ## Rules
 
-- The user decides the Plan Approval and PR Approval columns. Never move a story out of them or work on them.
+- The user decides the Plan Review and PR Review columns (keys `plan_approval`, `pr_approval`). Never move a story out of them or work on them. A board that has not been migrated also has agent-side `plan_review` / `pr_review` columns: workers handle them like Plan / Implement.
 - Stories in Plan Approved that wait on another story (`blocked` in the list output) are skipped until their blockers are Done; they do not count toward the no-progress rule.
 - A worker failure (agent error, crash) must not end the loop: `CGP worker stop <item>` (the crashed worker never did), note it in one line, leave the story where it is, and continue.
 - Track `(item, column)` each time a worker finishes. If a story is still in the same column after 3 consecutive worker runs (crashes or no progress; runs whose reply starts `waiting:` or `blocked:` do not count), run `CGP ask <item>` with a short summary so it waits on the user instead of spinning. Keep the per-cycle output short; the loop may run for days.

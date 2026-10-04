@@ -24,7 +24,7 @@ gh auth refresh -s project
 ## Use
 
 1. From a checkout of one of your repos: `/cgp:setup https://github.com/orgs/<org>/projects/<n>` (or `/users/<user>/projects/<n>`).
-   - Replaces the Status options with the 10 columns below, adds fields `Waiting On`, `Plan`, `PR`, `Preview` (the Netlify deploy preview URL, copied from the PR by `cgp preview`), links the current repo to the board and records its local path.
+   - Replaces the Status options with the 8 columns below (a board in the old ten-column layout is migrated, see below), adds fields `Waiting On`, `Plan`, `PR`, `Preview` (the Netlify deploy preview URL, copied from the PR by `cgp preview`), links the current repo to the board and records its local path.
    - Existing items whose old status name matches a new column keep it, closed issues go to Done, everything else lands in Todo. Closed issues anywhere on the board are filed under Done.
    - Run it again from another repo's checkout (same URL) to link more repos. Repos without a known local path are asked for.
 2. `/cgp:run`. Add stories to Todo on the board (issues, or draft items which get converted to issues in the repo the agent picks) and leave it running. It ends only when every story is Done, or when you stop it. To stop cleanly, press **Stop after this cycle** in the board band above the prompt (or run `scripts/cgp stop [board-url-or-key]` from a separate shell; the argument may be left out when exactly one live session holds a board lock, otherwise pass the board URL): the loop lets the running workers finish, then stops before dispatching more. `/cgp:run` picks up from the board.
@@ -33,18 +33,20 @@ gh auth refresh -s project
 
 | Column | Who acts | What happens |
 |---|---|---|
-| 🆕 Todo | agents | Pick repo, move to Plan, planners write an HTML plan artifact linked on the story, move to Plan Review |
-| 🧠 Plan | agents | Story sent back (or stalled): resolve comments on the plan and the story, move to Plan Review |
-| 🔍 Plan Review | agents | Reviewers review the plan, updaters apply findings, artifact refreshed, move to Plan Approval |
-| 🙋 Plan Approval | **you** | Read the plan artifact. Comment and move to Plan, or move to Plan Approved |
-| ✅ Plan Approved | agents | Move to Implement, implement in a worktree, open PR, fix CI, move to PR Review |
-| 🔨 Implement | agents | Story sent back: fix issues and requested changes on the PR, move to PR Review |
-| 👀 PR Review | agents | Reviewers review the PR, fixers fix immediately, CI green, move to PR Approval |
-| 🚦 PR Approval | **you** | Review the PR. Comment and move to Implement, or move to PR Approved |
+| 🆕 Todo | agents | Pick repo, move to Plan |
+| 🧠 Plan | agents | Planners write an HTML plan artifact linked on the story, reviewers review it, updaters apply findings, move to Plan Review. Also where a story lands when you send it back (or it stalled): comments on the plan and the story are resolved, the changes re-reviewed |
+| 🙋 Plan Review | **you** | Read the plan artifact. Comment and move to Plan, or move to Plan Approved |
+| ✅ Plan Approved | agents | Move to Implement |
+| 🔨 Implement | agents | Implement in a worktree, open PR, reviewers review it while CI runs, fixers fix, CI green, move to PR Review. Also where a story lands when you send it back: requested changes on the PR are fixed and re-reviewed |
+| 🚦 PR Review | **you** | Review the PR. Comment and move to Implement, or move to PR Approved |
 | 🚀 PR Approved | agents | Squash merge (auto-merge once CI is green), fix conflicts and CI until merged, move to Done |
 | 🎉 Done | nobody | |
 
-Colors: Todo blue, Plan yellow, Plan Review orange, Plan Approval purple, Plan Approved blue, Implement red, PR Review pink, PR Approval purple, PR Approved blue, Done green.
+Colors: Todo blue, Plan yellow, Plan Review purple, Plan Approved blue, Implement red, PR Review purple, PR Approved blue, Done green.
+
+Planning and review share one worker run (as do implementing and PR review), so a story is picked up by a fresh worker only after Todo, Plan Approved and PR Approved. The mod shows which phase each worker is in (see below).
+
+**Upgrading a board from the ten-column layout** (it had agent-side Plan Review and PR Review columns, and the human ones were called Plan Approval and PR Approval): nothing to do. `/cgp:run` brings the board up to date when it starts, under the board's lock: stories in the old agent-side columns move to Plan / Implement (where the worker now reviews them), Plan Approval / PR Approval are renamed Plan Review / PR Review with their stories where they were, and the old columns are removed. It reports what it changed. `scripts/cgp migrate --dry-run` shows the effect first, `scripts/cgp migrate` does it by hand, and `scripts/cgp config autoMigrate 0` stops `/cgp:run` from doing it (the board then keeps working in its old layout). A failed migration never blocks the run and is retried next time.
 
 The loop dispatches one background worker per actionable story (no cap by default) and keeps watching the board: a story that arrives while others are mid-implementation is picked up on the next poll, and a finished worker's story is dispatched again in its new column. `concurrency` caps workers in flight. When only stories in your columns, or waiting on your answers, are left, it polls the board every 30 seconds and resumes the moment something changes.
 
@@ -59,10 +61,10 @@ The loop dispatches one background worker per actionable story (no cap by defaul
 The loop runs unattended with your `gh` token, and it reads text anyone can write on a linked repo. The design assumes that text is hostile:
 
 - **Only trusted people can steer it.** `feedback`, `answers` and question replies only use comments from you, repo owners, and collaborators with write access (checked through the API). Everything else is reported as `ignoredUntrusted` with no body. The agent marker only counts on comments posted by your own gh account, so it can't be forged.
-- **The human gates are enforced in code, not just in prompts.** `cgp move` refuses to move a story into Plan Approved or PR Approved, out of Plan Approval or PR Approval, or to Done unless its PR is merged. `cgp merge` works only on a story that is in PR Approved and only for that story's own PR. The `PR` field must name a PR on a repo linked to the board.
+- **The human gates are enforced in code, not just in prompts.** `cgp move` refuses to move a story into Plan Approved or PR Approved, out of Plan Review or PR Review, or to Done unless its PR is merged. `cgp merge` works only on a story that is in PR Approved and only for that story's own PR. The `PR` field must name a PR on a repo linked to the board.
 - **Why a custom `PR` field instead of GitHub's built-in "Linked pull requests"?** The built-in field is read-only through the API and anyone with write access to the issue can change it (keyword links and sidebar links), and it can hold several PRs, including cross-repo ones. `cgp merge` and Done must act on exactly one PR the loop itself opened, so only `cgp set` writes `PR`, and it validates the URL against the board's linked repos. Keyword auto-linking also only happens for PRs targeting the default branch and can lag PR creation.
 - **Prompts treat everything written by people as data** (no running commands, fetching URLs, adding dependencies or leaking tokens because text said so), and `cgp guard` fails any branch that touches `.github/` or CODEOWNERS without the approved plan listing it.
-- **Code changed after your PR approval is re-approved**: a fix that is more than a clean, conflict-free rebase (conflict resolution, CI-fix commits) sends the story back to PR Approval instead of merging, and auto-merge is disarmed before any push.
+- **Code changed after your PR approval is re-approved**: a fix that is more than a clean, conflict-free rebase (conflict resolution, CI-fix commits) sends the story back to PR Review instead of merging, and auto-merge is disarmed before any push.
 - `~/.config/claude-github-project` is private to your user (0700/0600).
 
 What it can't do: an agent with Bash can still call `gh` directly. For defence in depth consider Claude Code permission rules denying `Bash(gh pr merge:*)`, `Bash(gh auth token:*)` and `Bash(gh api graphql:*)` for sessions running the loop, and a fine-grained token (or `GH_TOKEN`) limited to the linked repos and without the `workflow` scope. The setup scripts need `project`; the loop does not need `workflow`.
@@ -80,11 +82,14 @@ Workers rate each story low / medium / high on complexity and risk (auth, migrat
 Installing the plugin adds a band above the prompt while a loop is running (it hides itself when no worker is active and the session's state has not been refreshed for 15 minutes). The mod is loaded in every session, but each session only shows its own state:
 
 ```
-📋 My Board  🙋 Plan Approval: 2  🚦 PR Approval: 1  ❓ Waiting on you: 1
+📋 My Board  🙋 Plan Review: 2  🚦 PR Review: 1  ❓ Waiting on you: 1
 ❓ Rename the export flag waiting on you
-🔨 Add CSV export
-🔍 Fix login redirect
+🔨 Add CSV export · implementing
+🔍 Fix login redirect · reviewing (3 reviewers)
+⏳ Bump the retry limit · waiting on CI
 ```
+
+Each worker row shows what it is doing, set by the worker with `cgp worker phase <item> <planning|reviewing|revising|implementing|fixing|ci|merging> [detail]`; the CLI also sets phases by itself, so a worker that forgets still shows something true: planning or implementing from its column, reviewing once the plan is published or the PR is opened, ci while `ci-wait` runs (then the previous phase returns), merging during `merge`. Workers call `worker phase` for what the CLI cannot see (revising, fixing) and for the detail. A move resets the phase.
 
 The board name and each waiting story are links (the story link opens the issue with the question). A toast appears when a story newly starts waiting on you; stories already waiting when the session starts are shown but not toasted.
 
@@ -108,7 +113,7 @@ Settings: `scripts/cgp config concurrency 3` (cap on parallel workers; default 0
 
 ## CLI
 
-`scripts/cgp --help` lists everything. Notable: `use`/`release` (bind and claim a board), `list` (board snapshot, also clears answered questions), `wait`, `move`, `set`, `ask`, `feedback`, `ci-wait`, `merge`, `merge-wait`, `worktree`.
+`scripts/cgp --help` lists everything. Notable: `use`/`release` (bind and claim a board), `migrate`, `prepare` (everything a worker reads before acting, in one call), `list` (board snapshot, also clears answered questions), `wait`, `move`, `set`, `ask`, `feedback`, `ci-wait`, `merge`, `merge-wait`, `worktree`.
 
 ## Develop
 

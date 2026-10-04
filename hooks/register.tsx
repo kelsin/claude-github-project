@@ -3,6 +3,8 @@ import type { Register } from 'claude-code'
 
 import type { BoardView } from '../types'
 
+// plan_approval / pr_approval are the human columns, now called Plan Review / PR Review; plan_review / pr_review
+// only exist on boards that have not been migrated yet.
 const EMOJI: Record<string, string> = {
   todo: '🆕',
   plan: '🧠',
@@ -14,6 +16,16 @@ const EMOJI: Record<string, string> = {
   pr_approval: '🚦',
   pr_approved: '🚀',
   done: '🎉',
+}
+// What a worker says it is doing (cgp worker phase); anything else is ignored, so a worker cannot pick what is drawn.
+const PHASES: Record<string, [string, string]> = {
+  planning: ['🧠', 'planning'],
+  reviewing: ['🔍', 'reviewing'],
+  revising: ['✏️', 'revising'],
+  implementing: ['🔨', 'implementing'],
+  fixing: ['🔧', 'fixing review findings'],
+  ci: ['⏳', 'waiting on CI'],
+  merging: ['🚀', 'merging'],
 }
 const POLL_MS = 3000
 // The loop refreshes state.json on every poll; older than this means no loop is running.
@@ -117,9 +129,9 @@ export const register: Register = on => {
           {v.url ? <Link href={v.url} label={v.title} /> : <Text>{v.title}</Text>}
           <Text>
             {'  '}
-            {EMOJI.plan_approval} Plan Approval: {v.planApproval}
+            {EMOJI.plan_approval} Plan Review: {v.planApproval}
             {'  '}
-            {EMOJI.pr_approval} PR Approval: {v.prApproval}
+            {EMOJI.pr_approval} PR Review: {v.prApproval}
             {v.waiting.length > 0 ? `  ❓ Waiting on you: ${v.waiting.length}` : ''}
             {v.blocked > 0 ? `  ⛓ Queued behind another story: ${v.blocked}` : ''}
           </Text>
@@ -135,11 +147,16 @@ export const register: Register = on => {
         {v.waiting.length > asking.length && (
           <Text dimColor>… +{v.waiting.length - asking.length} more waiting on you</Text>
         )}
-        {shown.map((w, i) => (
-          <Text key={`${w.item}:${i}`} dimColor>
-            {EMOJI[w.column] ?? '•'} {clean(w.title)}
-          </Text>
-        ))}
+        {shown.map((w, i) => {
+          const phase = w.phase ? PHASES[w.phase] : undefined
+          const detail = clean(w.detail).trim()
+          return (
+            <Text key={`${w.item}:${i}`} dimColor>
+              {phase ? phase[0] : (EMOJI[w.column] ?? '•')} {clean(w.title)}
+              {phase ? ` · ${phase[1]}${detail ? ` (${detail})` : ''}` : ''}
+            </Text>
+          )
+        })}
         {v.workers.length > shown.length && (
           <Text dimColor>… +{v.workers.length - shown.length} more workers</Text>
         )}

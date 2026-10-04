@@ -19,11 +19,15 @@ const text = (n: any): string =>
 
 const cases: [string, string, string[], string[]][] = [
   // name, file body, text that must appear, text that must not
-  ['fresh', state({}), ['My Board', 'Plan Approval: 2', 'PR Approval: 1', '🔨 Story A', '🧠 Story B'], ['HIDDEN']],
+  ['fresh', state({}), ['My Board', 'Plan Review: 2', 'PR Review: 1', '🔨 Story A', '🧠 Story B'], ['HIDDEN']],
   ['stale and idle', state({ workers: [], updatedAt: '2026-10-03T10:00:00Z' }), ['HIDDEN'], ['My Board']],
   ['stale even with workers (interrupted loop)', state({ updatedAt: '2026-10-03T10:00:00Z' }), ['HIDDEN'], ['Story A']],
   ['bad json', '{"board":', ['HIDDEN'], ['My Board']],
   ['unlinkable url', state({ board: { title: 'My Board', url: 'https://github.com/users/kélsin/p' } }), ['My Board', 'Story A'], ['HIDDEN']],
+  ['a worker phase replaces the column emoji and names what it is doing', state({ workers: [{ item: 'a', column: 'plan', title: 'Story A', phase: 'reviewing', detail: '3 reviewers' }] }), ['🔍 Story A · reviewing (3 reviewers)'], ['🧠']],
+  ['a phase without detail', state({ workers: [{ item: 'a', column: 'implement', title: 'Story A', phase: 'ci' }] }), ['⏳ Story A · waiting on CI'], ['()']],
+  ['an unknown phase is ignored', state({ workers: [{ item: 'a', column: 'implement', title: 'Story A', phase: 'pwned', detail: 'x' }] }), ['🔨 Story A'], ['pwned', '(x)']],
+  ['phase detail is stripped of control characters', state({ workers: [{ item: 'a', column: 'plan', title: 'S', phase: 'planning', detail: 'a\x1b[2Jb' }] }), ['planning (a[2Jb)'], ['\x1b']],
   ['blocked count', state({ blockedCount: 2 }), ['Queued behind another story: 2'], ['HIDDEN']],
   ['control characters in titles are stripped', state({ workers: [{ item: 'a', column: 'plan', title: 'Evil\x1b]52;c;x\x07 Title' }] }), ['Evil]52;c;x Title'], ['\x1b']],
   ['waiting count', state({ waiting: [{ title: 't', url: null, column: 'plan' }] }), ['Waiting on you: 1'], ['HIDDEN']],

@@ -25,27 +25,37 @@ LOCK_STALE_SECONDS = 30 * 60
 MARK = "<!-- cgp -->"
 QMARK = "<!-- cgp:question -->"
 
-# key, name, emoji, color
+# key, name, emoji, color. The keys of the two human columns (plan_approval, pr_approval) predate their display names
+# "Plan Review" / "PR Review"; they stay because the gates in cmd_move/cmd_merge, the prompts and old state files use them.
 COLUMNS = [
     ("todo", "Todo", "🆕", "BLUE"),
     ("plan", "Plan", "🧠", "YELLOW"),
-    ("plan_review", "Plan Review", "🔍", "ORANGE"),
-    ("plan_approval", "Plan Approval", "🙋", "PURPLE"),
+    ("plan_approval", "Plan Review", "🙋", "PURPLE"),
     ("plan_approved", "Plan Approved", "✅", "BLUE"),
     ("implement", "Implement", "🔨", "RED"),
-    ("pr_review", "PR Review", "👀", "PINK"),
-    ("pr_approval", "PR Approval", "🚦", "PURPLE"),
+    ("pr_approval", "PR Review", "🚦", "PURPLE"),
     ("pr_approved", "PR Approved", "🚀", "BLUE"),
     ("done", "Done", "🎉", "GREEN"),
 ]
-KEYS = [c[0] for c in COLUMNS]
-EMOJI = {c[0]: c[2] for c in COLUMNS}
+# Pipeline order across every layout a board may still have: boards from before SCHEMA 2 also carry the agent-side
+# plan_review / pr_review columns (see apply_columns), which are only ever present in their config, never created.
+ALL_KEYS = ["todo", "plan", "plan_review", "plan_approval", "plan_approved", "implement", "pr_review", "pr_approval",
+            "pr_approved", "done"]
+SCHEMA = 2  # board config layout: 1 = ten columns with agent-side review columns, 2 = the columns above
+# What a worker is doing right now, shown in the mod (cgp worker phase)
+PHASES = ("planning", "reviewing", "revising", "implementing", "fixing", "ci", "merging")
 # Later pipeline stages first, so stories finish sooner when capped.
-ACTIONABLE = ["pr_approved", "plan_approved", "pr_review", "implement", "plan_review", "plan", "todo"]
+# The phase a worker is in unless it says otherwise, so a worker that forgets `cgp worker phase` still shows something true.
+# The CLI also infers later ones from what the worker does: publishing the plan (cgp set plan) or opening the PR (cgp set pr)
+# means review is next, ci-wait is "ci" while it waits, merge and merge-wait are "merging".
+DEFAULT_PHASE = {"todo": "planning", "plan": "planning", "plan_review": "planning", "plan_approved": "implementing",
+                 "implement": "implementing", "pr_review": "implementing", "pr_approved": "merging"}
+ACTIONABLE = ["pr_approved", "plan_approved", "pr_review", "implement", "plan_review", "plan", "todo"]  # the review ones: unmigrated boards only
 TEXT_FIELDS = {"plan": "Plan", "pr": "PR", "preview": "Preview"}
 WAITING_FIELD = "Waiting On"
 # concurrency 0 = no cap; sharedFiles: fnmatch globs for files many stories edit (registries, lockfiles): overlaps on them never block
-DEFAULTS = {"concurrency": 0, "pollSeconds": 30,
+# autoMigrate 1: `cgp use` brings a board from an older column layout up to date (cgp migrate does it by hand)
+DEFAULTS = {"concurrency": 0, "pollSeconds": 30, "autoMigrate": 1,
             "sharedFiles": ["*package-lock.json", "*yarn.lock", "*pnpm-lock.yaml", "*.schema.json", "*locales/*",
                             "*__snapshots__/*", "*.md"]}
 
@@ -490,6 +500,76 @@ def waiting_you(field):
     return you
 
 
+def board_keys(c):
+    """The columns this board actually has, in pipeline order (an unmigrated board still has plan_review and pr_review)."""
+    return [k for k in ALL_KEYS if k in c["fields"]["status"]["options"]]
+
+
+def status_options(status):
+    """Column key -> option id for the current columns of a Status field."""
+    return {key: o["id"] for key, name, _, _ in COLUMNS for o in status["options"] if norm(o["name"]) == norm(name)}
+
+
+def legacy_layout(options):
+    """True for the ten-column layout: it has Plan Approval / PR Approval, which the human columns were called then."""
+    return bool({norm(o["name"]) for o in options} & {"plan approval", "pr approval"})
+
+
+def apply_columns(proj, status, dry_run=False):
+    """Make the Status options the current COLUMNS. Returns (Status field, summary).
+
+    A board in the old layout is migrated in place, never by name alone: its agent-side "Plan Review" / "PR Review"
+    would otherwise be matched to the new human columns of the same names and stories nobody reviewed would look
+    approvable. Instead their stories first move to Plan / Implement (whose workers now review inline), and the
+    "Plan Approval" / "PR Approval" options are renamed with their ids kept, so the stories waiting on the user stay put.
+    Safe to repeat: the item moves come first and the options change in one mutation.
+    """
+    desired = [f"{emoji} {name}" for _, name, emoji, _ in COLUMNS]
+    old = {norm(o["name"]): o["id"] for o in status["options"]}
+    legacy = legacy_layout(status["options"])
+    keep, premove = {n: i for n, i in old.items() if n in {norm(n_) for _, n_, _, _ in COLUMNS}}, {}
+    if legacy:
+        keep.pop("plan review", None)  # the agent-side one; the human column of that name comes from "plan approval"
+        keep.pop("pr review", None)
+        for new, was in (("plan review", "plan approval"), ("pr review", "pr approval")):
+            if was in old:
+                keep[new] = old[was]
+        for was, to in (("plan review", "plan"), ("pr review", "implement")):
+            if was in old:
+                premove[old[was]] = old.get(to)
+    if not legacy and [o["name"] for o in status["options"]] == desired:
+        return status, {"changed": False}
+    matched = set(keep.values())
+    moves, remap = [], {}
+    for raw in fetch_items(proj["id"]):
+        cur = (raw.get("fvStatus") or {}).get("optionId")
+        if cur and premove.get(cur):
+            moves.append((raw["id"], premove[cur]))
+        elif cur and cur in matched:
+            continue  # option id is preserved below, so the item keeps its status
+        else:
+            closed = (raw.get("content") or {}).get("state") in ("CLOSED", "MERGED")
+            remap[raw["id"]] = "Done" if closed else ""
+    summary = {"changed": True, "legacy": legacy, "movedToReview": len(moves),
+               "remapped": {"todo": sum(1 for t in remap.values() if t != "Done"),
+                            "done": sum(1 for t in remap.values() if t == "Done")}}
+    if dry_run:
+        return status, {**summary, "dryRun": True}
+    for item, option in moves:
+        set_single({"board": {"id": proj["id"]}}, item, status["id"], option)
+    data = gql("""mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){
+      updateProjectV2Field(input:{fieldId:$f,singleSelectOptions:$o}){ projectV2Field{
+        ... on ProjectV2SingleSelectField{ id options{id name} } } } }""",
+               f=status["id"],
+               o=[{"name": f"{e} {n}", "color": col, "description": "",
+                   **({"id": keep[norm(n)]} if norm(n) in keep else {})} for _, n, e, col in COLUMNS])
+    status = data["updateProjectV2Field"]["projectV2Field"]
+    new_opts = {norm(o["name"]): o["id"] for o in status["options"]}
+    for item, tag in remap.items():
+        set_single({"board": {"id": proj["id"]}}, item, status["id"], new_opts["done" if tag == "Done" else "todo"])
+    return status, summary
+
+
 def cmd_setup(a):
     check_scope()
     kind, owner, number = parse_board_url(a.url)
@@ -500,8 +580,6 @@ def cmd_setup(a):
         die("project has no single-select Status field")
     if WAITING_FIELD in fields:
         waiting_you(fields[WAITING_FIELD])  # fail before the board is touched
-    desired = [f"{emoji} {name}" for _, name, emoji, _ in COLUMNS]
-    have = [o["name"] for o in status["options"]]
 
     repo_id = None
     if a.repo:  # validate before touching the board
@@ -509,33 +587,8 @@ def cmd_setup(a):
         repo_id = gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }",
                       o=owner_, n=name_)["repository"]["id"]
 
-    remap = {}
-    if have != desired:
-        old = {norm(o["name"]): o["id"] for o in status["options"]}
-        old_names = {o["id"]: o["name"] for o in status["options"]}
-        matched = {old[norm(n)] for _, n, _, _ in COLUMNS if norm(n) in old}
-        for raw in fetch_items(proj["id"]):
-            cur = raw.get("fvStatus")
-            if cur and cur["optionId"] in matched:
-                continue  # option id is preserved below, so the item keeps its status
-            closed = (raw.get("content") or {}).get("state") in ("CLOSED", "MERGED")
-            remap[raw["id"]] = "Done" if closed else ""
-        data = gql("""mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){
-          updateProjectV2Field(input:{fieldId:$f,singleSelectOptions:$o}){ projectV2Field{
-            ... on ProjectV2SingleSelectField{ id options{id name} } } } }""",
-                   f=status["id"],
-                   o=[{"name": f"{e} {n}", "color": col, "description": "",
-                       **({"id": old[norm(n)]} if norm(n) in old else {})} for _, n, e, col in COLUMNS])
-        status = data["updateProjectV2Field"]["projectV2Field"]
-        new_opts = {norm(o["name"]): o["id"] for o in status["options"]}
-        for item, tag in remap.items():
-            set_single({"board": {"id": proj["id"]}}, item, status["id"], new_opts["done" if tag == "Done" else "todo"])
-
-    options = {}
-    for key, name, _, _ in COLUMNS:
-        for o in status["options"]:
-            if norm(o["name"]) == norm(name):
-                options[key] = o["id"]
+    status, migration = apply_columns(proj, status)
+    options = status_options(status)
 
     def ensure(name, dtype, opts=None):
         if name in fields:
@@ -555,6 +608,7 @@ def cmd_setup(a):
     c = {
         "board": {"id": proj["id"], "url": proj["url"], "title": proj["title"],
                   "kind": kind, "owner": owner, "number": number},
+        "schema": SCHEMA,
         "fields": {"status": {"id": status["id"], "options": options},
                    "waiting": {"id": waiting["id"], "you": waiting_you(waiting)},
                    **text_ids},
@@ -574,9 +628,33 @@ def cmd_setup(a):
             c["repos"][a.repo] = os.path.abspath(a.repo_path)
     save_board(c)
 
-    moved = {"todo": sum(1 for t in remap.values() if t != "Done"), "done": sum(1 for t in remap.values() if t == "Done")}
-    out({"board": c["board"], "repos": c["repos"], "itemsRemapped": moved,
+    out({"board": c["board"], "repos": c["repos"], "itemsRemapped": migration.get("remapped", {"todo": 0, "done": 0}),
+         "migration": migration,
          "note": "items whose old status matched a new column name kept it; closed ones went to Done, all others to Todo"})
+
+
+def migrate_columns(c, dry_run=False):
+    """Bring a board's Status options up to the current columns (see apply_columns) and its config with them."""
+    b = c["board"]
+    proj = fetch_project(b["kind"], b["owner"], b["number"])
+    status = fields_by_name(proj).get("Status")
+    if not status or "options" not in status:
+        die("project has no single-select Status field")
+    status, summary = apply_columns(proj, status, dry_run)
+    if not dry_run:
+        c["fields"]["status"] = {"id": status["id"], "options": status_options(status)}
+        c["schema"] = SCHEMA
+        save_board(c)
+    return summary
+
+
+def cmd_migrate(a):
+    """Update this board's columns by hand (`cgp use` does it by itself unless autoMigrate is 0)."""
+    c = cfg()
+    holder = lock_holder(c["board"]["id"])
+    if holder and not a.dry_run:
+        die("another session is running this board's loop; migrate when it has stopped")
+    out(migrate_columns(c, a.dry_run))
 
 
 def cmd_use(a):
@@ -606,7 +684,17 @@ def cmd_use(a):
     update_state(lambda st: st.update(boardKey=key, board=boards[key]["board"], workers=[]))
     if os.path.exists(stop_path()):
         os.remove(stop_path())  # a stop request left from an earlier run
-    out({"board": boards[key]["board"], "session": sid()})
+    res = {"board": boards[key]["board"], "session": sid()}
+    c = boards[key]
+    if c.get("schema", 1) < SCHEMA:  # under the lock just claimed, so no loop can be running on the old columns
+        if not c["settings"].get("autoMigrate", 1):
+            res["migration"] = {"skipped": "autoMigrate is 0; this board keeps its old columns until: cgp migrate"}
+        else:
+            try:
+                res["migration"] = migrate_columns(c)
+            except SystemExit:  # the board is still in a layout the loop can run; the error is on stderr
+                res["migration"] = {"error": "could not update the board's columns; it keeps its old ones (see stderr) and is retried next run"}
+    out(res)
 
 
 def cmd_session_title(a):
@@ -738,7 +826,7 @@ def snapshot(c):
             i["column"] = "done"
             cleanup_worktree(c, i)
     live = [i for i in items if i["column"] != "done"]
-    counts = {k: sum(1 for i in items if i["column"] == k) for k in KEYS}
+    counts = {k: sum(1 for i in items if i["column"] == k) for k in board_keys(c)}
     by_id = {i["item"]: i for i in live}
 
     def live_blocks(raw):  # a block holds only while the blocker is live and still ahead of the blocked story
@@ -817,8 +905,8 @@ def cmd_wait(a):
 
 def cmd_move(a):
     c = cfg()
-    if a.column not in KEYS:
-        die(f"column must be one of {KEYS}")
+    if a.column not in board_keys(c):
+        die(f"column must be one of {board_keys(c)}")
     it = get_item(c, a.item)
     if it["column"] == a.column:
         out({"item": a.item, "column": a.column, "unchanged": True, "note": f"already in {a.column}"})
@@ -839,6 +927,10 @@ def cmd_move(a):
         for w in st["workers"]:
             if w["item"] == a.item:
                 w["column"] = a.column
+                for k in ("phase", "detail", "phaseAt"):
+                    w.pop(k, None)  # a phase belongs to the column it was set in
+                if a.column in DEFAULT_PHASE:
+                    w.update(phase=DEFAULT_PHASE[a.column], phaseAt=now_iso())
     update_state(upd)
     update_data(lambda d: d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]))
     out({"item": a.item, "column": a.column})
@@ -853,6 +945,10 @@ def cmd_set(a):
     if key == "pr" and value and not parse_pr_ref(c, value):
         die("PR must be https://github.com/<linked repo>/pull/<n> on a repo linked to this board")
     set_text(c, a.item, c["fields"][key], value)
+    if value:  # a published plan or an opened PR means review comes next
+        if key == "pr":
+            worker_pr(a.item, parse_pr_ref(c, value))
+        set_phase("reviewing", item=a.item)
     out({"item": a.item, a.field: value or None})
 
 
@@ -974,6 +1070,37 @@ def cmd_feedback(a):
     out({"comments": sorted(found, key=lambda f: f["at"]), "ignoredUntrusted": ignored})
 
 
+def cmd_prepare(a):
+    """Everything a worker reads before acting, in one call: the story, feedback, the Q&A history when the user just
+    answered, the PR state, and the worktree brought up to date. Each part fails on its own (`error`) so one problem
+    does not hide the rest."""
+    c = cfg()
+    it = get_item(c, a.item)
+
+    def run(*args):
+        p = subprocess.run([sys.executable, os.path.abspath(__file__), *args], capture_output=True, text=True)
+        try:
+            return json.loads(p.stdout)
+        except ValueError:
+            return {"error": (p.stderr or p.stdout).strip()}
+    res = {"story": it}
+    if it["kind"] != "issue":
+        res["note"] = "a draft: convert it first (cgp adopt <item> <owner/repo>); drafts have no comments or worktree"
+        out(res)
+        return
+    res["feedback"] = run("feedback", a.item)
+    if a.item in load_data().get("answered", []):
+        res["answers"] = run("answers", a.item)
+    ref = parse_pr_ref(c, it["pr"])
+    if ref:
+        worker_pr(a.item, ref)
+        res["prState"] = run("pr-state", ref[0], str(ref[1]))
+    res["worktree"] = run("worktree", a.item)
+    if "error" not in res["worktree"]:
+        res["sync"] = run("sync", a.item)
+    out(res)
+
+
 def cmd_adopt(a):
     c = cfg()
     owner, name = split_repo(a.repo)
@@ -1023,11 +1150,47 @@ def cmd_stop(a):
     out({"stopRequested": not a.cancel, "session": os.path.basename(path)[len("stop-"):]})
 
 
+def set_phase(phase, detail="", item=None, pr=None):
+    """Set (or with None, clear) the phase of the worker owning an item, or the PR 'owner/repo#n' it recorded.
+    Returns its previous (phase, detail), or False when no such worker is registered, so a temporary phase can be put back."""
+    prev = []
+
+    def upd(st):
+        for w in st["workers"]:
+            if w["item"] == item or (pr and w.get("pr") == pr):
+                prev.append((w.get("phase"), w.get("detail", "")))
+                for k in ("phase", "detail", "phaseAt"):
+                    w.pop(k, None)
+                if phase:
+                    w.update(phase=phase, detail=detail, phaseAt=now_iso())
+    update_state(upd)
+    return prev[0] if prev else False
+
+
+def worker_pr(item, ref):
+    """Remember which PR a worker owns, so ci-wait (which only knows the PR) can find its worker."""
+    def upd(st):
+        for w in st["workers"]:
+            if w["item"] == item:
+                w["pr"] = f"{ref[0]}#{ref[1]}"
+    update_state(upd)
+
+
 def cmd_worker(a):
     def upd(st):
+        if a.action == "phase":
+            for w in st["workers"]:
+                if w["item"] == a.item:
+                    w.update(phase=a.column, detail=(a.title or "")[:80], phaseAt=now_iso())
+            return
         st["workers"] = [w for w in st["workers"] if w["item"] != a.item]
         if a.action == "start":
-            st["workers"].append({"item": a.item, "column": a.column, "title": a.title, "startedAt": now_iso()})
+            w = {"item": a.item, "column": a.column, "title": a.title, "startedAt": now_iso()}
+            if a.column in DEFAULT_PHASE:
+                w.update(phase=DEFAULT_PHASE[a.column], phaseAt=now_iso())
+            st["workers"].append(w)
+    if a.action == "phase" and a.column not in PHASES:
+        die(f"phase must be one of {list(PHASES)}")
     if a.action == "clear":
         update_state(lambda st: st.__setitem__("workers", []))
     else:
@@ -1204,7 +1367,7 @@ def story_files(c, st, it):
 
 
 def rank(it):
-    return (KEYS.index(it["column"]), -(it["number"] or 0))
+    return (ALL_KEYS.index(it["column"]), -(it["number"] or 0))
 
 
 def would_cycle(blocks, item, other):
@@ -1240,7 +1403,7 @@ def cmd_overlap(a):
             continue
         theirs = story_files(c, st, o)
         if not theirs:
-            if KEYS.index(o["column"]) >= KEYS.index("plan_approved"):
+            if ALL_KEYS.index(o["column"]) >= ALL_KEYS.index("plan_approved"):
                 unknown.append({"item": o["item"], "title": o["title"], "column": o["column"]})
             continue
         dirs = {f for f in mine | theirs if f.endswith("/")}
@@ -1318,6 +1481,16 @@ def failed_logs(repo, failed):
 
 def cmd_ci_wait(a):
     a.repo = require_repo(cfg(), a.repo)
+    pr = f"{a.repo}#{a.pr}"
+    before = set_phase("ci", pr=pr)
+    try:
+        ci_wait(a)
+    finally:
+        if before is not False:  # waiting is over: back to what the worker was doing (it sets the next phase itself)
+            set_phase(*before, pr=pr)
+
+
+def ci_wait(a):
     deadline, none_since = time.time() + a.timeout, time.time()
     while True:
         if a.sha:  # checks of an older head say nothing about the commit just pushed
@@ -1377,6 +1550,7 @@ def merge_target(a):
     if it["column"] != "pr_approved" or not ref:
         die("refusing to merge: the story must be in pr_approved (set by the user) with a valid PR field")
     a.repo, a.pr = ref
+    set_phase("merging", item=a.item)
     return a
 
 
@@ -1440,6 +1614,7 @@ def main():
 
     p = sp.add_parser("setup"); p.add_argument("url"); p.add_argument("--repo"); p.add_argument("--repo-path"); p.set_defaults(fn=cmd_setup)
     p = sp.add_parser("use"); p.add_argument("url", nargs="?"); p.add_argument("--takeover", action="store_true"); p.set_defaults(fn=cmd_use)
+    p = sp.add_parser("migrate"); p.add_argument("--dry-run", action="store_true"); p.set_defaults(fn=cmd_migrate)
     p = sp.add_parser("release"); p.set_defaults(fn=cmd_release)
     p = sp.add_parser("session-title"); p.set_defaults(fn=cmd_session_title)
     p = sp.add_parser("repo-path"); p.add_argument("repo", nargs="?"); p.add_argument("path", nargs="?"); p.set_defaults(fn=cmd_repo_path)
@@ -1455,12 +1630,13 @@ def main():
     p = sp.add_parser("ask"); p.add_argument("item"); p.set_defaults(fn=cmd_ask)
     p = sp.add_parser("answers"); p.add_argument("item"); p.set_defaults(fn=cmd_answers)
     p = sp.add_parser("feedback"); p.add_argument("item"); p.set_defaults(fn=cmd_feedback)
+    p = sp.add_parser("prepare"); p.add_argument("item"); p.set_defaults(fn=cmd_prepare)
     p = sp.add_parser("adopt"); p.add_argument("item"); p.add_argument("repo"); p.set_defaults(fn=cmd_adopt)
     p = sp.add_parser("stop", description="Finish the current cycle, then stop the loop. Without CGP_SESSION (a separate shell) it stops "
                       "the live session holding the board's lock: the only live one, or the one running the given board.")
     p.add_argument("board", nargs="?", help="board URL or key; default: this session")
     p.add_argument("--cancel", action="store_true"); p.set_defaults(fn=cmd_stop)
-    p = sp.add_parser("worker"); p.add_argument("action", choices=["start", "stop", "clear"]); p.add_argument("item", nargs="?")
+    p = sp.add_parser("worker"); p.add_argument("action", choices=["start", "stop", "clear", "phase"]); p.add_argument("item", nargs="?")
     p.add_argument("column", nargs="?"); p.add_argument("title", nargs="?", default=""); p.set_defaults(fn=cmd_worker)
     p = sp.add_parser("worktree"); p.add_argument("item"); p.set_defaults(fn=cmd_worktree)
     p = sp.add_parser("worktree-remove"); p.add_argument("item"); p.set_defaults(fn=cmd_worktree_remove)
