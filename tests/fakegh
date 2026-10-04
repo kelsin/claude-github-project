@@ -86,6 +86,16 @@ elif args[:2] == ["api", "graphql"]:
             del f["options"]
         db["fields"].append(f)
         r = {"createProjectV2Field": {"projectV2Field": f}}
+    elif "createProjectV2View" in q:
+        db.setdefault("views", []).append({"id": f"V{len(db['views'])}", "name": v["n"], "layout": v["l"],
+                                           "filter": "", "fieldIds": v["c"]["visibleFieldIds"]})
+        r = {"createProjectV2View": {"projectV2View": {"id": db["views"][-1]["id"]}}}
+    elif "updateProjectV2View" in q:
+        view = next(x for x in db["views"] if x["id"] == v["v"])
+        view.update({k: v[a] for a, k in (("n", "name"), ("f", "filter")) if a in v})
+        if v.get("c"):
+            view["fieldIds"] = v["c"]["visibleFieldIds"]
+        r = {}
     elif "updateProjectV2ItemFieldValue" in q:
         fname = next(x["name"] for x in db["fields"] if x["id"] == v["f"])
         item = next(i for i in db["items"] if i["id"] == v["i"])
@@ -110,6 +120,7 @@ elif args[:2] == ["api", "graphql"]:
     elif "projectV2(number" in q:
         p = {"id": f"P{v['n']}", "title": f"Test Board {v['n']}", "url": f"https://github.com/orgs/acme/projects/{v['n']}",
              "repositories": {"nodes": [{"nameWithOwner": "acme/app"}]},
+             "views": {"nodes": db.get("views", [])},
              "fields": {"nodes": [dict({"__typename": "x"}, **f) for f in db["fields"]]}}
         r = {"organization": {"projectV2": p}}
     elif "isArchived" in q and "node(id:$i)" in q:

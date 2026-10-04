@@ -102,6 +102,25 @@ class TestSetup(Base):
         self.assertEqual(res["itemsRemapped"], {"todo": 2, "done": 0})
         self.assertEqual(res["repos"], {"acme/app": None})
 
+    def test_views_created_once(self):
+        d = self.read_db()
+        d["fields"] += [{"id": f"F_{n}", "name": n, "dataType": "x"} for n in ("Title", "Repository", "Assignees")]
+        self.write_db(d)
+        self.assertEqual(self.setup_board()["viewsCreated"], ["Tasks", "Board", "Approvals"])
+        views = {v["name"]: v for v in self.read_db()["views"]}
+        self.assertEqual(views["Tasks"]["layout"], "TABLE_LAYOUT")
+        self.assertEqual(views["Approvals"]["filter"], 'status:"🙋 Plan Review","🚦 PR Review"')
+        self.assertEqual(len(views["Tasks"]["fieldIds"]), 7)
+        self.assertEqual(self.setup_board()["viewsCreated"], [])
+        self.assertEqual(len(self.read_db()["views"]), 3)
+
+    def test_starter_view_becomes_tasks(self):
+        d = self.read_db()
+        d["views"] = [{"id": "V0", "name": "View 1", "layout": "TABLE_LAYOUT", "filter": ""}]
+        self.write_db(d)
+        self.setup_board()
+        self.assertEqual([v["name"] for v in self.read_db()["views"]], ["Tasks", "Board", "Approvals"])
+
     def test_matching_statuses_survive_and_closed_goes_done(self):
         d = self.read_db()
         d["items"][1]["content"]["state"] = "CLOSED"  # i2 was "In Progress" but is closed

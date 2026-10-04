@@ -266,6 +266,7 @@ def update_state(fn):
 PROJECT_FRAGMENT = """
   id title url
   repositories(first: 50) { nodes { nameWithOwner } }
+  views(first: 50) { nodes { id name layout } }
   fields(first: 50) { nodes {
     __typename
     ... on ProjectV2FieldCommon { id name dataType }
@@ -588,6 +589,45 @@ def apply_columns(proj, status, dry_run=False):
     return status, summary
 
 
+# name, layout, visible fields, filter. The same three tabs as the 18xx-maker board. The API can set a view's name, layout,
+# visible fields and filter, but not its grouping or sort, so "Board" and "Approvals" are columns by Status (GitHub's default)
+# and group-by Repository is left for the user to turn on.
+VIEWS = [
+    ("Tasks", "TABLE_LAYOUT", ["Title", "Status", "Repository", WAITING_FIELD, "Plan", "PR", "Preview"], ""),
+    ("Board", "BOARD_LAYOUT", ["Title", "Assignees", "Status"], ""),
+    ("Approvals", "BOARD_LAYOUT", ["Title", "Status"],
+     "status:" + ",".join(f'"{e} {n}"' for k, n, e, _ in COLUMNS if k in ("plan_approval", "pr_approval"))),
+]
+
+
+def ensure_views(proj, fields):
+    """Create the VIEWS missing from the board; views that exist by name are left as the user has them.
+
+    A fresh board's untouched default "View 1" table becomes Tasks. Returns the names created.
+    """
+    have = {v["name"]: v for v in proj["views"]["nodes"]}
+    done = []
+    for name, layout, shown, flt in VIEWS:
+        if name in have:
+            continue
+        config = {"visibleFieldIds": [fields[f]["id"] for f in shown if f in fields]}
+        default = have.get("View 1")
+        if default and default["layout"] == layout:  # reuse the starter view rather than leave an extra tab
+            gql("""mutation($v:ID!,$n:String!,$f:String,$c:ProjectV2ViewConfigurationInput){
+              updateProjectV2View(input:{viewId:$v,name:$n,filter:$f,configuration:$c}){ clientMutationId } }""",
+                v=default["id"], n=name, f=flt, c=config)
+            del have["View 1"]
+        else:
+            view = gql("""mutation($p:ID!,$n:String!,$l:ProjectV2ViewLayout!,$c:ProjectV2ViewConfigurationInput){
+              createProjectV2View(input:{projectId:$p,name:$n,layout:$l,configuration:$c}){ projectV2View{ id } } }""",
+                       p=proj["id"], n=name, l=layout, c=config)["createProjectV2View"]["projectV2View"]
+            if flt:
+                gql("""mutation($v:ID!,$f:String){ updateProjectV2View(input:{viewId:$v,filter:$f}){ clientMutationId } }""",
+                    v=view["id"], f=flt)
+        done.append(name)
+    return done
+
+
 def cmd_setup(a):
     check_scope()
     kind, owner, number = parse_board_url(a.url)
@@ -620,6 +660,8 @@ def cmd_setup(a):
     waiting = ensure(WAITING_FIELD, "SINGLE_SELECT", [{"name": "You", "color": "RED", "description": ""},
                                                       {"name": STORY_OPTION, "color": "YELLOW", "description": ""}])
     text_ids = {k: ensure(n, "TEXT")["id"] for k, n in TEXT_FIELDS.items()}
+    fields = fields_by_name(fetch_project(kind, owner, number))  # now with the fields added above
+    views = ensure_views(proj, fields)
 
     old = load_json(board_file(proj["id"]), {})
     paths = load_json(PATHS, {})
@@ -649,7 +691,7 @@ def cmd_setup(a):
     save_board(c)
 
     out({"board": c["board"], "repos": c["repos"], "itemsRemapped": migration.get("remapped", {"todo": 0, "done": 0}),
-         "migration": migration,
+         "migration": migration, "viewsCreated": views,
          "note": "items whose old status matched a new column name kept it; closed ones went to Done, all others to Todo"})
 
 
