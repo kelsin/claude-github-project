@@ -888,6 +888,38 @@ def sync_story_field(c, live):
             i["waitingOn"] = None
 
 
+def hard_conflict(a, b, patterns):
+    """True when two stories' declared touches share a file that would block (shared-file globs and directory overlaps never do)."""
+    dirs = {f for f in a | b if f.endswith("/")}
+    return any(not any(fnmatch.fnmatchcase(f, g) for g in patterns) for f in (a & b) - dirs)
+
+
+def pick_compatible(c, actionable, live, in_flight):
+    """Of the stories about to start work (Plan Approved, or Implement with no PR), keep the largest group whose declared files
+    don't collide with each other or with a worker already running; the rest wait (deferred) so no worker is spent on a story
+    that would only block. Greedy by fewest conflicts, board order breaking ties."""
+    touches = load_data().get("touches", {})
+    patterns = c["settings"]["sharedFiles"]
+    files = lambda i: {norm_path(f) for f in touches.get(i["item"], [])}
+    gate = lambda i: i["column"] == "plan_approved" or (i["column"] == "implement" and not i["pr"])
+    cands = [i for i in actionable if gate(i)]
+    running = [i for i in live if i["item"] in in_flight and gate(i)]
+    clash = lambda a, b: hard_conflict(files(a), files(b), patterns)
+    for i in cands:
+        i["conflictsWith"] = [r["title"] for r in running if clash(i, r)]
+    pool = [i for i in cands if not i["conflictsWith"]]
+    chosen = []
+    while pool:
+        pick = min(pool, key=lambda i: sum(clash(i, o) for o in pool if o is not i))
+        chosen.append(pick)
+        for o in pool:
+            if o is not pick and clash(pick, o):
+                o["conflictsWith"] = [pick["title"]]
+        pool = [o for o in pool if o is not pick and not o.get("conflictsWith")]
+    deferred = [i for i in cands if i not in chosen]
+    return [i for i in actionable if i not in deferred], deferred
+
+
 def snapshot(c):
     holder = lock_holder(c["board"]["id"])
     if holder:
@@ -925,6 +957,7 @@ def snapshot(c):
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and i not in blocked
                   and i["item"] not in in_flight]
     actionable.sort(key=lambda i: ACTIONABLE.index(i["column"]))
+    actionable, deferred = pick_compatible(c, actionable, live, in_flight)
     waiting = [i for i in live if i["waiting"]]
     cap = c["settings"]["concurrency"]
     batch = [] if stop_requested() else actionable[: max(cap - len(in_flight), 0)] if cap > 0 else actionable  # a stop request dispatches nothing new
@@ -940,6 +973,7 @@ def snapshot(c):
         "actionableTotal": len(actionable),
         "waitingOnYou": waiting,
         "blocked": [{"title": i["title"], "blockedBy": i["blockedBy"], "blockers": i["blockers"]} for i in blocked],
+        "deferred": [{"title": i["title"], "conflictsWith": i["conflictsWith"]} for i in deferred],
         "items": items,
     }
 
@@ -952,6 +986,7 @@ def snapshot(c):
     update_state(upd)
 
     def prune(d):
+        d["deferred"] = [i["item"] for i in deferred]
         d["blocks"] = {k: v for k, v in live_blocks(d.get("blocks")).items() if v}  # re-read under the lock: keeps blocks written meanwhile
         d["touches"] = {k: v for k, v in d.get("touches", {}).items() if k in live_ids}
     update_data(prune)
@@ -1496,7 +1531,8 @@ def cmd_overlap(a):
         found.append({"item": o["item"], "title": o["title"], "number": o["number"], "column": o["column"],
                       "pr": o["pr"], "files": files, "shared": shared, "areas": areas, "ahead": rank(o) > rank(me),
                       "alreadyWaitsOnMe": a.item in blocks.get(o["item"], [])})
-    block_on = [f["item"] for f in found if f["ahead"] and f["files"] and not f["alreadyWaitsOnMe"]]
+    held = set(st.get("deferred", []))  # the loop is holding these back for me: waiting on them would deadlock
+    block_on = [f["item"] for f in found if f["ahead"] and f["files"] and not f["alreadyWaitsOnMe"] and f["item"] not in held]
     suggest = ({"action": "declare", "why": "this story has no touches or PR yet: run `cgp touches` first"} if not mine
                else {"action": "block", "on": block_on} if block_on else {"action": "proceed"})
     out({"story": {"item": a.item, "touches": sorted(mine)}, "overlaps": found,
