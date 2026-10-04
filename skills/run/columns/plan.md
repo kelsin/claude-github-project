@@ -1,11 +1,12 @@
 # Column: Plan
 
-The story was sent back, or a worker stopped mid-plan.
+Planning and plan review in one run. Stories arrive from Todo (no `plan` link yet) or are sent back (the user commented in Plan Review) or stalled (a `plan` link exists). On a board that has not been migrated, a story in `plan_review` is handled exactly like this.
 
-- **No `plan` link:** do the Todo steps from step 3 onward (the story is already in Plan).
-- **Has a `plan` link:**
-  1. Collect feedback: `CGP feedback <item>` plus the artifact's comments (ArtifactComments tool on the plan URL). Include `answers` if `answered`.
-  2. Rate the story (rule 4). For each distinct problem or change request, spawn an agent to resolve it in the plan (several agents only if they touch separate sections). Questions in comments get answered in the plan or the status comment.
-  3. Update and republish the artifact so it is current, and refresh `CGP touches <item> <paths...>` if the set of files changed. Reply to each artifact comment you addressed.
-  4. Post a status comment listing what changed.
-  5. `CGP move <item> plan_review`.
+1. Rule 1 (`CGP prepare`), then rate the story (rule 4). `CGP worker phase <item> planning`.
+2. **No `plan` link:** explore the code in the worktree `prepare` returned. Spawn planners (count by rating) and merge their drafts into one plan. Put every assumption in the Assumptions section. `CGP touches <item> <paths...>` with the files and directories the plan changes. Publish the artifact (`plan_artifact.md`) and `CGP set <item> plan <url>`.
+   **Has a `plan` link:** collect feedback (`feedback` and `answers` from `prepare`, plus the artifact's comments via ArtifactComments). `CGP worker phase <item> revising`. For each distinct problem or change request spawn an agent to resolve it in the plan (several only for separate sections). Questions in comments get answered in the plan or the status comment. Republish, refresh `CGP touches` if the files changed, and reply to each artifact comment you addressed.
+3. Review. `CGP worker phase <item> reviewing "<n> reviewers"`. Run `CGP overlap <item>`: if another story changes the same files the plan needs an Ordering note (who goes first, what to rebase on) and must not assume the other story's changes aren't coming. Spawn reviewers by the rating, each with a distinct lens: feasibility against the real code, risks and missed edge cases, test strategy, scope creep, security and migrations when risk is high. Give them the overlap result; they read the code through the worktree. Each returns concrete findings: severity, where in the plan, the fix. After a send-back, review only what changed (one reviewer unless risk is high).
+4. `CGP worker phase <item> revising`. Spawn agents to apply every accepted finding (one per independent section). Record each finding and its resolution in the Review log; reject a finding only with a reason recorded there.
+5. A finding that needs a decision only the user can make goes in the plan's Open questions and `CGP ask` with your proposed default; then stop without moving.
+6. Make sure the published artifact is current, then post a status comment (plan link, rating, key assumptions, review summary and counts).
+7. `CGP move <item> plan_approval` (the user's Plan Review column).
