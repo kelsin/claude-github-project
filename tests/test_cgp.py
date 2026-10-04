@@ -1,8 +1,18 @@
+import importlib.machinery, importlib.util
 import json
-import os, subprocess, sys, tempfile, time, unittest
+import os, subprocess, sys, tempfile, time, types, unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CGP = os.path.join(ROOT, "scripts", "cgp")
+
+
+def load_cgp():
+    """scripts/cgp as a module (it has no .py suffix); HOME and friends are read from os.environ at import."""
+    loader = importlib.machinery.SourceFileLoader("cgp_mod", CGP)
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("cgp_mod", loader))
+    loader.exec_module(mod)
+    return mod
 
 
 def issue(n, title):
@@ -30,6 +40,7 @@ class Base(unittest.TestCase):
         os.symlink(os.path.join(ROOT, "tests", "fakegh"), os.path.join(bin_, "gh"))
         self.env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "FAKE_GH_DB": self.db,
                     "CGP_HOME": os.path.join(self.tmp, "home")}
+        self.env.pop("CGP_SESSION", None)
 
     def write_db(self, d):
         with open(self.db, "w") as f:
@@ -251,8 +262,7 @@ class TestRobustness(Base):
         self.assertEqual([f["body"] for f in self.cgp("feedback", "i1")["comments"]], ["also fix X"])
 
     def test_paginated_json_with_bracket_pairs_in_bodies(self):
-        import importlib.machinery, types
-        m = importlib.machinery.SourceFileLoader("cgp_mod", CGP).load_module()
+        m = load_cgp()
         page1 = json.dumps([{"body": "see [a][b] ok"}])
         page2 = json.dumps([{"body": "x"}])
         m.gh = lambda *a, **k: types.SimpleNamespace(stdout=page1 + page2)
@@ -503,6 +513,52 @@ class TestMoreSync(TestSync):
         self.cgp("touches", "i1", ".github/workflows/")
         self.assertTrue(self.cgp("guard", "i1")["ok"])
 
+    def test_guard_sees_workflow_files_moved_out_of_github(self):
+        os.makedirs(os.path.join(self.clone, ".github", "workflows"))
+        with open(os.path.join(self.clone, ".github", "workflows", "ci.yml"), "w") as f:
+            f.write("on: push\n")
+        self.git(self.clone, "add", "."); self.git(self.clone, "commit", "-qm", "ci")
+        self.git(self.clone, "push", "-q", "origin", "HEAD:main")
+        self.cgp("sync", "i1")
+        self.git(self.wt, "mv", ".github/workflows/ci.yml", "ci.yml")
+        self.git(self.wt, "commit", "-qm", "move ci")
+        p = self.cgp("guard", "i1", ok=False)
+        self.assertEqual(p.returncode, 4)
+        self.assertIn(".github/workflows/ci.yml", json.loads(p.stdout)["violations"])
+
+    def test_guard_refuses_draft_items_cleanly(self):
+        p = self.cgp("guard", "i4", ok=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("not an issue", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+
+    def remove_worktree_keep_branch(self):
+        self.git(self.clone, "worktree", "remove", "--force", self.wt)
+
+    def commit_in(self, path, name):
+        with open(os.path.join(path, name), "w") as f:
+            f.write(name)
+        self.git(path, "add", "."); self.git(path, "commit", "-qm", name)
+
+    def test_worktree_keeps_unpushed_local_commits_when_branch_also_on_origin(self):
+        self.commit_in(self.wt, "pushed.txt")
+        self.git(self.wt, "push", "-q", "origin", "HEAD")
+        self.commit_in(self.wt, "local-only.txt")
+        self.remove_worktree_keep_branch()
+        wt = self.cgp("worktree", "i1")["path"]
+        self.assertTrue(os.path.exists(os.path.join(wt, "local-only.txt")))
+
+    def test_worktree_fast_forwards_to_origin_when_local_is_behind(self):
+        self.commit_in(self.wt, "pushed.txt")
+        self.git(self.wt, "push", "-q", "origin", "HEAD")
+        other = os.path.join(self.tmp, "other")
+        subprocess.run(["git", "clone", "-q", "-b", "cgp/1", self.origin, other], check=True, capture_output=True)
+        self.commit_in(other, "theirs.txt")
+        self.git(other, "push", "-q", "origin", "HEAD")
+        self.remove_worktree_keep_branch()
+        wt = self.cgp("worktree", "i1")["path"]
+        self.assertTrue(os.path.exists(os.path.join(wt, "theirs.txt")))
+
 
 class TestSessions(Base):
     """Parallel sessions, each on its own board."""
@@ -564,6 +620,37 @@ class TestSessions(Base):
         self.cgp("release", env=self.a)
         self.cgp("use", url, env={"CGP_SESSION": "fresh"})
         self.assertEqual(self.cgp("touches", "i1", env={"CGP_SESSION": "fresh"}), ["src/x.py"])
+
+    def test_only_one_of_many_simultaneous_sessions_claims_a_board(self):
+        url = "https://github.com/orgs/acme/projects/1"
+        procs = [subprocess.Popen([sys.executable, CGP, "use", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  env={**self.env, "CGP_SESSION": f"s{n}"}) for n in range(6)]
+        codes = sorted(p.wait() for p in procs)
+        self.assertEqual(codes, [0, 5, 5, 5, 5, 5])
+
+    def test_stop_from_a_separate_shell_finds_the_live_session(self):
+        self.cgp("use", "https://github.com/orgs/acme/projects/1", env=self.a)
+        self.assertEqual(self.cgp("stop")["session"], "a")  # no CGP_SESSION: the only live lock's holder
+        self.assertTrue(self.cgp("list", env=self.a)["stopRequested"])
+        with open(os.path.join(self.env["CGP_HOME"], "stop-a")) as f:
+            self.assertEqual(f.read(), "1")
+        self.cgp("stop", "--cancel")
+        self.assertFalse(self.cgp("list", env=self.a)["stopRequested"])
+
+    def test_stop_with_several_live_sessions_needs_a_board(self):
+        self.cgp("use", "https://github.com/orgs/acme/projects/1", env=self.a)
+        self.cgp("use", "https://github.com/orgs/acme/projects/2", env=self.b)
+        p = self.cgp("stop", ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("several live sessions", p.stderr)
+        self.assertEqual(self.cgp("stop", "https://github.com/orgs/acme/projects/2")["session"], "b")
+        self.assertEqual(self.cgp("stop", "P1")["session"], "a")  # a board key works too
+        self.assertFalse(os.path.exists(os.path.join(self.env["CGP_HOME"], "stop-default")))
+
+    def test_stop_defaults_to_own_session(self):
+        self.cgp("use", "https://github.com/orgs/acme/projects/1", env=self.a)
+        self.cgp("use", "https://github.com/orgs/acme/projects/2", env=self.b)
+        self.assertEqual(self.cgp("stop", env=self.b)["session"], "b")
 
     def test_repo_paths_are_shared_across_boards(self):
         self.cgp("use", "https://github.com/orgs/acme/projects/2", env=self.b)
@@ -652,11 +739,276 @@ class TestSessionTitle(Base):
         self.assertEqual(self.title("/cgp:run https://github.com/orgs/acme/projects/1"), f"🚀 {board}")
         self.assertEqual(self.title("/cgp:setup https://github.com/orgs/other/projects/7"), "🛠️ other project 7")
 
+    def test_a_bad_url_never_makes_the_hook_fail(self):
+        self.assertIsNone(self.title("/cgp:run https://example.com/not-a-board"))
+
     def test_other_prompts_and_unknown_board_are_left_alone(self):
         self.assertIsNone(self.title("/cgp:run"))  # nothing set up yet
         self.setup_board()
         self.assertIsNone(self.title("fix the bug"))
         self.assertIsNone(self.title("/cgp:runner"))
+
+class TestGraphQL(Base):
+    def test_partial_errors_do_not_stop_list_or_wait(self):
+        self.setup_board()
+        d = self.read_db(); d["broken_items"] = ["i2"]; self.write_db(d)
+        p = self.cgp("list", ok=False)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("cannot read content of i2", p.stderr)
+        self.assertEqual([i["item"] for i in json.loads(p.stdout)["items"]], ["i1", "i3", "i4"])
+        p = self.cgp("wait", "--timeout", "0", ok=False)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout)["status"], "work")
+
+    def test_missing_data_is_fatal(self):
+        m = load_cgp()
+        m.gh = lambda *a, **k: types.SimpleNamespace(returncode=1, stdout=json.dumps({"errors": [{"message": "boom"}]}), stderr="")
+        with self.assertRaises(SystemExit):
+            m.gql("query{ x }")
+        m.gh = lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr="HTTP 502")
+        with self.assertRaises(SystemExit):
+            m.gql("query{ x }")
+
+    def test_null_mutation_field_is_fatal_but_other_partial_data_is_kept(self):
+        m = load_cgp()
+        reply = lambda data, errors: (lambda *a, **k: types.SimpleNamespace(
+            returncode=1, stdout=json.dumps({"data": data, "errors": errors}), stderr=""))
+        m.gh = reply({"updateProjectV2Field": None}, [{"message": "no"}])
+        with self.assertRaises(SystemExit):
+            m.gql("mutation{ updateProjectV2Field }")
+        m.gh = reply({"node": {"items": []}}, [{"message": "one item unreadable"}])
+        self.assertEqual(m.gql("query{ node }"), {"node": {"items": []}})
+
+    def test_item_fields_are_asked_for_by_name_not_position(self):
+        m = load_cgp()
+        self.assertNotIn("fieldValues(first", m.ITEMS_QUERY + m.ITEM_QUERY)
+        for name in ("Status", "Waiting On", "Plan", "PR"):
+            self.assertIn(f'fieldValueByName(name:"{name}")', m.ITEMS_QUERY)
+
+    def test_pagination_follows_every_page(self):
+        self.setup_board()
+        d = self.read_db(); d["page_size"] = 1; self.write_db(d)
+        self.assertEqual([i["item"] for i in self.cgp("list")["items"]], ["i1", "i2", "i3", "i4"])
+
+
+class TestSnapshotBlocks(Base):
+    def test_block_written_between_read_and_prune_is_not_lost(self):
+        self.setup_board()
+        self.force("i1", "plan_approved")
+        self.force("i2", "pr_review")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            m = load_cgp()
+            real = m.update_data
+
+            def racing(fn):
+                if fn.__name__ == "prune":  # another session records a block just before the prune
+                    real(lambda d: d.setdefault("blocks", {}).__setitem__("i1", ["i2"]))
+                real(fn)
+            m.update_data = racing
+            m.snapshot(m.cfg())
+            self.assertEqual(m.load_data()["blocks"], {"i1": ["i2"]})
+
+    def test_implement_story_without_pr_honors_its_blocks(self):
+        self.setup_board()
+        self.force("i1", "implement")
+        self.force("i2", "pr_review")
+        self.cgp("block", "i1", "i2")
+        snap = self.cgp("list")
+        self.assertEqual([b["title"] for b in snap["blocked"]], ["one"])
+        self.assertNotIn("i1", [i["item"] for i in snap["batch"]])
+        self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/5")  # PR exists: work is under way
+        snap = self.cgp("list")
+        self.assertEqual(snap["blocked"], [])
+        self.assertIn("i1", [i["item"] for i in snap["batch"]])
+
+
+class TestMoveNoop(Base):
+    def test_move_to_current_column_is_a_noop(self):
+        self.setup_board()
+        r = self.cgp("move", "i1", "todo")
+        self.assertTrue(r["unchanged"])
+        self.assertTrue(self.cgp("move", "i3", "done")["unchanged"])  # already Done
+
+    def test_move_done_for_a_closed_story_files_it_under_done(self):
+        self.setup_board()
+        d = self.read_db(); d["items"][1]["content"]["state"] = "CLOSED"; self.write_db(d)
+        self.assertEqual(self.cgp("move", "i2", "done")["column"], "done")
+
+    def test_move_done_still_refused_for_an_open_story(self):
+        self.setup_board()
+        self.assertNotEqual(self.cgp("move", "i1", "done", ok=False).returncode, 0)
+
+
+class PRBase(Base):
+    PR = "https://github.com/acme/app/pull/1"
+
+    def setUp(self):
+        super().setUp()
+        self.setup_board()
+        self.cgp("set", "i1", "pr", self.PR)
+        self.force("i1", "pr_approved")
+
+    def view(self, **kw):
+        return {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED", "reviewDecision": "APPROVED",
+                "autoMergeRequest": None, **kw}
+
+    def db_set(self, **kw):
+        d = self.read_db(); d.update(kw); self.write_db(d)
+
+    def prs(self, *views):
+        self.db_set(prs={"acme/app#1": list(views) if len(views) > 1 else views[0]})
+
+    def calls(self, sub):
+        return [c for c in self.read_db().get("calls", []) if c[:2] == ["pr", sub]]
+
+
+class TestMerge(PRBase):
+    def test_merge_prefers_auto_and_falls_back_to_direct(self):
+        self.assertEqual(self.cgp("merge", "i1"), {"requested": True})
+        self.assertIn("--auto", self.calls("merge")[0])
+        self.db_set(auto_merge_unavailable=True, calls=[])
+        self.assertEqual(self.cgp("merge", "i1"), {"requested": True})
+        self.assertEqual(["--auto" in c for c in self.calls("merge")], [True, False])
+        self.db_set(merge_rc=1)
+        self.assertFalse(self.cgp("merge", "i1")["requested"])
+
+    def test_merge_cancel_disables_auto_merge(self):
+        self.assertEqual(self.cgp("merge", "i1", "--cancel"), {"cancelled": True})
+        self.assertEqual(self.calls("merge")[-1], ["pr", "merge", "1", "-R", "acme/app", "--disable-auto"])
+        self.force("i1", "implement")  # cancelling does not need the story to still be in pr_approved
+        self.cgp("merge", "i1", "--cancel")
+        self.assertEqual(len(self.calls("merge")), 2)
+
+    def test_leaving_pr_approved_cancels_auto_merge(self):
+        self.cgp("move", "i1", "implement")
+        self.assertEqual([c[-1] for c in self.calls("merge")], ["--disable-auto"])
+        self.cgp("move", "i1", "pr_review")  # not leaving pr_approved: nothing to cancel
+        self.assertEqual(len(self.calls("merge")), 1)
+
+    def test_moving_to_done_does_not_cancel(self):
+        self.prs(self.view(state="MERGED"))
+        self.cgp("move", "i1", "done")
+        self.assertEqual(self.calls("merge"), [])
+
+    def test_pr_view_respects_repo_and_number(self):
+        self.prs(self.view(state="MERGED"))
+        self.assertEqual(self.cgp("pr-state", "acme/app", "1")["state"], "MERGED")
+        self.assertNotEqual(self.cgp("pr-state", "acme/app", "2", ok=False).returncode, 0)
+
+    def wait(self, *extra):
+        return self.cgp("merge-wait", "i1", "--interval", "0", *extra)
+
+    def test_wait_updates_a_behind_branch_then_sees_the_merge(self):
+        self.prs(self.view(mergeStateStatus="BEHIND"), self.view(state="MERGED"))
+        self.assertEqual(self.wait()["state"], "merged")
+        self.assertEqual(len(self.calls("update-branch")), 1)
+
+    def test_wait_merges_a_clean_pr_without_auto_merge(self):
+        self.prs(self.view(mergeStateStatus="CLEAN"), self.view(state="MERGED"))
+        self.assertEqual(self.wait()["state"], "merged")
+        self.assertNotIn("--auto", self.calls("merge")[0])
+
+    def test_wait_leaves_a_clean_pr_with_auto_merge_armed_alone(self):
+        self.prs(self.view(mergeStateStatus="CLEAN", autoMergeRequest={"enabledAt": "x"}), self.view(state="MERGED"))
+        self.assertEqual(self.wait()["state"], "merged")
+        self.assertEqual(self.calls("merge"), [])
+
+    def test_wait_reports_blocked_by_review(self):
+        self.prs(self.view(reviewDecision="CHANGES_REQUESTED"))
+        self.assertEqual(self.wait()["state"], "blocked")
+
+    def test_wait_keeps_waiting_while_blocked_only_on_checks(self):
+        self.prs(self.view())
+        self.assertEqual(self.wait("--timeout", "0")["state"], "pending")
+
+    def test_wait_reports_conflict_closed_and_red_ci(self):
+        self.prs(self.view(mergeStateStatus="DIRTY", mergeable="CONFLICTING"))
+        self.assertEqual(self.wait()["state"], "conflict")
+        self.prs(self.view(state="CLOSED"))
+        self.assertEqual(self.wait()["state"], "closed")
+        self.prs(self.view())
+        self.db_set(checks=[{"name": "t", "bucket": "fail", "link": ""}])
+        self.assertEqual(self.wait()["state"], "ci-red")
+
+
+class TestCiWait(PRBase):
+    def ci(self, *extra):
+        return self.cgp("ci-wait", "acme/app", "1", "--interval", "0", *extra)
+
+    def test_green_red_and_none(self):
+        self.db_set(checks=[{"name": "t", "bucket": "pass", "link": ""}])
+        self.assertEqual(self.ci()["state"], "green")
+        self.db_set(checks=[{"name": "t", "bucket": "fail", "link": "https://github.com/acme/app/actions/runs/77/job/1"}])
+        r = self.ci()
+        self.assertEqual(r["state"], "red")
+        self.assertIn("log line 99", r["failed"][0]["log"])
+        self.db_set(checks=[])
+        self.assertEqual(self.ci("--grace", "0")["state"], "none")
+
+    def test_sha_waits_for_the_pushed_head_before_judging_checks(self):
+        self.prs(self.view(headRefOid="old"), self.view(headRefOid="old"), self.view(headRefOid="new"))
+        self.db_set(checks=[{"name": "t", "bucket": "pass", "link": ""}])
+        self.assertEqual(self.ci("--sha", "new")["state"], "green")
+        self.assertEqual(len(self.calls("view")), 3)
+        self.assertEqual(self.read_db()["checks_calls"], 1)  # never looked at the old head's checks
+
+    def test_sha_that_never_arrives_stays_pending(self):
+        self.prs(self.view(headRefOid="old"))
+        self.db_set(checks=[{"name": "t", "bucket": "pass", "link": ""}])
+        r = self.ci("--sha", "new", "--timeout", "0")
+        self.assertEqual(r["state"], "pending")
+        self.assertEqual(r["head"], "old")
+        self.assertNotIn("checks_calls", self.read_db())
+
+    def test_gh_outage_does_not_start_the_no_checks_grace_clock(self):
+        err = {"rc": 1, "stderr": "boom"}
+        self.db_set(checks_seq=[err, err, err, []])
+        r = self.cgp("ci-wait", "acme/app", "1", "--interval", "1", "--grace", "2")
+        self.assertEqual(r["state"], "none")
+        self.assertGreaterEqual(self.read_db()["checks_calls"], 5)  # waited a full grace after gh recovered
+
+
+class TestCleanErrors(Base):
+    def fails(self, *args):
+        p = self.cgp(*args, ok=False)
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
+        return p.stderr
+
+    def test_config_needs_a_numeric_value(self):
+        self.setup_board()
+        self.assertIn("usage", self.fails("config", "concurrency"))
+        self.assertIn("usage", self.fails("config", "concurrency", "many"))
+
+    def test_repo_must_be_owner_slash_name(self):
+        self.assertIn("<owner>/<name>", self.fails("setup", "https://github.com/orgs/acme/projects/1", "--repo", "app"))
+        self.setup_board()
+        self.assertIn("<owner>/<name>", self.fails("adopt", "i4", "app"))
+
+    def test_waiting_on_field_must_be_a_single_select_with_a_you_option(self):
+        for bad in ({"id": "F_w", "name": "Waiting On", "dataType": "TEXT"},
+                    {"id": "F_w", "name": "Waiting On", "dataType": "SINGLE_SELECT", "options": []},
+                    {"id": "F_w", "name": "Waiting On", "dataType": "SINGLE_SELECT", "options": [{"id": "x", "name": "Me"}]}):
+            d = self.read_db(); d["fields"] = [f for f in d["fields"] if f["name"] != "Waiting On"] + [bad]; self.write_db(d)
+            self.fails("setup", "https://github.com/orgs/acme/projects/1")
+            self.assertEqual(self.read_db()["fields"][0]["options"][0]["name"], "Todo")  # the board was left alone
+
+    def test_waiting_on_you_option_is_found_by_name(self):
+        d = self.read_db()
+        d["fields"].append({"id": "F_w", "name": "Waiting On", "dataType": "SINGLE_SELECT",
+                            "options": [{"id": "x", "name": "Me"}, {"id": "y", "name": "You"}]})
+        self.write_db(d)
+        self.setup_board()
+        boards = os.path.join(self.env["CGP_HOME"], "boards")
+        with open(os.path.join(boards, "P1.json")) as f:
+            self.assertEqual(json.load(f)["fields"]["waiting"]["you"], "y")
+
+    def test_repo_path_only_for_linked_repos(self):
+        self.setup_board()
+        self.assertIn("not a repo linked", self.fails("repo-path", "evil/x", self.tmp))
+        self.assertIn("not a repo linked", self.fails("repo-path", "evil/x"))
+        self.assertEqual(self.cgp("repo-path", "acme/app", self.tmp), {"acme/app": self.tmp})
+        self.assertEqual(list(self.cgp("repo-path")), ["acme/app"])
 
 
 if __name__ == "__main__":

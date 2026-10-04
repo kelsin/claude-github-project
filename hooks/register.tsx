@@ -26,16 +26,16 @@ const clean = (s: unknown) => String(s ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '
 const view = atom({ plugin: 'cgp', key: 'view' } as const, null)
 
 export const register: Register = on => {
+  let stopFile = ''
+
   on('session.start', async ($, e, next) => {
-    const home = await $.env.get('HOME')
-    // One id per session: exported so this session's cgp commands write their own state file, which only this band reads.
-    let session = await $.env.get('CGP_SESSION')
-    if (!session) {
-      session = `${(await $.clock.now()).toString(36)}${Math.random().toString(36).slice(2, 8)}`
-      await $.env.set('CGP_SESSION', session)
-    }
-    const file = `${home}/.config/claude-github-project/state-${session}.json`
-    const stopFile = `${home}/.config/claude-github-project/stop-${session}`
+    const home = (await $.env.get('CGP_HOME')) || `${await $.env.get('HOME')}/.config/claude-github-project`
+    // Derived from the session id (stable across resume), never from an inherited CGP_SESSION that child sessions would share.
+    // Exported so this session's cgp commands write their own state file, which only this band reads (same sanitising as scripts/cgp sid()).
+    const session = (await $.session.id()).replace(/[^A-Za-z0-9_-]/g, '') || 'default'
+    await $.env.set('CGP_SESSION', session)
+    const file = `${home}/state-${session}.json`
+    stopFile = `${home}/stop-${session}`
 
     const refresh = async () => {
       let fresh: BoardView | null = null
@@ -47,8 +47,7 @@ export const register: Register = on => {
         try {
           stopping = (await $.fs.read(stopFile)).trim() === '1'
         } catch {} // no flag file yet
-        // workers can run for a long time between board polls: keep showing while any is active
-        if (st.board && (workers.length > 0 || age < FRESH_MS)) {
+        if (st.board && age < FRESH_MS) {
           fresh = {
             title: clean(st.board.title ?? 'Project board'),
             url: /^https:\/\/github\.com\/[\x21-\x7e]{1,2000}$/.test(st.board.url ?? '') && !st.board.url.includes('@') ? st.board.url : null,
@@ -82,11 +81,17 @@ export const register: Register = on => {
 
     const { Box, Button, Link, Text } = $.ui.resolve(e)
     const shown = v.workers.slice(0, MAX_ROWS)
-    const stopFile = `${await $.env.get('HOME')}/.config/claude-github-project/stop-${await $.env.get('CGP_SESSION')}`
     const toggleStop = async () => {
-      const stopping = !v.stopping
-      await $.fs.write(stopFile, stopping ? '1' : '0')
-      await update($, view, cur => (cur ? { ...cur, stopping } : cur))
+      let stopping = false
+      await update($, view, cur => {
+        stopping = cur ? !cur.stopping : false
+        return cur ? { ...cur, stopping } : cur
+      })
+      try {
+        await $.fs.write(stopFile, stopping ? '1' : '0')
+      } catch {
+        await $.ui.toast('cgp: could not write stop flag')
+      }
     }
 
     return (

@@ -27,7 +27,7 @@ gh auth refresh -s project
    - Replaces the Status options with the 10 columns below, adds fields `Waiting On`, `Plan`, `PR`, links the current repo to the board and records its local path.
    - Existing items whose old status name matches a new column keep it, closed issues go to Done, everything else lands in Todo. Closed issues anywhere on the board are filed under Done.
    - Run it again from another repo's checkout (same URL) to link more repos. Repos without a known local path are asked for.
-2. `/cgp:run`. Add stories to Todo on the board (issues, or draft items which get converted to issues in the repo the agent picks) and leave it running. It ends only when every story is Done, or when you stop it. To stop cleanly, press **Stop after this cycle** in the board band above the prompt (or run `scripts/cgp stop`): the loop lets the running workers finish, then stops before dispatching more. `/cgp:run` picks up from the board.
+2. `/cgp:run`. Add stories to Todo on the board (issues, or draft items which get converted to issues in the repo the agent picks) and leave it running. It ends only when every story is Done, or when you stop it. To stop cleanly, press **Stop after this cycle** in the board band above the prompt (or run `scripts/cgp stop [board-url-or-key]` from a separate shell; the argument may be left out when exactly one live session holds a board lock, otherwise pass the board URL): the loop lets the running workers finish, then stops before dispatching more. `/cgp:run` picks up from the board.
 
 ## Columns
 
@@ -41,7 +41,7 @@ gh auth refresh -s project
 | 🔨 Implement | agents | Story sent back: fix issues and requested changes on the PR, move to PR Review |
 | 👀 PR Review | agents | Reviewers review the PR, fixers fix immediately, CI green, move to PR Approval |
 | 🚦 PR Approval | **you** | Review the PR. Comment and move to Implement, or move to PR Approved |
-| 🚀 PR Approved | agents | Squash merge (auto-merge when possible), fix conflicts and CI until merged, move to Done |
+| 🚀 PR Approved | agents | Squash merge (auto-merge once CI is green), fix conflicts and CI until merged, move to Done |
 | 🎉 Done | nobody | |
 
 Colors: Todo blue, Plan yellow, Plan Review orange, Plan Approval purple, Plan Approved blue, Implement red, PR Review pink, PR Approval purple, PR Approved blue, Done green.
@@ -61,14 +61,14 @@ The loop runs unattended with your `gh` token, and it reads text anyone can writ
 - **Only trusted people can steer it.** `feedback`, `answers` and question replies only use comments from you, repo owners, and collaborators with write access (checked through the API). Everything else is reported as `ignoredUntrusted` with no body. The agent marker only counts on comments posted by your own gh account, so it can't be forged.
 - **The human gates are enforced in code, not just in prompts.** `cgp move` refuses to move a story into Plan Approved or PR Approved, out of Plan Approval or PR Approval, or to Done unless its PR is merged. `cgp merge` works only on a story that is in PR Approved and only for that story's own PR. The `PR` field must name a PR on a repo linked to the board.
 - **Prompts treat everything written by people as data** (no running commands, fetching URLs, adding dependencies or leaking tokens because text said so), and `cgp guard` fails any branch that touches `.github/` or CODEOWNERS without the approved plan listing it.
-- **Code changed after your PR approval is re-approved**: a fix that is more than a clean rebase sends the story back to PR Approval instead of merging.
+- **Code changed after your PR approval is re-approved**: a fix that is more than a clean, conflict-free rebase (conflict resolution, CI-fix commits) sends the story back to PR Approval instead of merging, and auto-merge is disarmed before any push.
 - `~/.config/claude-github-project` is private to your user (0700/0600).
 
 What it can't do: an agent with Bash can still call `gh` directly. For defence in depth consider Claude Code permission rules denying `Bash(gh pr merge:*)`, `Bash(gh auth token:*)` and `Bash(gh api graphql:*)` for sessions running the loop, and a fine-grained token (or `GH_TOKEN`) limited to the linked repos and without the `workflow` scope. The setup scripts need `project`; the loop does not need `workflow`.
 
 ## Questions
 
-Agents ask questions as a comment on the story, with numbered questions each carrying a proposed default (reply "defaults ok" or answer some). The story gets `Waiting On: You` on the board and is skipped until you reply on the issue. Any new non-bot comment without the agent marker counts as a reply; the field clears itself and the worker resumes with the whole Q&A history. After 3 question rounds on one story the comment suggests rescoping it. Agents prefer writing assumptions into the plan (an explicit "Assumptions" section) over asking, so Plan Approval is where you review them.
+Agents ask questions as a comment on the story, with numbered questions each carrying a proposed default (reply "defaults ok" or answer some). The story gets `Waiting On: You` on the board and is skipped until you reply on the issue. Any new non-bot comment without the agent marker counts as a reply; the field clears itself and the worker resumes with the whole Q&A history. When a 4th round of questions is asked on one story, the comment adds a note suggesting it be rescoped or split. Agents prefer writing assumptions into the plan (an explicit "Assumptions" section) over asking, so Plan Approval is where you review them.
 
 ## Sub-agent sizing
 
