@@ -15,29 +15,66 @@ def field(name):
     return next(f for f in db["fields"] if f["name"] == name)
 
 
-def values(item):
-    nodes = []
-    for fname, v in item["values"].items():
-        if "optionId" in v:
-            opt = next((o for o in field(fname)["options"] if o["id"] == v["optionId"]), None)
-            if opt is None:
-                continue  # option deleted
-            nodes.append({"__typename": "ProjectV2ItemFieldSingleSelectValue", "optionId": opt["id"],
-                          "name": opt["name"], "field": {"name": fname}})
-        else:
-            nodes.append({"__typename": "ProjectV2ItemFieldTextValue", "text": v["text"], "field": {"name": fname}})
-    return {"nodes": nodes}
+def value(item, fname):
+    v = item["values"].get(fname)
+    if v is None:
+        return None
+    if "optionId" in v:
+        opt = next((o for o in field(fname)["options"] if o["id"] == v["optionId"]), None)
+        if opt is None:
+            return None  # option deleted
+        return {"__typename": "ProjectV2ItemFieldSingleSelectValue", "optionId": opt["id"], "name": opt["name"]}
+    return {"__typename": "ProjectV2ItemFieldTextValue", "text": v["text"]}
+
+
+def values(item, q):
+    """The aliased fieldValueByName(name:"X") selections the query asked for."""
+    return {a: value(item, n) for a, n in re.findall(r'(\w+): fieldValueByName\(name:"([^"]+)"\)', q)}
+
+
+def seq(entry):
+    """A list is a sequence of responses (consumed one per call, the last one repeats); anything else is constant."""
+    if isinstance(entry, list):
+        return entry.pop(0) if len(entry) > 1 else entry[0]
+    return entry
 
 
 if args[:2] == ["auth", "status"]:
     print(f"Token scopes: {db['scopes']}")
 elif args[:2] == ["api", "user"]:
     print("kelsin")
-elif args[0] == "pr" and args[1] == "view":
-    print(json.dumps(db.get("pr_view", {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"})))
+elif args[0] == "pr" and args[1] in ("view", "merge", "checks", "update-branch"):
+    repo, num = args[args.index("-R") + 1], args[2]
+    key = f"{repo}#{num}"
+    db.setdefault("calls", []).append(args)
+    if args[1] == "view":
+        prs = db.get("prs")
+        if prs is not None and key not in prs:
+            sys.exit(f"fakegh: no pull request {key}")
+        v = seq(prs[key]) if prs is not None else seq(db.get("pr_view", {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"}))
+        save()
+        print(json.dumps(v))
+    elif args[1] == "checks":
+        r = seq(db["checks_seq"]) if "checks_seq" in db else db.get("checks", [])  # checks_seq: one response per call
+        db["checks_calls"] = db.get("checks_calls", 0) + 1
+        save()
+        if isinstance(r, dict):  # {"rc": n, "stderr": "..."}
+            print(r.get("stderr", ""), file=sys.stderr)
+            sys.exit(r["rc"])
+        print(json.dumps(r))
+    elif args[1] == "merge":
+        save()
+        if "--auto" in args and db.get("auto_merge_unavailable"):
+            sys.exit("auto-merge is not allowed for this repository")
+        sys.exit(db.get("merge_rc", 0))
+    else:
+        save()
+elif args[:2] == ["run", "view"]:
+    print("\n".join(f"log line {n}" for n in range(100)))
 elif args[:2] == ["api", "graphql"]:
     body = json.loads(sys.stdin.read())
     q, v = body["query"], body["variables"]
+    errors = None
     if "updateProjectV2Field(" in q:
         f = field("Status")
         f["options"] = [{"id": o.get("id", f"new{i}"), "name": o["name"], "color": o["color"]} for i, o in enumerate(v["o"])]
@@ -59,9 +96,17 @@ elif args[:2] == ["api", "graphql"]:
         next(i for i in db["items"] if i["id"] == v["i"])["values"].pop(fname, None)
         r = {}
     elif "items(first:100" in q:
-        r = {"node": {"items": {"pageInfo": {"hasNextPage": False, "endCursor": None},
-                                "nodes": [{"id": i["id"], "isArchived": False, "content": i["content"],
-                                           "fieldValues": values(i)} for i in db["items"]]}}}
+        start, size = int(v.get("after") or 0), db.get("page_size") or len(db["items"])
+        page = db["items"][start:start + size]
+        more = start + size < len(db["items"])
+        nodes = []
+        for i in page:
+            if i["id"] in db.get("broken_items", []):  # content unreadable: GraphQL nulls it and reports an error
+                errors = [{"type": "FORBIDDEN", "message": f"cannot read content of {i['id']}"}]
+            nodes.append({"id": i["id"], "isArchived": False,
+                          "content": None if i["id"] in db.get("broken_items", []) else i["content"], **values(i, q)})
+        r = {"node": {"items": {"pageInfo": {"hasNextPage": more, "endCursor": str(start + size) if more else None},
+                                "nodes": nodes}}}
     elif "projectV2(number" in q:
         p = {"id": f"P{v['n']}", "title": f"Test Board {v['n']}", "url": f"https://github.com/orgs/acme/projects/{v['n']}",
              "repositories": {"nodes": [{"nameWithOwner": "acme/app"}]},
@@ -69,7 +114,7 @@ elif args[:2] == ["api", "graphql"]:
         r = {"organization": {"projectV2": p}}
     elif "isArchived" in q and "node(id:$i)" in q:
         it = next(i for i in db["items"] if i["id"] == v["i"])
-        r = {"node": {"id": it["id"], "isArchived": False, "content": it["content"], "fieldValues": values(it)}}
+        r = {"node": {"id": it["id"], "isArchived": False, "content": it["content"], **values(it, q)}}
     elif "node(id:$i)" in q:
         it = next(i for i in db["items"] if i["id"] == v["i"])
         r = {"node": {"content": it["content"]}}
@@ -78,7 +123,8 @@ elif args[:2] == ["api", "graphql"]:
     else:
         r = {}
     save()
-    print(json.dumps({"data": r}))
+    print(json.dumps({"data": r, **({"errors": errors} if errors else {})}))
+    sys.exit(1 if errors else 0)  # like gh: any GraphQL error, even next to usable data, is exit 1
 elif args[0] == "api" and any(re.match(r"repos/[^/]+/[^/]+/pulls/\d+/files", a) for a in args):
     m = re.match(r"repos/([^/]+/[^/]+)/pulls/(\d+)/files", next(a for a in args if a.startswith("repos/")))
     print(json.dumps([{"filename": f} for f in db.get("pr_files", {}).get(f"{m.group(1)}#{m.group(2)}", [])]))

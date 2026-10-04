@@ -74,11 +74,17 @@ def gh(*args, input=None, check=True):
 
 def gql(query, **variables):
     body = json.dumps({"query": query, "variables": variables})
-    p = gh("api", "graphql", "--input", "-", input=body)
-    res = json.loads(p.stdout)
-    if res.get("errors") and not res.get("data"):
-        die(f"graphql: {json.dumps(res['errors'])}")
-    return res["data"]
+    p = gh("api", "graphql", "--input", "-", input=body, check=False)  # exits 1 on any error, even with usable data
+    try:
+        res = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        die(f"gh api graphql failed: {(p.stderr or p.stdout).strip()}")
+    data, errors = res.get("data"), res.get("errors")
+    if data is None or (any(v is None for v in data.values()) and (errors or query.lstrip().startswith("mutation"))):
+        die(f"graphql: {json.dumps(errors or res)}")
+    if errors:  # partial result (e.g. one item whose content is not readable): keep the data, report the rest
+        print(f"cgp: graphql: {json.dumps(errors)}", file=sys.stderr)
+    return data
 
 
 def rest(path, *extra):
@@ -278,6 +284,13 @@ def check_scope():
         die("gh token lacks the 'project' scope. Run: gh auth refresh -s project", code=3)
 
 
+# Status, Waiting On, Plan and PR are asked for by name: a positional fieldValues(first:N) can miss them on boards with many fields.
+VALUE_FIELDS = (("fvStatus", "Status"), ("fvWaiting", WAITING_FIELD), ("fvPlan", TEXT_FIELDS["plan"]), ("fvPr", TEXT_FIELDS["pr"]))
+FIELD_VALUES = " ".join(
+    f'{alias}: fieldValueByName(name:"{name}"){{ __typename'
+    " ... on ProjectV2ItemFieldSingleSelectValue{ optionId name } ... on ProjectV2ItemFieldTextValue{ text } }"
+    for alias, name in VALUE_FIELDS)
+
 ITEMS_QUERY = """
 query($p:ID!,$after:String){ node(id:$p){ ... on ProjectV2{ items(first:100, after:$after){
   pageInfo{hasNextPage endCursor}
@@ -286,10 +299,8 @@ query($p:ID!,$after:String){ node(id:$p){ ... on ProjectV2{ items(first:100, aft
       ... on Issue{ number title url state repository{nameWithOwner} }
       ... on PullRequest{ number title url state repository{nameWithOwner} }
       ... on DraftIssue{ title body } }
-    fieldValues(first:20){ nodes{ __typename
-      ... on ProjectV2ItemFieldSingleSelectValue{ optionId name field{ ... on ProjectV2FieldCommon{ name } } }
-      ... on ProjectV2ItemFieldTextValue{ text field{ ... on ProjectV2FieldCommon{ name } } } } } } } } } }
-"""
+    FIELD_VALUES } } } } }
+""".replace("FIELD_VALUES", FIELD_VALUES)
 
 
 def fetch_items(project_id):
@@ -308,10 +319,8 @@ query($i:ID!){ node(id:$i){ ... on ProjectV2Item{ id isArchived
     ... on Issue{ number title url state repository{nameWithOwner} }
     ... on PullRequest{ number title url state repository{nameWithOwner} }
     ... on DraftIssue{ title body } }
-  fieldValues(first:20){ nodes{ __typename
-    ... on ProjectV2ItemFieldSingleSelectValue{ optionId name field{ ... on ProjectV2FieldCommon{ name } } }
-    ... on ProjectV2ItemFieldTextValue{ text field{ ... on ProjectV2FieldCommon{ name } } } } } } } }
-"""
+  FIELD_VALUES } } }
+""".replace("FIELD_VALUES", FIELD_VALUES)
 
 
 def get_item(c, item):
@@ -323,10 +332,7 @@ def get_item(c, item):
 
 def parse_item(raw, c):
     content = raw.get("content") or {}
-    vals = {}
-    for v in raw["fieldValues"]["nodes"]:
-        if v and v.get("field"):
-            vals[v["field"]["name"]] = v
+    vals = {name: raw.get(alias) for alias, name in VALUE_FIELDS}
     by_opt = {o: k for k, o in c["fields"]["status"]["options"].items()}
     status = vals.get("Status")
     column = by_opt.get(status["optionId"]) if status else None
@@ -461,6 +467,22 @@ def list_replies_since(repo, number, marker_ids):
 
 # ----------------------------------------------------------------- commands
 
+def split_repo(repo):
+    if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo or ""):
+        die(f"repo must be <owner>/<name>, got {repo!r}")
+    return repo.split("/")
+
+
+def waiting_you(field):
+    """Option id of 'You' on the Waiting On field; dies when the field is not a usable single-select."""
+    if "options" not in field:
+        die(f"the existing '{WAITING_FIELD}' field is not a single-select field; rename or delete it, then run setup again")
+    you = next((o["id"] for o in field["options"] if o["name"] == "You"), None)
+    if not you:
+        die(f"the '{WAITING_FIELD}' field has no 'You' option; add one in the board settings, then run setup again")
+    return you
+
+
 def cmd_setup(a):
     check_scope()
     kind, owner, number = parse_board_url(a.url)
@@ -469,13 +491,16 @@ def cmd_setup(a):
     status = fields.get("Status")
     if not status or "options" not in status:
         die("project has no single-select Status field")
+    if WAITING_FIELD in fields:
+        waiting_you(fields[WAITING_FIELD])  # fail before the board is touched
     desired = [f"{emoji} {name}" for _, name, emoji, _ in COLUMNS]
     have = [o["name"] for o in status["options"]]
 
     repo_id = None
     if a.repo:  # validate before touching the board
+        owner_, name_ = split_repo(a.repo)
         repo_id = gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }",
-                      o=a.repo.split("/")[0], n=a.repo.split("/")[1])["repository"]["id"]
+                      o=owner_, n=name_)["repository"]["id"]
 
     remap = {}
     if have != desired:
@@ -483,8 +508,7 @@ def cmd_setup(a):
         old_names = {o["id"]: o["name"] for o in status["options"]}
         matched = {old[norm(n)] for _, n, _, _ in COLUMNS if norm(n) in old}
         for raw in fetch_items(proj["id"]):
-            cur = next((v for v in raw["fieldValues"]["nodes"]
-                        if v and v.get("field", {}).get("name") == "Status"), None)
+            cur = raw.get("fvStatus")
             if cur and cur["optionId"] in matched:
                 continue  # option id is preserved below, so the item keeps its status
             closed = (raw.get("content") or {}).get("state") in ("CLOSED", "MERGED")
@@ -525,15 +549,11 @@ def cmd_setup(a):
         "board": {"id": proj["id"], "url": proj["url"], "title": proj["title"],
                   "kind": kind, "owner": owner, "number": number},
         "fields": {"status": {"id": status["id"], "options": options},
-                   "waiting": {"id": waiting["id"], "you": waiting["options"][0]["id"] if "options" in waiting
-                               else fields[WAITING_FIELD]["options"][0]["id"]},
+                   "waiting": {"id": waiting["id"], "you": waiting_you(waiting)},
                    **text_ids},
         "repos": repos,
         "settings": {**DEFAULTS, **old.get("settings", {})},
     }
-    # Waiting On may pre-exist: take its option id from the fetched project.
-    if WAITING_FIELD in fields:
-        c["fields"]["waiting"]["you"] = fields[WAITING_FIELD]["options"][0]["id"]
 
     for r in proj["repositories"]["nodes"]:
         c["repos"].setdefault(r["nameWithOwner"], None)
@@ -569,12 +589,13 @@ def cmd_use(a):
     else:
         out({"boards": [{"title": b["board"]["title"], "url": b["board"]["url"]} for b in boards.values()]})
         die("several boards are set up; say which: cgp use <board-url>", code=6)
-    holder = lock_holder(key)
-    if holder and not a.takeover:
-        out({"heldBy": holder["session"], "minutesSinceHeartbeat": round((time.time() - holder["at"]) / 60, 1)})
-        die("another session is running this board's loop (use --takeover only if that session is gone)", code=5)
-    os.makedirs(LOCKS, mode=0o700, exist_ok=True)
-    save_json(lock_file(key), {"session": sid(), "at": time.time()})
+    with locked():  # check and claim atomically, so two sessions cannot both win
+        holder = lock_holder(key)
+        if holder and not a.takeover:
+            out({"heldBy": holder["session"], "minutesSinceHeartbeat": round((time.time() - holder["at"]) / 60, 1)})
+            die("another session is running this board's loop (use --takeover only if that session is gone)", code=5)
+        os.makedirs(LOCKS, mode=0o700, exist_ok=True)
+        save_json(lock_file(key), {"session": sid(), "at": time.time()})
     update_state(lambda st: st.update(boardKey=key, board=boards[key]["board"], workers=[]))
     if os.path.exists(stop_path()):
         os.remove(stop_path())  # a stop request left from an earlier run
@@ -600,7 +621,7 @@ def cmd_session_title(a):
             name = found["title"] if found else None
         if name:
             out({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "sessionTitle": f"{'🚀' if m.group(1) == 'run' else '🛠️'} {name}"}})
-    except Exception:
+    except (Exception, SystemExit):
         return  # a naming hook must never get in the way of the prompt
 
 
@@ -616,6 +637,8 @@ def cmd_release(a):
 
 def cmd_repo_path(a):
     c = cfg()
+    if a.repo:
+        a.repo = require_repo(c, a.repo)
     if a.path:
         c["repos"][a.repo] = os.path.abspath(a.path)
         save_board(c)
@@ -648,6 +671,8 @@ def cmd_config(a):
     if a.key:
         if a.key not in DEFAULTS:
             die(f"unknown setting; one of {list(DEFAULTS)}")
+        if a.value is None or not re.fullmatch(r"\d+", a.value):
+            die(f"usage: cgp config {a.key} <non-negative integer>")
         c["settings"][a.key] = int(a.value)
         save_board(c)
     out(c["settings"])
@@ -703,15 +728,19 @@ def snapshot(c):
     live = [i for i in items if i["column"] != "done"]
     counts = {k: sum(1 for i in items if i["column"] == k) for k in KEYS}
     by_id = {i["item"]: i for i in live}
-    # a block holds only while the blocker is live and still ahead of the blocked story
-    blocks = {k: [b for b in v if b in by_id and rank(by_id[b]) > rank(by_id[k])]
-              for k, v in load_data().get("blocks", {}).items() if k in by_id}
+
+    def live_blocks(raw):  # a block holds only while the blocker is live and still ahead of the blocked story
+        return {k: [b for b in v if b in by_id and rank(by_id[b]) > rank(by_id[k])]
+                for k, v in (raw or {}).items() if k in by_id}
+    blocks = live_blocks(load_data().get("blocks"))
     live_ids = set(by_id)
     for i in live:
         i["blockedBy"] = [by_id[b]["title"] for b in blocks.get(i["item"], [])]
         i["blockers"] = [{"title": by_id[b]["title"], "column": by_id[b]["column"], "waiting": by_id[b]["waiting"]}
                          for b in blocks.get(i["item"], [])]
-    blocked = [i for i in live if i["blockedBy"] and i["column"] == "plan_approved"]
+    # a block gates a story that is about to start work: plan approved, or implementing with no PR yet
+    blocked = [i for i in live if i["blockedBy"] and (i["column"] == "plan_approved"
+                                                      or (i["column"] == "implement" and not i["pr"]))]
     in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and i not in blocked
                   and i["item"] not in in_flight]
@@ -743,7 +772,7 @@ def snapshot(c):
     update_state(upd)
 
     def prune(d):
-        d["blocks"] = {k: v for k, v in blocks.items() if v}
+        d["blocks"] = {k: v for k, v in live_blocks(d.get("blocks")).items() if v}  # re-read under the lock: keeps blocks written meanwhile
         d["touches"] = {k: v for k, v in d.get("touches", {}).items() if k in live_ids}
     update_data(prune)
     return snap
@@ -779,14 +808,19 @@ def cmd_move(a):
     if a.column not in KEYS:
         die(f"column must be one of {KEYS}")
     it = get_item(c, a.item)
+    if it["column"] == a.column:
+        out({"item": a.item, "column": a.column, "unchanged": True, "note": f"already in {a.column}"})
+        return
     if a.column in ("plan_approved", "pr_approved"):
         die(f"only the user moves stories into {a.column}; it is a human approval")
     if it["column"] in ("plan_approval", "pr_approval"):
         die(f"story is in {it['column']}: only the user moves it out")
-    if a.column == "done":
-        ref = parse_pr_ref(c, it["pr"])
+    ref = parse_pr_ref(c, it["pr"])
+    if a.column == "done" and not (it["closed"] and it["kind"] == "issue"):  # a closed issue is finished already
         if it["column"] != "pr_approved" or not ref or pr_view(*ref)["state"] != "MERGED":
             die("a story reaches Done only from pr_approved, after its PR merged")
+    if a.column != "done" and it["column"] == "pr_approved" and ref:
+        cancel_auto_merge(*ref)  # leaving PR Approved must not leave a merge armed
     set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
 
     def upd(st):
@@ -907,7 +941,7 @@ def cmd_feedback(a):
 
 def cmd_adopt(a):
     c = cfg()
-    owner, name = a.repo.split("/")
+    owner, name = split_repo(a.repo)
     rid = gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }", o=owner, n=name)["repository"]["id"]
     d = gql("""mutation($i:ID!,$r:ID!){ convertProjectV2DraftIssueItemToIssue(input:{itemId:$i,repositoryId:$r}){
       item{ content{ ... on Issue{ number url } } } } }""", i=a.item, r=rid)
@@ -922,11 +956,36 @@ def cmd_repos(a):
 
 # ------------------------------------------------------------------ workers
 
+def stop_target(arg):
+    """Stop-file path for the session to stop: this one by default (CGP_SESSION), else the holder of a board's lock."""
+    if not arg and os.environ.get("CGP_SESSION"):
+        return stop_path()
+    if arg:
+        boards = {k: load_board(k) for k in list_boards()}
+        if arg.startswith("http"):
+            _, owner, number = parse_board_url(arg)
+            keys = [k for k, b in boards.items() if b["board"]["number"] == number and b["board"]["owner"].lower() == owner.lower()]
+        else:
+            keys = [k for k in boards if k == safe(arg)]
+        if not keys:
+            die("unknown board; pass a board URL or key (see: cgp use)")
+    else:
+        keys = [f[:-5] for f in sorted(os.listdir(LOCKS))] if os.path.isdir(LOCKS) else []
+    live = [lk for lk in (load_json(lock_file(k), None) for k in keys)
+            if lk and time.time() - lk.get("at", 0) < LOCK_STALE_SECONDS]
+    if not live and not arg:
+        return stop_path()  # nothing holds a lock: a session that never claimed a board (or none at all)
+    if len(live) != 1:
+        die("no live session found for that board" if arg else "several live sessions; run: cgp stop <board-url>")
+    return os.path.join(HOME, f"stop-{re.sub(r'[^A-Za-z0-9_-]', '', live[0]['session'])}")
+
+
 def cmd_stop(a):
     ensure_home()
-    with open(stop_path(), "w") as f:
+    path = stop_target(a.board)
+    with open(path, "w") as f:
         f.write("0" if a.cancel else "1")
-    out({"stopRequested": stop_requested()})
+    out({"stopRequested": not a.cancel, "session": os.path.basename(path)[len("stop-"):]})
 
 
 def cmd_worker(a):
@@ -998,9 +1057,14 @@ def cmd_worktree(a):
         out({"path": wt, "branch": git(wt, "branch", "--show-current"), "base": default, "repo": repo})
         return
     os.makedirs(os.path.dirname(wt), exist_ok=True)
-    if git(base, "rev-parse", "--verify", f"origin/{branch}", check=False):
+    has_local = git(base, "rev-parse", "--verify", f"refs/heads/{branch}", check=False)
+    has_remote = git(base, "rev-parse", "--verify", f"origin/{branch}", check=False)
+    # only fast-forward the local branch to the remote one; local commits that were never pushed must survive
+    behind_only = subprocess.run(["git", "-C", base, "merge-base", "--is-ancestor", f"refs/heads/{branch}", f"origin/{branch}"],
+                                 capture_output=True).returncode == 0 if has_local and has_remote else True
+    if has_remote and behind_only:
         git(base, "worktree", "add", "-B", branch, wt, f"origin/{branch}")
-    elif git(base, "rev-parse", "--verify", f"refs/heads/{branch}", check=False):
+    elif has_local:
         git(base, "worktree", "add", wt, branch)
     else:
         git(base, "worktree", "add", "-b", branch, wt, default)
@@ -1070,10 +1134,12 @@ def cmd_guard(a):
     """Refuse changes to CI/permission files that the approved plan does not list."""
     c = cfg()
     it = get_item(c, a.item)
+    if it["kind"] != "issue":
+        die("item is not an issue on this board")
     wt = wt_path(it)
     if not os.path.isdir(wt):
         die("no worktree for this story")
-    names = git(wt, "diff", "--name-only", f"{default_ref(wt)}...HEAD").splitlines()
+    names = git(wt, "diff", "--name-only", "--no-renames", f"{default_ref(wt)}...HEAD").splitlines()
     allowed = [norm_path(t) for t in load_data().get("touches", {}).get(a.item, [])]
     bad = [n for n in names if (n.startswith(".github/") or os.path.basename(n) == "CODEOWNERS")
            and not any(covers(t, n) for t in allowed)]
@@ -1216,8 +1282,18 @@ def cmd_ci_wait(a):
     a.repo = require_repo(cfg(), a.repo)
     deadline, none_since = time.time() + a.timeout, time.time()
     while True:
+        if a.sha:  # checks of an older head say nothing about the commit just pushed
+            v = pr_view(a.repo, a.pr, check=False)
+            if not v or v.get("headRefOid") != a.sha:
+                none_since = time.time()
+                if time.time() >= deadline:
+                    out({"state": "pending", "note": f"PR head is not {a.sha} yet", "head": (v or {}).get("headRefOid")})
+                    return
+                time.sleep(a.interval)
+                continue
         checks = pr_checks(a.repo, a.pr)
         if checks is None:  # transient gh error: never mistake it for "no CI"
+            none_since = time.time()  # and the no-checks grace starts only once gh answers again
             if time.time() >= deadline:
                 out({"state": "pending", "note": "gh errors while polling"})
                 return
@@ -1242,10 +1318,13 @@ def cmd_ci_wait(a):
         time.sleep(a.interval)
 
 
-def pr_view(repo, pr):
+def pr_view(repo, pr, check=True):
     p = gh("pr", "view", str(pr), "-R", repo, "--json",
-           "state,isDraft,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,url,mergedAt,headRefOid")
-    return json.loads(p.stdout)
+           "state,isDraft,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,url,mergedAt,headRefOid", check=check)
+    try:
+        return json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return None
 
 
 def cmd_pr_state(a):
@@ -1263,7 +1342,18 @@ def merge_target(a):
     return a
 
 
+def cancel_auto_merge(repo, pr):
+    return gh("pr", "merge", str(pr), "-R", repo, "--disable-auto", check=False).returncode == 0
+
+
 def cmd_merge(a):
+    if a.cancel:
+        c = cfg()
+        ref = parse_pr_ref(c, get_item(c, a.item)["pr"])
+        if not ref:
+            die("story has no valid PR field set")
+        out({"cancelled": cancel_auto_merge(*ref)})
+        return
     a = merge_target(a)
     p = gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--auto", "--delete-branch", check=False)
     if p.returncode:
@@ -1327,7 +1417,10 @@ def main():
     p = sp.add_parser("answers"); p.add_argument("item"); p.set_defaults(fn=cmd_answers)
     p = sp.add_parser("feedback"); p.add_argument("item"); p.set_defaults(fn=cmd_feedback)
     p = sp.add_parser("adopt"); p.add_argument("item"); p.add_argument("repo"); p.set_defaults(fn=cmd_adopt)
-    p = sp.add_parser("stop"); p.add_argument("--cancel", action="store_true"); p.set_defaults(fn=cmd_stop)
+    p = sp.add_parser("stop", description="Finish the current cycle, then stop the loop. Without CGP_SESSION (a separate shell) it stops "
+                      "the live session holding the board's lock: the only live one, or the one running the given board.")
+    p.add_argument("board", nargs="?", help="board URL or key; default: this session")
+    p.add_argument("--cancel", action="store_true"); p.set_defaults(fn=cmd_stop)
     p = sp.add_parser("worker"); p.add_argument("action", choices=["start", "stop", "clear"]); p.add_argument("item", nargs="?")
     p.add_argument("column", nargs="?"); p.add_argument("title", nargs="?", default=""); p.set_defaults(fn=cmd_worker)
     p = sp.add_parser("worktree"); p.add_argument("item"); p.set_defaults(fn=cmd_worktree)
@@ -1339,9 +1432,10 @@ def main():
     p = sp.add_parser("guard"); p.add_argument("item"); p.set_defaults(fn=cmd_guard)
     p = sp.add_parser("ci-wait"); p.add_argument("repo"); p.add_argument("pr", type=int)
     p.add_argument("--timeout", type=int, default=540); p.add_argument("--interval", type=int, default=20)
-    p.add_argument("--grace", type=int, default=120); p.set_defaults(fn=cmd_ci_wait)
+    p.add_argument("--grace", type=int, default=120)
+    p.add_argument("--sha", help="first wait until the PR head is this commit (the one just pushed)"); p.set_defaults(fn=cmd_ci_wait)
     p = sp.add_parser("pr-state"); p.add_argument("repo"); p.add_argument("pr", type=int); p.set_defaults(fn=cmd_pr_state)
-    p = sp.add_parser("merge"); p.add_argument("item"); p.set_defaults(fn=cmd_merge)
+    p = sp.add_parser("merge"); p.add_argument("item"); p.add_argument("--cancel", action="store_true", help="disable auto-merge on the story's PR instead of merging"); p.set_defaults(fn=cmd_merge)
     p = sp.add_parser("merge-wait"); p.add_argument("item")
     p.add_argument("--timeout", type=int, default=540); p.add_argument("--interval", type=int, default=20); p.set_defaults(fn=cmd_merge_wait)
 

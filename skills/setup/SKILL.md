@@ -9,7 +9,7 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
 
 Input: a board URL (`https://github.com/orgs/<org>/projects/<n>` or `/users/<user>/projects/<n>`). If the user gave none, ask for it.
 
-1. Find the current repo: `gh repo view --json nameWithOwner -q .nameWithOwner` and the main clone path (first `worktree` line of `git worktree list --porcelain`, so a linked worktree resolves to its main clone). If not in a git repo, skip `--repo`/`--repo-path` and ask which repo(s) to link instead.
+1. Find the current repo: `gh repo view --json nameWithOwner -q .nameWithOwner` and the main clone path (first `worktree` line of `git worktree list --porcelain`, so a linked worktree resolves to its main clone). If not in a git repo, omit `--repo`/`--repo-path` from the command in step 2, and ask which repo(s) to link instead; run `CGP setup <url> --repo <answer>` with the user's answer (plus `--repo-path <path>` if they give a local clone).
 2. Run `CGP setup <url> --repo <owner/name> --repo-path <main clone path>`.
    - Exit code 3 means the gh token lacks the `project` scope. Tell the user to run `gh auth refresh -s project` themselves (it is a browser step) and stop.
    - Other errors: show the message verbatim and stop.
