@@ -316,6 +316,21 @@ class TestOverlap(Base):
         self.assertIn("i1", [i["item"] for i in snap["batch"]])
         self.assertEqual(snap["blocked"], [])
 
+    def test_batch_picks_the_largest_group_of_non_colliding_stories(self):
+        self.setup_board()
+        self.force("i1", "plan_approved"); self.force("i2", "plan_approved"); self.force("i3", "plan_approved")
+        self.cgp("touches", "i1", "src/a.py")
+        self.cgp("touches", "i2", "src/a.py", "src/b.py")  # the middle story collides with both neighbours
+        self.cgp("touches", "i3", "src/b.py")
+        snap = self.cgp("list")
+        self.assertEqual({i["item"] for i in snap["batch"] if i["column"] == "plan_approved"}, {"i1", "i3"})
+        self.assertEqual(snap["deferred"], [{"title": "two", "conflictsWith": ["one"]}])
+        # a deferred story is not something the running ones should wait on
+        self.assertEqual(self.cgp("overlap", "i1")["suggest"], {"action": "proceed"})
+        # a worker already running holds its files against later candidates
+        self.cgp("worker", "start", "i1", "plan_approved")
+        self.assertEqual({d["title"] for d in self.cgp("list")["deferred"]}, {"two"})
+
     def test_blocked_story_shows_another_story_on_the_board_until_released(self):
         self.setup_board()
         waiting_on = lambda i: next(x for x in self.read_db()["items"] if x["id"] == i)["values"].get("Waiting On")

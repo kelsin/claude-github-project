@@ -24,7 +24,7 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
 
 If `list` or `wait` exits 5, another session took this board over: stop and tell the user.
 
-1. `CGP list --brief` → JSON with `status`, `batch`, `counts`, `waitingOnYou`, `stopRequested`, `inFlight`, `blocked`.
+1. `CGP list --brief` → JSON with `status`, `batch`, `counts`, `waitingOnYou`, `stopRequested`, `inFlight`, `blocked`, `deferred`.
 2. `stopRequested: true` (the user pressed the stop button, or ran `CGP stop`): `batch` is empty, so nothing new is dispatched. If `inFlight` is empty, run `CGP stop --cancel` and `CGP release`, report "stopped; run /cgp:run to continue" and stop. Otherwise go to step 5 (nothing is dispatched): the running workers finish, then this step ends the loop.
 3. `status: "done"`: if `inFlight` is non-empty (a worker is still running), go to step 5; otherwise `CGP release`, report "all stories are Done" and stop. This is the only way the loop ends by itself.
 4. `status: "work"`:
@@ -44,6 +44,7 @@ If `list` or `wait` exits 5, another session took this board over: stop and tell
 ## Rules
 
 - The user decides the Plan Review and PR Review columns (keys `plan_approval`, `pr_approval`). Never move a story out of them or work on them. A board that has not been migrated also has agent-side `plan_review` / `pr_review` columns: workers handle them like Plan / Implement.
+- `batch` already holds the biggest group of Plan Approved / Implement stories whose declared files don't collide with each other or with running workers; the rest are `deferred` and come back as soon as the story they collide with finishes. Report them like `blocked`.
 - Stories in Plan Approved that wait on another story (`blocked` in the list output) are skipped until their blockers are Done; they do not count toward the no-progress rule.
 - A worker failure (agent error, crash) must not end the loop: `CGP worker stop <item>` (the crashed worker never did), note it in one line, leave the story where it is, and continue.
 - Track `(item, column)` each time a worker finishes. If a story is still in the same column after 3 consecutive worker runs (crashes or no progress; runs whose reply starts `waiting:` or `blocked:` do not count), run `CGP ask <item>` with a short summary so it waits on the user instead of spinning. Keep the per-cycle output short; the loop may run for days.
