@@ -9,6 +9,7 @@ Security
 - Workers older than `maxWorkerMinutes` are reported as `stalled` and released by the loop.
 
 Fixes
+- `/cgp:run` names the session after the board even when several boards are set up (`cgp use` returns `sessionTitle`, which the skill applies).
 - `merge-wait` survives a transient `gh` failure like `ci-wait` does.
 - Replies to a question are fetched since the question was posted instead of paging through every comment on every poll.
 - `paths.json` is updated under the state lock; the lock is re-entrant.
