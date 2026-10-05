@@ -149,6 +149,14 @@ elif args[0] == "api" and any(re.match(r"repos/[^/]+/[^/]+/(pulls/\d+/(comments|
         print(json.dumps(db.get(f"pr_{m.group(3)}", {}).get(f"{m.group(1)}#{m.group(2)}", [])))
 elif args[0] == "api":
     path = next(a for a in args[1:] if a.startswith("repos/"))
+    mi = re.fullmatch(r"repos/([^/]+/[^/]+)/issues/(\d+)", path)
+    if mi:
+        key = f"{mi.group(1)}#{mi.group(2)}"
+        if "-f" in args:
+            db.setdefault("issue_bodies", {})[key] = args[args.index("-f") + 1][len("body="):]
+            save()
+        print(json.dumps({"body": db.get("issue_bodies", {}).get(key, "")}))
+        sys.exit(0)
     m = re.match(r"repos/([^/]+/[^/]+)/issues/(\d+)/comments", path)
     key = f"{m.group(1)}#{m.group(2)}"
     if "-f" in args:

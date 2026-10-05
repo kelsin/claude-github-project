@@ -1064,10 +1064,30 @@ def cmd_set(a):
         if key == "pr":
             worker_pr(a.item, parse_pr_ref(c, value))
         set_phase("reviewing", item=a.item)
+        if key in ("plan", "pr"):
+            sync_links(c, a.item)
     out({"item": a.item, a.field: value or None})
 
 
 NETLIFY_BOT = "netlify[bot]"
+LINKS_START, LINKS_END = "<!-- cgp:links -->", "<!-- /cgp:links -->"
+
+
+def sync_links(c, item):
+    """Keep a Plan / PR / Preview block at the end of the issue body, listing whichever links exist so far."""
+    it = get_item(c, item)
+    if it["kind"] != "issue":
+        return
+    rows = [f"- {label}: {it[k]}" for label, k in (("Plan", "plan"), ("PR", "pr"), ("Preview", "preview")) if it[k]]
+    if not rows:
+        return
+    path = f"repos/{it['issueRepo']}/issues/{it['number']}"
+    body = json.loads(gh("api", path).stdout).get("body") or ""
+    block = "\n".join([LINKS_START, *rows, LINKS_END])
+    pat = re.compile(re.escape(LINKS_START) + r".*?" + re.escape(LINKS_END), re.S)
+    new = pat.sub(lambda _: block, body) if pat.search(body) else f"{body.rstrip()}\n\n{block}".lstrip()
+    if new != body:
+        gh("api", "-X", "PATCH", path, "-f", f"body={new}", check=False)
 
 
 def cmd_preview(a):
@@ -1087,6 +1107,7 @@ def cmd_preview(a):
         out({"item": a.item, "preview": None, "note": "no Netlify deploy preview on the PR yet"})
         return
     set_text(c, a.item, c["fields"]["preview"], urls[-1])
+    sync_links(c, a.item)
     out({"item": a.item, "preview": urls[-1]})
 
 
