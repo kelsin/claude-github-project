@@ -107,6 +107,13 @@ class TestDispatch(DaemonBase):
                      "Bash(gh release:*)", "Bash(gh repo:*)", "Bash(gh issue close:*)", "Bash(curl:*)", "Bash(wget:*)", "Bash(cgp config:*)",
                      "Edit(~/.claude/**)", "Write(~/.claude/**)"):
             self.assertIn(rule, denied)
+        self.assertNotIn("Bash(git:*)", allowed)
+        self.assertIn("Bash(git push:*)", allowed)
+        for rule in ("Bash(git -c:*)", "Bash(git config:*)", "Bash(git credential:*)", "Bash(git remote:*)", "Bash(git ls-remote:*)",
+                     "Bash(git --exec-path:*)", "Read(~/.ssh/**)", "Grep(~/.aws/**)", "Glob(~/.config/gh/**)", "Read(**/.env*)"):
+            self.assertIn(rule, denied)
+        self.assertNotIn("Bash(gh issue:*)", allowed)
+        self.assertTrue(any(r.startswith("Read(//") and r.endswith("/paths.json)") for r in denied))
         self.assertTrue(any(r.startswith("Bash(") and r.endswith("scripts/cgp config:*)") for r in denied))
         self.assertTrue(any(r.startswith("Edit(//") and r.endswith("/boards/**)") for r in denied))
         self.assertTrue(any(r.startswith("Edit(//") and r.endswith("/acme/app/1/**)") for r in allowed))  # the story's worktree

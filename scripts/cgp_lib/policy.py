@@ -21,7 +21,9 @@ MAX_FILES = 3000  # GitHub lists at most this many files of a pull request: a li
 # Never auto-approved, whatever the settings say: instructions to agents, the plugin's own prompts, docs build and deploy config.
 ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKILL.md", "skills/**", "**/columns/*.md",
                "mkdocs.yml", "**/mkdocs.yml", "book.toml", "**/book.toml", "docusaurus.config.*", "**/docusaurus.config.*",
-               "docs/conf.py", "docs/_config.yml", "docs/package.json", "**/.vitepress/**", "**/.docusaurus/**", ".readthedocs.y*ml"]
+               "docs/conf.py", "docs/_config.yml", "docs/package.json", "**/.vitepress/**", "**/.docusaurus/**", ".readthedocs.y*ml",
+               "**/CLAUDE*.md", "**/GEMINI.md", ".cursor/**", ".windsurf/**", ".agents/**", "**/.claude/**", "**/*.mdc", "**/CONTRIBUTING.md",
+               ".github/**"]
 
 
 def parse(value):
@@ -70,10 +72,10 @@ def glob_match(glob, path):
     return go(0, 0)
 
 
-def vet(c, repo, names, globs):
+def vet(c, repos, names, globs):
     """Why a changed path may not be auto-approved (None when every one may): it must be a plain file path inside `globs`, not on the
     always-deny list and not a guarded file (the guard ignores approvedTouches here: a guard hit is an absolute refusal)."""
-    guarded = [g.lower() for g in merged_globs(c, "guardFiles", [repo])]
+    guarded = [g.lower() for g in merged_globs(c, "guardFiles", repos)]
     for n in names:
         if not n or n.startswith("/") or n.endswith("/") or any(s in ("", ".", "..") for s in n.split("/")):
             return f"{n or '(no name)'} is not a plain file path"
@@ -121,7 +123,7 @@ def evaluate(c, it, gate, author_trusted):
         files = [norm_path(f) for f in data.get("touches", {}).get(item, [])]
         if not files:
             return no("the plan declares no files (cgp touches)")
-        why = vet(c, repo, files, globs)
+        why = vet(c, [repo], files, globs)
         if why:
             return no(why)
         if not author_trusted():
@@ -136,6 +138,8 @@ def evaluate(c, it, gate, author_trusted):
     v = pr_view(*ref, check=False)
     if not v or not v.get("headRefOid"):
         return no("could not read the PR head")
+    if ref[0].lower() != repo.lower():
+        return no("the PR is not in the story's own repository")
     if v.get("state") != "OPEN":
         return no("the PR is not open")
     if v.get("isCrossRepository") is not False:
@@ -151,7 +155,7 @@ def evaluate(c, it, gate, author_trusted):
     if not files or len(files) >= MAX_FILES or not all(f.get("filename") for f in files):
         return no("the PR's file list is empty or may be truncated")
     names = [n for f in files for n in (f["filename"], f.get("previous_filename")) if n]  # a rename counts at both ends
-    why = vet(c, repo, names, globs)
+    why = vet(c, sorted({repo, ref[0]}), names, globs)
     if why:
         return no(why)
     extra = next((n for n in names if not any(covers(t, n) for t in approved)), None)

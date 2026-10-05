@@ -506,7 +506,7 @@ class TestPlanPolicy(PolicyBase):
 
     def test_a_guard_hit_is_an_absolute_refusal_even_when_the_plan_lists_it(self):
         self.setting(autoApproveFiles=["**"])
-        for path in (".github/workflows/ci.yml", "Makefile", "sub/Dockerfile"):
+        for path in (".husky/pre-commit", "Makefile", "sub/Dockerfile"):
             self.cgp("touches", "i1", path)
             self.set_data(approvedTouches={"i1": [path]})  # approvedTouches does not matter here
             self.refused("guarded file")
@@ -619,8 +619,8 @@ class TestPRPolicy(PolicyBase):
 
     def test_always_deny_guard_and_skip_plan_veto_it(self):
         self.setting(autoApproveFiles=["**"])
-        self.set_data(approvedTouches={"i1": ["CLAUDE.md", ".github/ci.yml"]})
-        for name, why in (("CLAUDE.md", "never auto-approved"), (".github/ci.yml", "guarded file")):
+        self.set_data(approvedTouches={"i1": ["CLAUDE.md", ".husky/pre-commit"]})
+        for name, why in (("CLAUDE.md", "never auto-approved"), (".husky/pre-commit", "guarded file")):
             self.db_set(pr_files={"acme/app#1": [name]})
             self.refused(why)
         self.set_data(approvedTouches={"i1": [self.FILE]})
@@ -825,6 +825,44 @@ class TestSubStories(PolicyBase):
         self.cgp("list")
         self.assertEqual(self.data()["policyPlans"], [])  # re-planned: a person approves the next one
 
+    def test_a_policy_decision_on_record_blocks_a_split_even_without_the_marker(self):
+        self.approved()
+        self.set_data(policyPlans=[], policy={"i1": {"gate": "plan_approved", "approved": True, "reason": "x", "at": "now"}})
+        self.assertIn("auto-approval policy", self.cgp("split", "i1", ok=False).stderr)
+        self.assertEqual(self.issues(), [])
+
+    def test_a_skip_plan_story_cannot_declare_or_split(self):
+        self.force("i1", "plan")
+        self.cgp("set", "i1", "plan", "Skip")
+        self.assertIn("skips its plan", self.declare(ok=False).stderr)
+        self.set_data(approvedSplits={"i1": self.SPECS})
+        self.force("i1", "plan_approved")
+        self.assertIn("skips its plan", self.cgp("split", "i1", ok=False).stderr)
+
+    def test_a_spec_naming_a_guarded_file_needs_the_plan_to_list_it(self):
+        self.force("i1", "plan")
+        bad = [{"title": "CI", "scope": "x", "files": [".github/workflows/ci.yml"]}]
+        self.assertIn("guarded", self.declare(bad, ok=False).stderr)
+        self.assertIn("guarded", self.declare([{"title": "A", "scope": "x", "files": ["CLAUDE.md"]}], ok=False).stderr)
+        self.cgp("touches", "i1", ".github/workflows/ci.yml")
+        self.declare(bad)
+
+    def test_a_second_split_is_a_no_op_and_a_short_one_is_not_closed(self):
+        kids = self.split()
+        n = len(self.issues())
+        again = self.cgp("split", "i1")["children"]
+        self.assertEqual((len(self.issues()), [k["item"] for k in again]), (n, [k["item"] for k in kids]))
+        self.assertEqual(len([c for c in self.comments() if "Split into" in c]), 1)
+        d = self.data()
+        self.set_data(children={"i1": d["children"]["i1"][:1]})  # one child never got created
+        self.finish(kids[:1])
+        snap = self.cgp("list")
+        self.assertNotEqual(next(i for i in snap["items"] if i["item"] == "i1")["column"], "done")
+        self.assertNotIn("issue_closes", self.read_db())
+        self.assertEqual(len([c for c in self.comments() if "approved sub-stories were created" in c]), 1)
+        self.cgp("list")
+        self.assertEqual(len([c for c in self.comments() if "approved sub-stories were created" in c]), 1)
+
     def test_a_sub_story_cannot_be_split_or_declare(self):
         kids = self.split()
         self.force(kids[0]["item"], "plan")
@@ -880,6 +918,7 @@ class TestSubStories(PolicyBase):
         self.assertIn("stop WITHOUT moving", approved.split("CGP split <item>")[1].split("\n")[0])
         self.assertIn("CGP split <item> --declare", read(self, "plan.md"))
         self.assertIn("Sub-stories", read(self, "plan_artifact.md"))
+        self.assertIn("shorter than", approved)
 
 
 class TestMandatorySubagents(unittest.TestCase):

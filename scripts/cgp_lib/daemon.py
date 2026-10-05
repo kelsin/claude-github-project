@@ -13,7 +13,7 @@ import sys
 import time
 from .consts import ALL_KEYS, HOME
 from .util import call, out
-from .store import cfg, load_data, load_json, state_path, stop_path, update_data, update_state
+from .store import cfg, load_data, load_json, state_path, stop_path, touch_lock, update_data, update_state
 from .session import cmd_release, cmd_use, cmd_worker
 from .sched import snapshot
 from .story import ask_user
@@ -32,6 +32,11 @@ ENV_ALLOW = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "T
 FLAGS = ("--max-turns", "--max-budget-usd", "--permission-mode", "--allowedTools", "--disallowedTools", "--setting-sources",
          "--strict-mcp-config", "--verbose", "--output-format")  # what the installed claude must know (cgp doctor checks it)
 GH_DENIED = ("api", "pr merge", "auth", "gist", "secret", "workflow", "release", "repo", "issue close")
+GIT_ALLOWED = ("status", "diff", "log", "show", "add", "commit", "fetch", "rebase", "merge-base", "rev-parse", "ls-files", "checkout", "switch",
+               "worktree", "branch", "push")  # no bare git: `git -c`, `git config`, aliases and credential helpers can run arbitrary programs
+GIT_DENIED = ("-c", "config", "credential", "remote", "ls-remote", "--exec-path")
+GH_ALLOWED = ("pr view", "pr diff", "pr list", "pr create", "pr reopen")  # the verbs the column prompts use
+SECRET_PATHS = ("~/.config/gh/**", "~/.ssh/**", "~/.aws/**", "~/.claude/**", "**/.env*")
 PROMPT = """You are the worker for one board story, running headless: nobody can answer a permission prompt.
 CGP={cgp}
 Read {columns}/shared.md, then {columns}/{column}.md, and follow them exactly.
@@ -49,16 +54,26 @@ def log(msg):
 def deny_rules():
     """The permission rules every worker is denied, whatever daemonAllowedTools says. Defence in depth: the token's scope and the repo's
     branch protection are the real limits (docs/daemon.md). Edit and Write are denied on cgp's own state; worktrees and plans stay open."""
-    rules = [f"Bash(gh {g}:*)" for g in GH_DENIED] + ["Bash(curl:*)", "Bash(wget:*)", f"Bash({CGP} config:*)", "Bash(cgp config:*)"]
+    rules = [f"Bash(gh {g}:*)" for g in GH_DENIED] + [f"Bash(git {g}:*)" for g in GIT_DENIED]
+    rules += ["Bash(curl:*)", "Bash(wget:*)", f"Bash({CGP} config:*)", "Bash(cgp config:*)"]
     for tool in ("Edit", "Write"):
         rules += [f"{tool}(/{HOME}/{p})" for p in ("boards/**", "locks/**", "logs/**", "paths.json", ".lock", "state-*", "stop-*")]
         rules.append(f"{tool}(~/.claude/**)")
+    claude = os.path.expanduser("~/.claude") + os.sep
+    for tool in ("Read", "Glob", "Grep"):
+        for p in SECRET_PATHS:
+            if p == "~/.claude/**" and CGP.startswith(claude):  # the plugin itself is installed there: its prompts must stay readable
+                rules += [f"{tool}(~/.claude/{q})" for q in (".credentials.json", "settings*.json", "projects/**", "history.jsonl", "CLAUDE.md")]
+            else:
+                rules.append(f"{tool}({p})")
+        rules += [f"{tool}(/{HOME}/{p})" for p in ("boards/**", "logs/**", "paths.json")]
     return rules
 
 
 def allow_rules(c, wt):
-    """What a worker may do: read, delegate, run cgp, git and gh pr/issue, edit the story's worktree and write its plan; plus daemonAllowedTools."""
-    own = ["Read", "Glob", "Grep", "Agent", "Task", "TodoWrite", f"Bash({CGP}:*)", "Bash(git:*)", "Bash(gh pr:*)", "Bash(gh issue:*)",
+    """What a worker may do: read, delegate, run cgp, named git subcommands and gh pr verbs, edit the story's worktree and write its plan; plus daemonAllowedTools."""
+    own = ["Read", "Glob", "Grep", "Agent", "Task", "TodoWrite", f"Bash({CGP}:*)"] + [f"Bash(git {g}:*)" for g in GIT_ALLOWED] + [
+        f"Bash(gh {g}:*)" for g in GH_ALLOWED] + [
            f"Edit(/{wt}/**)", f"Write(/{wt}/**)", f"Write(/{HOME}/plans/**)", f"Edit(/{HOME}/plans/**)"]
     return own + list(c["settings"]["daemonAllowedTools"])
 
@@ -242,6 +257,9 @@ class Daemon:
         for it in snap["batch"]:
             if self.exhausted or it["item"] in asked or snap["stopRequested"] or any(w["item"] == it["item"] for w in self.workers):
                 continue
+            if it["kind"] != "issue" and load_data().get("daemonStrikes", {}).get(f"{it['item']}|{it['column']}", 0) >= STRIKES:
+                log(f"not dispatching draft {it['item']}: {STRIKES} failed runs in {it['column']} (adopt it, or move it, to try again)")
+                continue
             if not self.valid(it):
                 log(f"not dispatching {it['item']}: unexpected characters in its ids")
                 continue
@@ -267,7 +285,7 @@ class Daemon:
     def nap(self):
         """Sleep until a worker exits or a poll interval has passed, enforcing deadlines meanwhile."""
         end = time.time() + self.poll
-        while time.time() < end and self.signals < 2 and all(w["proc"].poll() is None for w in self.workers):
+        while time.time() < end and self.signals < 1 and all(w["proc"].poll() is None for w in self.workers):
             self.reap()
             time.sleep(min(0.05, max(end - time.time(), 0)))
 
@@ -287,6 +305,7 @@ class Daemon:
                 if self.a.once:
                     raise
                 log("the board could not be read; retrying")
+                touch_lock(self.key)
                 self.nap()
                 continue
             asked = self.judge(snap)

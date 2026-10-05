@@ -1,24 +1,28 @@
 """Sub-stories: a planner declares a split (`cgp split <item> --declare`), the approved declaration is snapshotted like touches, and
 `cgp split <item>` then creates exactly those stories. The parent is not implemented: it waits for its children and is closed
 when every one of them reached Done by a merged PR. One nesting level; links live in cgp's data and in a `Part of` line in each child."""
+import fnmatch
 import json
+import os
 import re
 import sys
 from .consts import ALL_KEYS, MARK
-from .util import die, norm_path, out
+from .util import covers, die, norm_path, out
 from .gh import gh, post_comment, viewer
 from .store import cfg, load_data, update_data
 from .board import get_item, parse_pr_ref, require_repo, set_text
 from .intake import create_story
 from .pr import pr_view
+from .policy import ALWAYS_DENY, glob_match
+from .repoconf import merged_globs
 from .story import ask_user, author_trusted
 
 MAX_CHILDREN = 10
 
 
-def read_specs(c, parent, raw):
+def read_specs(c, parent, raw, allowed=()):
     """The normalised list of child specs {title, repo, scope, files, after} from parsed JSON; dies on anything invalid, so nothing
-    half-valid is ever stored or created."""
+    half-valid is ever stored or created. A spec may name a guarded or always-denied file only when `allowed` (the plan's touches) lists it."""
     if not isinstance(raw, list) or not raw:
         die("the declaration must be a non-empty JSON list of {title, scope, files, repo?, after?}")
     if len(raw) > MAX_CHILDREN:
@@ -39,6 +43,14 @@ def read_specs(c, parent, raw):
             die(f"sub-story {n}: after must be a list of sub-story titles")
         specs.append({"title": title.strip(), "repo": require_repo(c, s["repo"]) if s.get("repo") else parent["issueRepo"],
                       "scope": scope.strip(), "files": [norm_path(f) for f in files], "after": after})
+    for s in specs:
+        guarded = [g.lower() for g in merged_globs(c, "guardFiles", [s["repo"]])]
+        for f in s["files"]:
+            names = [f.rstrip("/")] + ([f + "_"] if f.endswith("/") else [])
+            hit = any(glob_match(g, n) for g in ALWAYS_DENY for n in names) or any(
+                fnmatch.fnmatchcase(x.lower(), g) for g in guarded for n in names for x in (n, os.path.basename(n)))
+            if hit and not any(covers(t, f) for t in allowed):
+                die(f"sub-story {s['title']!r}: {f} is a guarded file; the plan's files (cgp touches) must list it")
     titles = [s["title"] for s in specs]
     if len(set(titles)) != len(titles):
         die("sub-story titles must be unique")
@@ -77,23 +89,33 @@ def cmd_split(a):
             raw = json.loads(sys.stdin.read() or "null")
         except ValueError:
             die("the declaration on stdin is not valid JSON")
-        specs = read_specs(c, it, raw)
+        if it["skipPlan"]:
+            die("the story skips its plan: sub-stories are only created from a plan you approved")
+        specs = read_specs(c, it, raw, [norm_path(t) for t in load_data().get("touches", {}).get(a.item, [])])
         update_data(lambda d: d.setdefault("splits", {}).__setitem__(a.item, specs))
         out({"item": a.item, "declared": [s["title"] for s in specs]})
         return
     it = check_parent(c, a, ALL_KEYS[ALL_KEYS.index("plan_approved"):-1])
+    if it["skipPlan"]:
+        die("the story skips its plan: sub-stories are only created from a plan you approved")
     snapshot_splits(a.item)
     data = load_data()
-    if a.item in data.get("policyPlans", []):
+    verdict = (data.get("policy") or {}).get(a.item) or {}
+    if a.item in data.get("policyPlans", []) or (verdict.get("gate") == "plan_approved" and verdict.get("approved")):
         die("the plan was approved by the auto-approval policy, not by a person: sub-stories are only created from a plan you approved")
     if not data.get("approvedSplits", {}).get(a.item):
         die("the approved plan declares no sub-stories (in Plan: cgp split <item> --declare)")
-    specs = read_specs(c, it, data.get("approvedSplits", {}).get(a.item))  # the approved snapshot, validated again
+    snap = data.get("approvedTouches", {}).get(a.item)
+    specs = read_specs(c, it, data.get("approvedSplits", {}).get(a.item),  # the approved snapshot, validated again
+                       [norm_path(t) for t in (snap if snap is not None else data.get("touches", {}).get(a.item, []))])
     if not c["fields"].get("plan"):
         die("this board has no Plan field; run /cgp:setup again")
     if not author_trusted(it):
         die("the story was not written by someone you trust")
     done = {k["spec"]: k for k in data.get("children", {}).get(a.item, [])}  # a retry after a failure creates only what is missing
+    if len(done) == len(specs):  # already complete: nothing to create or announce again
+        out({"item": a.item, "children": [done[n] for n in sorted(done)]})
+        return
     for n, s in enumerate(specs):
         if n in done:
             continue
@@ -165,7 +187,17 @@ def close_finished(c, items):
     by_id = {i["item"]: i for i in items}
     for parent, kids in (data.get("children") or {}).items():
         p = by_id.get(parent)
-        if not p or p["closed"] or p["column"] == "done" or any(by_id.get(k["item"], {}).get("column", "done") != "done" for k in kids):
+        expected = len((data.get("approvedSplits") or {}).get(parent) or [])
+        if p and expected and len(kids) < expected and p["column"] != "done" and not p["closed"] and not p["waiting"] \
+                and (data.get("epicAsked") or {}).get(parent) != ["short", len(kids)] \
+                and all(by_id.get(k["item"], {}).get("column", "done") == "done" for k in kids):
+            ask_user(c, parent, f"Only {len(kids)} of the {expected} approved sub-stories were created, so this story is not closed. "
+                     "Run `CGP split` again to create the rest, then reply here.")
+            short = ["short", len(kids)]
+            update_data(lambda d, parent=parent, short=short: d.setdefault("epicAsked", {}).__setitem__(parent, short))
+            p["waiting"], p["waitingOn"] = True, "You"
+            continue
+        if not p or not expected or len(kids) != expected or p["closed"] or p["column"] == "done" or any(by_id.get(k["item"], {}).get("column", "done") != "done" for k in kids):
             continue
         bad = [k for k in kids if not finished(c, k, by_id.get(k["item"]))]
         if bad:
@@ -178,6 +210,6 @@ def close_finished(c, items):
                 p["waiting"], p["waitingOn"] = True, "You"
             continue
         prs = [f"- {k['repo']}#{k['number']} {k['title']}: {by_id[k['item']]['pr']}" for k in kids]
-        post_comment(p["issueRepo"], p["number"], f"{MARK}\nAll sub-stories are done, so this story is closed:\n" + "\n".join(prs))
         gh("api", "-X", "PATCH", f"repos/{p['issueRepo']}/issues/{p['number']}", "-f", "state=closed", "-f", "state_reason=completed")
+        post_comment(p["issueRepo"], p["number"], f"{MARK}\nAll sub-stories are done, so this story is closed:\n" + "\n".join(prs))
         p["closed"] = True
