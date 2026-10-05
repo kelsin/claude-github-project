@@ -2,6 +2,7 @@
 
 ```bash
 python3 -m unittest discover -s tests          # CLI against a fake gh and real temp git repos
+python3 tests/run_parallel.py                  # the same tests, one process per test class (what CI runs; much faster)
 python3 -m ruff check scripts tests            # lint (ruff.toml)
 scripts/gen-cli-docs                           # regenerate docs/cli.md after changing the command table
 claude plugin test .                           # mod tests (hooks/*.test.ts); needs a Claude Code build that knows mods
