@@ -9,7 +9,7 @@ import sys
 import time
 from .consts import AUTO_FIELD, PRIORITY_FIELD, HOME, LOCK_STALE_SECONDS, LOCKS, STORY_OPTION, TEXT_FIELDS, WAITING_FIELD
 from .util import die, out, strip_id
-from .gh import gh
+from .gh import gh, gql
 from .store import list_boards, load_board, load_json
 from .board import fetch_items, fetch_project, fields_by_name, parse_board_url, parse_item
 from .gitutil import git
@@ -149,6 +149,13 @@ def cmd_doctor(a):
         waiting = fields.get(WAITING_FIELD, {})
         check(f"{title}: Waiting On has 'You' and '{STORY_OPTION}'",
               {"You", STORY_OPTION} <= {o["name"] for o in waiting.get("options", [])}, "run /cgp:setup again", warn=True)
+        if c["settings"]["nativeDependencies"]:
+            try:
+                have = "blockedBy" in {f["name"] for f in gql('query{ __type(name:"Issue"){ fields{ name } } }')["__type"]["fields"]}
+            except SystemExit:
+                have = False
+            check(f"{title}: GitHub issue dependencies", have,
+                  "this GitHub has no blockedBy on issues, so only cgp's own blocks order stories: cgp config nativeDependencies off", warn=True)
         cmd = (c["settings"].get("notifyCommand") or "").strip()
         problem = command_problem(cmd) if cmd else None
         check(f"{title}: notifyCommand", not problem, f"it will not run: {problem}", warn=True)

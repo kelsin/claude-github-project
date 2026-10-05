@@ -262,18 +262,24 @@ def cmd_comment(a):
     out({"url": cm["html_url"]})
 
 
-def cmd_ask(a):
-    c = cfg()
-    repo, number, _ = item_issue(a.item)
+def ask_user(c, item, body):
+    """Post a question on the story's issue and set Waiting On to You; returns the question's comment and its round number."""
+    repo, number, _ = item_issue(item)
     rounds = sum(1 for cm in rest(f"repos/{repo}/issues/{number}/comments") if QMARK in (cm.get("body") or "") and is_agent(cm))
-    body = read_body()
     if rounds >= 3:
         body += "\n\n_This story has needed several rounds of questions; consider rescoping or splitting it._"
     cm = post_comment(repo, number, f"{QMARK}\n{MARK}\n❓ **Question for you** (reply here; work resumes automatically)\n\n{body}")
-    set_single(c, a.item, c["fields"]["waiting"]["id"], c["fields"]["waiting"]["you"])
+    set_single(c, item, c["fields"]["waiting"]["id"], c["fields"]["waiting"]["you"])
 
-    advance_cursor(a.item, asked=cm.get("created_at"))
-    out({"url": cm["html_url"], "round": rounds + 1})
+    advance_cursor(item, asked=cm.get("created_at"))
+    return cm, rounds + 1
+
+
+def cmd_ask(a):
+    c = cfg()
+    item_issue(a.item)  # fail on a draft before reading stdin
+    cm, rnd = ask_user(c, a.item, read_body())
+    out({"url": cm["html_url"], "round": rnd})
 
 
 def cmd_answers(a):

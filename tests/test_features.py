@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import test_cgp
 
@@ -219,6 +220,178 @@ class TestDraftPRs(PRBase):
         self.force("i1", "implement")
         self.cgp("move", "i1", "pr_review")
         self.assertEqual(len(self.calls("ready")), 1)  # a PR that is not a draft is left alone
+
+
+def node(n, state="OPEN", repo="acme/app", author="kelsin"):
+    return {"number": n, "state": state, "repository": {"nameWithOwner": repo}, "author": {"login": author}}
+
+
+class TestNativeDependencies(Base):
+    def native(self, key, *nodes, total=None):
+        d = self.read_db()
+        d.setdefault("blocked_by", {})[key] = list(nodes)
+        if total is not None:
+            d.setdefault("blocked_by_total", {})[key] = total
+        self.write_db(d)
+
+    def batch(self):
+        return [i["item"] for i in self.cgp("list")["batch"]]
+
+    def test_a_github_dependency_holds_a_story_whatever_the_ranks_and_releases_when_closed(self):
+        self.setup_board()
+        self.force("i1", "plan_approved")  # the blocker (#2) is still in Todo: behind i1, so a cgp block would not hold
+        self.native("acme/app#1", node(2))
+        snap = self.cgp("list")
+        self.assertNotIn("i1", [i["item"] for i in snap["batch"]])
+        self.assertEqual(snap["blocked"][0]["blockedBy"], ["two"])
+        self.native("acme/app#1", node(2, state="CLOSED"))
+        self.assertIn("i1", self.batch())
+        self.assertEqual(self.cgp("list")["blocked"], [])
+
+    def test_a_blocker_that_is_not_on_the_board_is_ignored(self):
+        self.setup_board()
+        self.force("i1", "plan_approved")
+        self.native("acme/app#1", node(99), node(5, repo="other/repo"))
+        self.assertIn("i1", self.batch())
+
+    def test_a_todo_story_that_skips_planning_is_gated_by_blocks(self):
+        self.setup_board()
+        d = self.read_db()
+        d["items"][0]["values"]["Plan"] = {"text": "Skip"}
+        self.write_db(d)
+        self.assertIn("i1", self.batch())
+        self.native("acme/app#1", node(2))
+        self.assertNotIn("i1", self.batch())
+        self.native("acme/app#1")
+        self.force("i2", "pr_review")
+        self.cgp("block", "i1", "i2")  # cgp's own blocks gate it too
+        self.assertNotIn("i1", self.batch())
+
+    def test_more_dependencies_than_were_read_fail_closed(self):
+        self.setup_board()
+        self.force("i1", "plan_approved")
+        self.native("acme/app#1", total=11)
+        snap = self.cgp("list")
+        self.assertNotIn("i1", [i["item"] for i in snap["batch"]])
+        self.assertEqual(len(snap["blocked"][0]["blockedBy"]), 1)
+
+    def test_a_github_only_cycle_goes_to_a_person_once(self):
+        self.setup_board()
+        self.native("acme/app#1", node(2))
+        self.native("acme/app#2", node(1))
+        snap = self.cgp("list")
+        self.assertEqual(len(snap["waitingOnYou"]), 1)
+        asked = [c for cms in self.read_db()["comments"].values() for c in cms]
+        self.assertEqual(len(asked), 1)
+        self.assertIn("wait on each other", asked[0]["body"])
+        self.cgp("list")
+        self.assertEqual(sum(len(c) for c in self.read_db()["comments"].values()), 1)  # not again while the question waits
+
+    def test_a_local_block_that_closes_a_cycle_with_github_is_dropped(self):
+        self.setup_board()
+        self.force("i1", "plan_approved")
+        self.cgp("block", "i2", "i1")  # i2 (Todo) waits for i1 (ahead of it): holds on its own
+        self.native("acme/app#1", node(2))  # now i1 also waits for i2 on GitHub
+        snap = self.cgp("list")
+        self.assertEqual(snap["waitingOnYou"], [])  # a cycle cgp can break needs no question
+        self.assertEqual([b["title"] for b in snap["blocked"]], ["one"])  # GitHub's edge stays, the overlap block goes
+
+    def test_cgp_block_refuses_a_cycle_through_a_github_dependency(self):
+        self.setup_board()
+        self.native("acme/app#2", node(1))  # two waits for one on GitHub
+        p = self.cgp("block", "i1", "i2", ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("cycle", p.stderr)
+
+    def test_the_setting_turns_it_off_and_validates(self):
+        self.setup_board()
+        self.force("i1", "plan_approved")
+        self.native("acme/app#1", node(2))
+        self.assertEqual(self.cgp("config")["nativeDependencies"], 1)
+        self.assertNotIn("i1", self.batch())
+        self.assertEqual(self.cgp("config", "nativeDependencies", "off")["nativeDependencies"], 0)
+        self.assertIn("i1", self.batch())
+        self.assertEqual(self.cgp("status", "--json")["githubBlockedBy"], [])
+        self.assertNotEqual(self.cgp("config", "nativeDependencies", "maybe", ok=False).returncode, 0)
+        self.assertEqual(self.cgp("config", "nativeDependencies", "on")["nativeDependencies"], 1)
+
+    def test_a_server_without_the_field_falls_back_to_cgps_own_blocks(self):
+        self.setup_board()
+        self.force("i1", "plan_approved")
+        self.force("i2", "pr_review")
+        d = self.read_db(); d["no_blocked_by_field"] = True; self.write_db(d)
+        p = self.cgp("list", ok=False)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("blockedBy", p.stderr)
+        self.assertIn("i1", [i["item"] for i in json.loads(p.stdout)["batch"]])
+        self.cgp("block", "i1", "i2")  # local blocks still work
+        self.assertNotIn("i1", self.batch())
+
+    def test_status_and_list_agree_and_status_shows_who_opened_the_blocker(self):
+        self.setup_board()
+        self.force("i1", "plan_approved")
+        self.native("acme/app#1", node(2, author="mallory"), node(77, repo="other/repo"))
+        self.assertEqual(self.cgp("list")["blocked"][0]["blockedBy"], ["two"])
+        res = self.cgp("status", "--json")
+        self.assertEqual(res["blocked"], [{"title": "one", "blockedBy": ["two"]}])
+        shown = res["githubBlockedBy"][0]["blockedBy"]
+        self.assertEqual([(b["story"], b["author"], b["onBoard"]) for b in shown],
+                         [("acme/app#2", "mallory", True), ("other/repo#77", "kelsin", False)])
+        text = self.cgp("status", ok=False).stdout
+        self.assertIn("acme/app#2 (opened by mallory)", text)
+        self.assertIn("other/repo#77 (opened by kelsin; not on this board, ignored)", text)
+
+    def test_doctor_probes_for_the_field(self):
+        self.setup_board()
+        self.assertIn("✅ Test Board 1: GitHub issue dependencies", self.cgp("doctor", ok=False).stdout)
+        d = self.read_db(); d["no_blocked_by_field"] = True; self.write_db(d)
+        self.assertIn("⚠️  Test Board 1: GitHub issue dependencies", self.cgp("doctor", ok=False).stdout)
+        self.cgp("config", "nativeDependencies", "off")
+        self.assertNotIn("GitHub issue dependencies", self.cgp("doctor", ok=False).stdout)
+
+    def test_the_prompts_tell_workers_a_github_block_is_not_theirs_to_clear(self):
+        for name in ("shared.md", "plan_approved.md"):
+            with open(os.path.join(test_cgp.ROOT, "skills", "run", "columns", name)) as f:
+                text = f.read()
+            self.assertIn("GitHub", text)
+            self.assertIn("`waiting:`", text)
+
+    def order(self, first, second):
+        """native_order(second waits for first), in this process, on the fake gh."""
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            m = test_cgp.load_cgp()
+            c = m.cfg()
+            return m.native_order(c, m.get_item(c, second), m.get_item(c, first))
+
+    def test_epic_order_is_written_to_github_with_the_blockers_database_id(self):
+        self.setup_board()
+        self.force("i1", "plan_approved")
+        self.assertEqual(self.order("i2", "i1"), "github")
+        post = self.read_db()["dependency_posts"][0]
+        self.assertEqual(post[:3], ["api", "-X", "POST"])
+        self.assertIn("repos/acme/app/issues/1/dependencies/blocked_by", post)
+        self.assertEqual(post[post.index("-F") + 1], "issue_id=9002")
+        self.assertNotIn("i1", self.batch())  # read back as a dependency
+
+    def test_epic_order_skips_drafts_and_falls_back_locally_when_github_refuses(self):
+        self.setup_board()
+        self.assertEqual(self.order("i2", "i4"), "local")  # i4 is a draft: no issue to put an edge on
+        self.assertNotIn("dependency_posts", self.read_db())
+        d = self.read_db(); d["dependencies_rc"] = 1; self.write_db(d)
+        self.force("i1", "plan_approved")
+        self.assertEqual(self.order("i2", "i1"), "local")
+        self.assertEqual(self.order("i2", "i1"), "local")
+        with open(os.path.join(self.env["CGP_HOME"], "boards", next(n for n in os.listdir(os.path.join(self.env["CGP_HOME"], "boards")) if n.endswith(".data.json")))) as f:
+            self.assertEqual(json.load(f)["epicOrder"], {"i4": ["i2"], "i1": ["i2"]})  # once each
+        self.assertNotIn("i1", self.batch())  # the local order holds although i2 ranks behind
+        self.force("i2", "done")
+        self.assertIn("i1", self.batch())
+
+    def test_epic_order_with_the_setting_off_stays_local(self):
+        self.setup_board()
+        self.cgp("config", "nativeDependencies", "off")
+        self.assertEqual(self.order("i2", "i1"), "local")
+        self.assertNotIn("dependency_posts", self.read_db())
 
 
 class TestMandatorySubagents(unittest.TestCase):

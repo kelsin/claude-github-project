@@ -23,6 +23,8 @@ The loop dispatches one background worker per actionable story (no cap by defaul
 
 ## Story fields
 
+**Dependencies.** A story that GitHub shows as "blocked by" another issue on the board waits for it (set `nativeDependencies` to `off` to ignore GitHub's dependencies). `scripts/cgp status` lists each GitHub blocker with who opened it, and a dependency cycle that only you can break is asked about on the story.
+
 **Priority.** Set a story's `Priority` to High, Medium or Low and stories in the same column are dispatched in that order (unset after Low); `Hold` keeps a story from being dispatched at all. `scripts/cgp add "Fix login" --priority High` creates an issue and puts it on the board; `scripts/cgp import <label>` adds existing labelled issues.
 
 **Skip planning.** Type `Skip` in a Todo story's `Plan` field and no plan is made: the worker writes `- Plan: Skip` into the story description instead of a plan link and moves the story from Todo straight to Implement, working from the description and iterating there.

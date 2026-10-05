@@ -41,6 +41,13 @@ class LiveSmoke(unittest.TestCase):
         if listing.returncode == 0:
             self.assertIn("batch", json.loads(listing.stdout))
 
+    def test_issue_dependencies_are_readable(self):
+        # the blockedBy field the board query asks for: `status --json` lists what GitHub says blocks each story
+        status = run("status", "--json")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIsInstance(json.loads(status.stdout)["githubBlockedBy"], list)
+        self.assertNotIn("does not offer issue dependencies", status.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

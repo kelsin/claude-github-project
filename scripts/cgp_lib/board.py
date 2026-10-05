@@ -1,8 +1,11 @@
 """The GitHub Project: fields, items, columns, views, setup and the board-level commands."""
+import contextlib
+import io
 import os
 import re
 import subprocess
-from .consts import ALL_KEYS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
+import sys
+from .consts import ALL_KEYS, BOOL_SETTINGS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
 from .util import die, norm, out, safe, split_repo
 from .gh import gh, gql
 from .gitutil import origin_ok
@@ -62,7 +65,7 @@ FIELD_VALUES = " ".join(
 
 ITEM_FIELDS = """id isArchived
   content{ __typename
-    ... on Issue{ number title url state repository{nameWithOwner} }
+    ... on Issue{ number title url state repository{nameWithOwner} NATIVE }
     ... on PullRequest{ number title url state repository{nameWithOwner} }
     ... on DraftIssue{ title body } }
   FIELD_VALUES""".replace("FIELD_VALUES", FIELD_VALUES)
@@ -73,20 +76,42 @@ query($p:ID!,$after:String){ node(id:$p){ ... on ProjectV2{ items(first:100, aft
   nodes{ ITEM_FIELDS } } } } }
 """.replace("ITEM_FIELDS", ITEM_FIELDS)
 
+# GitHub's own issue dependencies ("blocked by"): the first NATIVE_LIMIT of an issue are read, more than that fails closed (see sched.native_edges).
+NATIVE_LIMIT = 10
+NATIVE_FRAGMENT = f"blockedBy(first:{NATIVE_LIMIT}){{ totalCount nodes{{ number state repository{{nameWithOwner}} author{{login}} }} }}"
+_native_missing = []  # set once GitHub reports it has no blockedBy field (older GHES): the rest of this run reads without it
 
-def fetch_items(project_id):
-    items, after = [], None
-    while True:
-        page = gql(ITEMS_QUERY, p=project_id, after=after)["node"]["items"]
-        items += page["nodes"]
-        if not page["pageInfo"]["hasNextPage"]:
+
+def fetch_items(project_id, native=False):
+    """All items of a project. With `native` they carry their GitHub blockedBy edges too; a server without that field gets the plain query."""
+    def read(with_native):
+        query = ITEMS_QUERY.replace("NATIVE", NATIVE_FRAGMENT if with_native else "")
+        items, after = [], None
+        while True:
+            page = gql(query, p=project_id, after=after)["node"]["items"]
+            items += page["nodes"]
+            if not page["pageInfo"]["hasNextPage"]:
+                return items
+            after = page["pageInfo"]["endCursor"]
+    if native and not _native_missing:
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(buf):
+                items = read(True)
+            sys.stderr.write(buf.getvalue())
             return items
-        after = page["pageInfo"]["endCursor"]
+        except SystemExit:
+            if "blockedBy" not in buf.getvalue():
+                sys.stderr.write(buf.getvalue())
+                raise
+            _native_missing.append(True)
+            print("cgp: this GitHub does not offer issue dependencies (blockedBy); ordering by cgp's own blocks only", file=sys.stderr)
+    return read(False)
 
 
 ITEM_QUERY = """
 query($i:ID!){ node(id:$i){ ... on ProjectV2Item{ ITEM_FIELDS } } }
-""".replace("ITEM_FIELDS", ITEM_FIELDS)
+""".replace("ITEM_FIELDS", ITEM_FIELDS).replace("NATIVE", "")
 
 
 def get_item(c, item):
@@ -117,6 +142,8 @@ def parse_item(raw, c):
     auto = (vals.get(AUTO_FIELD) or {}).get("name")
     priority = (vals.get(PRIORITY_FIELD) or {}).get("name")
     ranks = [n for n, _ in PRIORITY_OPTIONS]
+    native = content.get("blockedBy") or {}
+    nodes = native.get("nodes") or []
     return {
         "item": raw["id"],
         "kind": kind,
@@ -138,6 +165,9 @@ def parse_item(raw, c):
         "waiting": bool(waiting_on) and waiting_on != STORY_OPTION,  # on the user, not merely queued behind a story
         "archived": raw["isArchived"],
         "closed": content.get("state") in ("CLOSED", "MERGED"),
+        "nativeBlockedBy": [{"number": n.get("number"), "repo": (n.get("repository") or {}).get("nameWithOwner"), "state": n.get("state"),
+                             "author": (n.get("author") or {}).get("login")} for n in nodes],
+        "nativeOverflow": (native.get("totalCount") or 0) > len(nodes),  # more dependencies than were read: unknown ones may block
     }
 
 
@@ -468,6 +498,10 @@ def cmd_config(a):
             if a.value is None:
                 die(f"usage: cgp config {a.key} <comma-separated globs, or empty for none>")
             val = [g.strip() for g in a.value.split(",") if g.strip()]
+        elif a.key in BOOL_SETTINGS:
+            if a.value is None or a.value.strip().lower() not in ("on", "off", "1", "0"):
+                die(f"usage: cgp config {a.key} on|off")
+            val = int(a.value.strip().lower() in ("on", "1"))
         elif a.key in STRING_SETTINGS:
             if a.value is None:
                 die(f"usage: cgp config {a.key} <text, or empty to unset>")
