@@ -14,7 +14,7 @@ jobs:
     steps:
       # A PR opened with the default GITHUB_TOKEN does not trigger other workflows, so required checks
       # never run on the release PR. Set RELEASE_PLEASE_TOKEN (a PAT or GitHub App token) to avoid that.
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
