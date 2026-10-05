@@ -1,15 +1,9 @@
 """Priority, intake, notifications, repo config, preview providers, models, draft PRs."""
 import json
 import os
-<<<<<<< Updated upstream
-import stat
-import unittest
-||||||| Stash base
-import stat
-=======
 import shutil
 import tempfile
->>>>>>> Stashed changes
+import unittest
 
 import test_cgp
 

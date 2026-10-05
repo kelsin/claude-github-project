@@ -797,18 +797,12 @@ class TestSessions(Base):
 
     def test_repo_paths_are_shared_across_boards(self):
         self.cgp("use", "https://github.com/orgs/acme/projects/2", env=self.b)
-<<<<<<< Updated upstream
-        self.cgp("repo-path", "acme/other", self.tmp, env=self.b)
-||||||| Stash base
-        self.cgp("repo-path", "acme/app", self.tmp, env=self.b)
-=======
-        clone = self.make_clone()
-        self.cgp("repo-path", "acme/app", clone, env=self.b)
->>>>>>> Stashed changes
+        other = self.make_clone("other-clone", "https://github.com/acme/other.git")
+        self.cgp("repo-path", "acme/other", other, env=self.b)
         self.cgp("use", "https://github.com/orgs/acme/projects/1", env=self.a)
-<<<<<<< Updated upstream
-        self.cgp("repo-path", "acme/app", self.tmp, env=self.a)
-        self.assertEqual(self.file("paths.json"), {"acme/other": self.tmp, "acme/app": self.tmp})
+        app = self.make_clone("app-clone")
+        self.cgp("repo-path", "acme/app", app, env=self.a)
+        self.assertEqual(self.file("paths.json"), {"acme/other": other, "acme/app": app})
 
 
 class TestBoardOfRepo(Base):
@@ -916,11 +910,6 @@ class TestBoardOfRepo(Base):
         p = self.cgp("doctor", ok=False)
         self.assertIn("each repo is on one board", p.stdout)
         self.assertIn("acme/app is on", p.stdout)
-||||||| Stash base
-        self.assertEqual(self.cgp("repo-path", env=self.a)["acme/app"], self.tmp)
-=======
-        self.assertEqual(self.cgp("repo-path", env=self.a)["acme/app"], clone)
->>>>>>> Stashed changes
 
 
 class TestWorkers(Base):
