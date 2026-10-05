@@ -66,16 +66,17 @@ def boards_of_repo(repo):
     return [k for k in list_boards() if repo.lower() in {r.lower() for r in (load_json(board_file(k), None) or {}).get("repos", {})}]
 
 
-def board_for_cwd():
-    """Key of the board the current directory's repo is on, None when it is not on one. Exit 6 when several boards list it."""
+def boards_of_cwd():
     if not _cwd_board:
         repo = cwd_repo()
-        keys = boards_of_repo(repo) if repo else []
-        if len(keys) > 1:
-            die(f"{repo} is on several boards ({', '.join(keys)}); a repo should belong to one. Remove it from the others, "
-                "or bind this session with: cgp use <board-url>", code=6)
-        _cwd_board.append(keys[0] if keys else None)
+        _cwd_board.append(boards_of_repo(repo) if repo else [])
     return _cwd_board[0]
+
+
+def board_for_cwd():
+    """Key of the board the current directory's repo is on; None when it is on none, or (legacy configs) on several."""
+    keys = boards_of_cwd()
+    return keys[0] if len(keys) == 1 else None
 
 
 def sid():
@@ -144,15 +145,8 @@ def update_board(fn):
 
 
 def board_key():
-    """The board for this command: the one the current repo is on, else the session's bound board, else the only board."""
-    here = board_for_cwd()
-    bound = load_json(state_path(), {}).get("boardKey")
-    if here:
-        if bound and bound != here and os.path.exists(board_file(bound)):
-            die(f"this session is bound to board {bound} but {cwd_repo()} is on board {here}; run: cgp release, "
-                "or work from a directory in the bound board's repo", code=6)
-        return here
-    key = bound
+    """The board for this command: the session's bound board (cgp use), else the one the current repo is on, else the only board."""
+    key = load_json(state_path(), {}).get("boardKey")
     if key and os.path.exists(board_file(key)):
         return key
     keys = list_boards()
@@ -160,6 +154,12 @@ def board_key():
         return keys[0]
     if not keys:
         die("no board configured; run /cgp:setup <board-url> first")
+    here = board_for_cwd()
+    if here:
+        return here
+    if len(boards_of_cwd()) > 1:
+        die(f"{cwd_repo()} is on several boards; a repo should belong to one. Remove it from the others, "
+            "or bind this session with: cgp use <board-url>", code=6)
     die("this session is not bound to a board; run: cgp use <board-url>", code=6)
 
 

@@ -24,7 +24,7 @@ def cwd_repo():
             url = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
         except OSError:  # no git, or the directory is gone
             url = ""
-        m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$", url)
+        m = re.search(r"(?:^|[@/])github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$", url)
         _cwd_repo.append(m.group(1) if m else None)
     return _cwd_repo[0]
 
