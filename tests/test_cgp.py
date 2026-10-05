@@ -151,13 +151,13 @@ class TestListAndMove(Base):
     def test_list_batch_order_and_counts(self):
         self.setup_board()
         self.force("i1", "pr_approved")
-        self.force("i2", "plan_approval")
+        self.force("i2", "plan_review")
         snap = self.cgp("list")
         self.assertEqual(snap["status"], "work")
         self.assertEqual([i["item"] for i in snap["batch"]], ["i1", "i4"])  # pr_approved before todo
-        self.assertEqual(snap["counts"]["plan_approval"], 1)
+        self.assertEqual(snap["counts"]["plan_review"], 1)
         self.assertEqual(snap["batch"][0]["issueRepo"], "acme/app")
-        self.assertEqual(self.state()["counts"]["plan_approval"], 1)
+        self.assertEqual(self.state()["counts"]["plan_review"], 1)
 
     def test_concurrency_cap(self):
         self.setup_board()
@@ -171,7 +171,7 @@ class TestListAndMove(Base):
     def test_idle_and_done(self):
         self.setup_board()
         for i in ("i1", "i2", "i4"):
-            self.force(i, "plan_approval")
+            self.force(i, "plan_review")
         self.assertEqual(self.cgp("list")["status"], "idle")
         for i in ("i1", "i2", "i4"):
             self.force(i, "done")
@@ -180,14 +180,14 @@ class TestListAndMove(Base):
     def test_wait_returns_on_timeout_when_idle(self):
         self.setup_board()
         for i in ("i1", "i2", "i4"):
-            self.force(i, "pr_approval")
+            self.force(i, "pr_review")
         r = self.cgp("wait", "--timeout", "0")
         self.assertEqual(r["status"], "idle")
 
     def test_stop_request_is_reported_and_wakes_wait(self):
         self.setup_board()
         for i in ("i1", "i2", "i4"):
-            self.force(i, "pr_approval")
+            self.force(i, "pr_review")
         self.assertFalse(self.cgp("list")["stopRequested"])
         self.assertTrue(self.cgp("stop")["stopRequested"])
         self.assertTrue(self.cgp("list")["stopRequested"])
@@ -245,7 +245,7 @@ class TestSkipAndAutoApprove(Base):
         self.set_auto("i1", "Both")
         self.force("i1", "todo")
         self.assertNotEqual(self.cgp("move", "i1", "plan_approved", ok=False).returncode, 0)
-        self.force("i1", "plan_approval")
+        self.force("i1", "plan_review")
         self.assertNotEqual(self.cgp("move", "i1", "plan_approved", ok=False).returncode, 0)  # leaving Plan Review stays human
 
 
@@ -346,8 +346,8 @@ class TestOverlap(Base):
     def test_overlap_orders_by_stage_then_number_and_blocks_gate_the_loop(self):
         self.setup_board()
         self.force("i1", "plan_approved")
-        self.cgp("move", "i2", "pr_approval")
-        self.cgp("move", "i4", "plan_approval")  # draft: ignored by overlap (not an issue)
+        self.cgp("move", "i2", "pr_review")
+        self.cgp("move", "i4", "plan_review")  # draft: ignored by overlap (not an issue)
         self.cgp("set", "i2", "pr", "https://github.com/acme/app/pull/9")
         d = self.read_db(); d["pr_files"] = {"acme/app#9": ["src/a.py", "src/b.py"]}; self.write_db(d)
         self.cgp("touches", "i1", "src/a.py", "docs/")
@@ -361,7 +361,7 @@ class TestOverlap(Base):
         snap = self.cgp("list")
         self.assertNotIn("i1", [i["item"] for i in snap["batch"]])
         self.assertEqual(snap["blocked"][0]["blockedBy"], ["two"])
-        self.assertEqual(snap["blocked"][0]["blockers"][0]["column"], "pr_approval")
+        self.assertEqual(snap["blocked"][0]["blockers"][0]["column"], "pr_review")
         self.assertEqual(self.state()["blockedCount"], 1)
         # the blocker finishing releases it
         self.force("i2", "done")
@@ -509,7 +509,7 @@ class TestGates(Base):
         self.setup_board()
         for col in ("plan_approved", "pr_approved", "done"):
             self.assertNotEqual(self.cgp("move", "i1", col, ok=False).returncode, 0, col)
-        self.force("i1", "plan_approval")
+        self.force("i1", "plan_review")
         p = self.cgp("move", "i1", "plan", ok=False)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("only the user", p.stderr)
@@ -525,7 +525,7 @@ class TestGates(Base):
     def test_merge_requires_pr_approved(self):
         self.setup_board()
         self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/1")
-        self.force("i1", "pr_approval")
+        self.force("i1", "pr_review")
         p = self.cgp("merge", "i1", ok=False)
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("pr_approved", p.stderr)
@@ -584,7 +584,7 @@ class TestMoreOverlap(Base):
         self.setup_board()
         self.force("i1", "plan_approved")
         self.cgp("move", "i2", "plan")
-        self.cgp("move", "i2", "plan_approval")
+        self.cgp("move", "i2", "plan_review")
         self.cgp("touches", "i1", "src/")
         self.cgp("touches", "i2", "src/")
         r = self.cgp("overlap", "i1")
@@ -600,7 +600,7 @@ class TestMoreOverlap(Base):
     def test_stale_block_is_dropped_when_blocker_falls_behind(self):
         self.setup_board()
         self.force("i1", "plan_approved")
-        self.force("i2", "pr_approval")
+        self.force("i2", "pr_review")
         self.cgp("block", "i1", "i2")
         self.assertEqual(len(self.cgp("list")["blocked"]), 1)
         self.force("i2", "plan")  # sent back: now behind i1
@@ -927,7 +927,7 @@ class TestSnapshotBlocks(Base):
     def test_block_written_between_read_and_prune_is_not_lost(self):
         self.setup_board()
         self.force("i1", "plan_approved")
-        self.force("i2", "pr_approval")
+        self.force("i2", "pr_review")
         with mock.patch.dict(os.environ, self.env, clear=True):
             m = load_cgp()
             real = m.update_data
@@ -943,7 +943,7 @@ class TestSnapshotBlocks(Base):
     def test_implement_story_without_pr_honors_its_blocks(self):
         self.setup_board()
         self.force("i1", "implement")
-        self.force("i2", "pr_approval")
+        self.force("i2", "pr_review")
         self.cgp("block", "i1", "i2")
         snap = self.cgp("list")
         self.assertEqual([b["title"] for b in snap["blocked"]], ["one"])
@@ -1047,7 +1047,7 @@ class TestMerge(PRBase):
     def test_leaving_pr_approved_cancels_auto_merge(self):
         self.cgp("move", "i1", "implement")
         self.assertEqual([c[-1] for c in self.calls("merge")], ["--disable-auto"])
-        self.cgp("move", "i1", "pr_approval")  # not leaving pr_approved: nothing to cancel
+        self.cgp("move", "i1", "pr_review")  # not leaving pr_approved: nothing to cancel
         self.assertEqual(len(self.calls("merge")), 1)
 
     def test_moving_to_done_does_not_cancel(self):
@@ -1181,48 +1181,18 @@ LEGACY = [("todo", "🆕 Todo"), ("plan", "🧠 Plan"), ("plan_review", "🔍 Pl
           ("pr_approval", "🚦 PR Approval"), ("pr_approved", "🚀 PR Approved"), ("done", "🎉 Done")]
 
 
-class TestMigration(Base):
-    """A board set up before the agent-side review columns were folded into Plan and Implement."""
-
+class TestOldLayouts(Base):
     def board_json(self):
         boards = os.path.join(self.env["CGP_HOME"], "boards")
         path = os.path.join(boards, next(n for n in os.listdir(boards) if not n.endswith(".data.json")))
         with open(path) as f:
             return path, json.load(f)
 
-    def make_legacy(self, placement):
-        """placement: item -> old column key. Rewrites the fake board and the board config to the old layout."""
-        self.setup_board()
-        d = self.read_db()
-        d["fields"][0]["options"] = [{"id": f"L_{k}", "name": n, "color": "GRAY"} for k, n in LEGACY]
-        for it in d["items"]:
-            it["values"] = {"Status": {"optionId": f"L_{placement[it['id']]}"}} if it["id"] in placement else {}
-        self.write_db(d)
+    def edit_board(self, fn):
         path, c = self.board_json()
-        c["fields"]["status"]["options"] = {k: f"L_{k}" for k, _ in LEGACY}
-        del c["schema"]
+        fn(c)
         with open(path, "w") as f:
             json.dump(c, f)
-
-    def columns(self):
-        return {i["item"]: i["column"] for i in self.cgp("list")["items"]}
-
-    def test_use_migrates_an_old_board_and_keeps_stories_waiting_on_the_user(self):
-        self.make_legacy({"i1": "plan_review", "i2": "pr_review", "i3": "plan_approval"})
-        res = self.cgp("use")
-        self.assertEqual(res["migration"]["movedToReview"], 2)
-        opts = self.read_db()["fields"][0]["options"]
-        self.assertEqual([o["name"] for o in opts][2], "🙋 Plan Review")
-        self.assertEqual(len(opts), 8)
-        self.assertEqual(next(o["id"] for o in opts if o["name"] == "🙋 Plan Review"), "L_plan_approval")  # id kept
-        self.assertEqual(next(o["id"] for o in opts if o["name"] == "🚦 PR Review"), "L_pr_approval")
-        cols = self.columns()
-        self.assertEqual((cols["i1"], cols["i2"], cols["i3"]), ("plan", "implement", "plan_approval"))
-        _, c = self.board_json()
-        self.assertEqual(c["schema"], 2)
-        self.assertNotIn("plan_review", c["fields"]["status"]["options"])
-        self.cgp("release")
-        self.assertNotIn("migration", self.cgp("use"))  # nothing left to do
 
     def test_use_reports_whether_to_turn_on_remote_control(self):
         self.setup_board()
@@ -1231,37 +1201,40 @@ class TestMigration(Base):
         self.cgp("release")
         self.assertFalse(self.cgp("use")["remoteControl"])
 
-    def test_old_agent_review_option_is_never_matched_to_the_human_column_by_name(self):
-        self.make_legacy({"i1": "plan_review", "i2": "pr_review"})
-        self.setup_board()  # re-running setup migrates the same way
-        cols = self.columns()
-        self.assertEqual((cols["i1"], cols["i2"]), ("plan", "implement"))
+    def test_a_schema_2_config_gets_the_new_column_keys(self):
+        self.setup_board()
 
-    def test_auto_migrate_can_be_turned_off_and_migrate_dry_run_changes_nothing(self):
-        self.make_legacy({"i1": "plan_review"})
-        self.cgp("config", "autoMigrate", "0")
-        self.assertIn("skipped", self.cgp("use")["migration"])
+        def old(c):
+            opts = c["fields"]["status"]["options"]
+            opts["plan_approval"], opts["pr_approval"] = opts.pop("plan_review"), opts.pop("pr_review")
+            c["schema"] = 2
+        self.edit_board(old)
+        self.assertEqual(self.cgp("list", "--brief")["counts"]["plan_review"], 0)
+        _, c = self.board_json()
+        self.assertEqual(c["schema"], 3)
+        self.assertNotIn("plan_approval", c["fields"]["status"]["options"])
+
+    def test_move_still_accepts_the_old_column_names(self):
+        self.setup_board()
+        self.assertEqual(self.cgp("move", "i1", "plan_approval")["column"], "plan_review")
+
+    def test_a_ten_column_config_is_refused_with_a_pointer(self):
+        self.setup_board()
+        self.edit_board(lambda c: c.pop("schema"))
+        p = self.cgp("list", ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("ten-column", p.stderr)
+        self.assertIn("docs/migration.md", p.stderr)
+
+    def test_setup_refuses_a_github_board_in_the_ten_column_layout(self):
+        d = self.read_db()
+        d["fields"][0]["options"] = [{"id": f"L_{k}", "name": n, "color": "GRAY"} for k, n in LEGACY]
+        self.write_db(d)
         before = self.read_db()
-        dry = self.cgp("migrate", "--dry-run")
-        self.assertEqual((dry["dryRun"], dry["movedToReview"]), (True, 1))
-        self.assertEqual(self.read_db(), before)
-        self.assertEqual(self.columns()["i1"], "plan_review")  # the old layout still works
-        self.cgp("move", "i1", "plan")
-        self.assertEqual(self.cgp("migrate")["movedToReview"], 0)
-        self.assertEqual(self.columns()["i1"], "plan")
-
-    def test_failed_migration_does_not_block_the_run_and_is_retried(self):
-        self.make_legacy({"i1": "plan_review"})
-        d = self.read_db(); d["fields"] = [f for f in d["fields"] if f["name"] != "Status"]; self.write_db(d)
-        res = self.cgp("use")
-        self.assertIn("error", res["migration"])
-        self.assertNotIn("schema", self.board_json()[1])
-
-    def test_legacy_board_still_accepts_its_old_columns_and_lean_board_refuses_them(self):
-        self.make_legacy({"i1": "todo"})
-        self.assertEqual(self.cgp("move", "i1", "plan_review")["column"], "plan_review")
-        self.cgp("migrate")
-        self.assertIn("column must be one of", self.cgp("move", "i1", "pr_review", ok=False).stderr)
+        p = self.cgp("setup", "https://github.com/orgs/acme/projects/1", ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("ten-column", p.stderr)
+        self.assertEqual(self.read_db(), before)  # nothing touched
 
 
 class TestPhases(Base):
@@ -1271,9 +1244,9 @@ class TestPhases(Base):
         self.cgp("worker", "phase", "i1", "reviewing", "3 reviewers")
         w = self.state()["workers"][0]
         self.assertEqual((w["phase"], w["detail"]), ("reviewing", "3 reviewers"))
-        self.cgp("move", "i1", "plan_approval")
+        self.cgp("move", "i1", "plan_review")
         w = self.state()["workers"][0]
-        self.assertEqual((w["column"], "phase" in w), ("plan_approval", False))
+        self.assertEqual((w["column"], "phase" in w), ("plan_review", False))
 
     def worker(self):
         return self.state()["workers"][0]
@@ -1284,7 +1257,7 @@ class TestPhases(Base):
         self.assertEqual(self.worker()["phase"], "planning")
         self.cgp("move", "i1", "plan")
         self.assertEqual(self.worker()["phase"], "planning")
-        self.cgp("move", "i1", "plan_approval")  # a human column: nothing is being worked on
+        self.cgp("move", "i1", "plan_review")  # a human column: nothing is being worked on
         self.assertNotIn("phase", self.worker())
         self.cgp("worker", "start", "i2", "plan_approved", "two")
         self.assertEqual(self.state()["workers"][1]["phase"], "implementing")
@@ -1294,7 +1267,7 @@ class TestPhases(Base):
         self.cgp("worker", "start", "i1", "plan", "one")
         self.cgp("set", "i1", "plan", "https://claude.ai/artifact/x")
         self.assertEqual(self.worker()["phase"], "reviewing")
-        self.cgp("move", "i1", "plan_approval")
+        self.cgp("move", "i1", "plan_review")
         self.cgp("worker", "start", "i1", "implement", "one")
         self.assertEqual(self.worker()["phase"], "implementing")
         self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/4")

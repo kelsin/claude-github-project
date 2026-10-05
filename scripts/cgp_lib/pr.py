@@ -2,7 +2,7 @@
 import json
 import re
 import time
-from .util import die, out
+from .util import Poll, die, out
 from .gh import gh
 from .store import cfg, load_data, update_data
 from .board import get_item, parse_pr_ref, require_repo
@@ -43,24 +43,22 @@ def cmd_ci_wait(a):
 
 
 def ci_wait(a):
-    deadline, none_since = time.time() + a.timeout, time.time()
+    poll, none_since = Poll(a.timeout, a.interval), time.time()
     while True:
         if a.sha:  # checks of an older head say nothing about the commit just pushed
             v = pr_view(a.repo, a.pr, check=False)
             if not v or v.get("headRefOid") != a.sha:
                 none_since = time.time()
-                if time.time() >= deadline:
+                if not poll.wait():
                     out({"state": "pending", "note": f"PR head is not {a.sha} yet", "head": (v or {}).get("headRefOid")})
                     return
-                time.sleep(a.interval)
                 continue
         checks = pr_checks(a.repo, a.pr)
         if checks is None:  # transient gh error: never mistake it for "no CI"
             none_since = time.time()  # and the no-checks grace starts only once gh answers again
-            if time.time() >= deadline:
+            if not poll.wait():
                 out({"state": "pending", "note": "gh errors while polling"})
                 return
-            time.sleep(a.interval)
             continue
         if checks:
             none_since = time.time()
@@ -75,10 +73,9 @@ def ci_wait(a):
         if not checks and time.time() - none_since > a.grace:
             out({"state": "none", "note": "no CI checks reported; treat as green"})
             return
-        if time.time() >= deadline:
+        if not poll.wait():
             out({"state": "pending", "pending": [x["name"] for x in pending]})
             return
-        time.sleep(a.interval)
 
 
 def pr_view(repo, pr, check=True):
@@ -124,7 +121,7 @@ def changed_since_review(item, ref, v):
     if head == rec["sha"] or head in d.get("cleanRebase", {}).get(item, []):
         return None
     return (f"the PR head is {head[:8]} but you reviewed {rec['sha'][:8]}: code changed after review. Post a status comment "
-            f"saying what changed and move the story to pr_approval for re-review")
+            f"saying what changed and move the story to pr_review for re-review")
 
 
 def merge_target(a):
@@ -176,14 +173,13 @@ def cmd_merge(a):
 
 def cmd_merge_wait(a):
     a = merge_target(a)
-    deadline = time.time() + a.timeout
+    poll = Poll(a.timeout, a.interval)
     while True:
         v, a.view = a.view or pr_view(a.repo, a.pr, check=False), None
         if v is None:  # a transient gh failure must not end the wait (ci-wait is as tolerant)
-            if time.time() >= deadline:
+            if not poll.wait():
                 out({"state": "pending", "note": "gh errors while polling"})
                 return
-            time.sleep(a.interval)
             continue
         if v["state"] == "MERGED":
             out({"state": "merged"})
@@ -211,7 +207,6 @@ def cmd_merge_wait(a):
             return
         elif v["mergeStateStatus"] == "CLEAN" and not v.get("autoMergeRequest"):
             gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--delete-branch", check=False)
-        if time.time() >= deadline:
+        if not poll.wait():
             out({"state": "pending", "pr": v})
             return
-        time.sleep(a.interval)

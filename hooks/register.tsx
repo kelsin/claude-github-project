@@ -3,30 +3,8 @@ import type { Register } from 'claude-code'
 
 import type { BoardView } from '../types'
 
-// plan_approval / pr_approval are the human columns, now called Plan Review / PR Review; plan_review / pr_review
-// only exist on boards that have not been migrated yet.
-const EMOJI: Record<string, string> = {
-  todo: '🆕',
-  plan: '🧠',
-  plan_review: '🔍',
-  plan_approval: '🙋',
-  plan_approved: '✅',
-  implement: '🔨',
-  pr_review: '👀',
-  pr_approval: '🚦',
-  pr_approved: '🚀',
-  done: '🎉',
-}
-// What a worker says it is doing (cgp worker phase); anything else is ignored, so a worker cannot pick what is drawn.
-const PHASES: Record<string, [string, string]> = {
-  planning: ['🧠', 'planning'],
-  reviewing: ['🔍', 'reviewing'],
-  revising: ['✏️', 'revising'],
-  implementing: ['🔨', 'implementing'],
-  fixing: ['🔧', 'fixing review findings'],
-  ci: ['⏳', 'waiting on CI'],
-  merging: ['🚀', 'merging'],
-}
+// Emoji per column and the phase labels come from the cgp state file (`meta`, written by scripts/cgp_lib/consts.py), so this
+// file keeps no copy of them. Only phases cgp lists are drawn, so a worker cannot pick what is shown.
 const POLL_MS = 3000
 // The loop refreshes state.json on every poll; older than this means no loop is running.
 const FRESH_MS = 15 * 60 * 1000
@@ -66,8 +44,8 @@ export const register: Register = on => {
           fresh = {
             title: clean(st.board.title ?? 'Project board'),
             url: safeUrl(st.board.url),
-            planApproval: Number(st.counts?.plan_approval) || 0,
-            prApproval: Number(st.counts?.pr_approval) || 0,
+            planApproval: Number(st.counts?.plan_review) || 0,
+            prApproval: Number(st.counts?.pr_review) || 0,
             waiting: (Array.isArray(st.waiting) ? st.waiting : []).map((w: any) => ({
               title: clean(w?.title),
               url: safeUrl(w?.url),
@@ -76,6 +54,8 @@ export const register: Register = on => {
             blocked: Number(st.blockedCount) || 0,
             workers,
             stopping,
+            emoji: st.meta?.emoji && typeof st.meta.emoji === 'object' ? st.meta.emoji : {},
+            phases: st.meta?.phases && typeof st.meta.phases === 'object' ? st.meta.phases : {},
           }
         }
       } catch {
@@ -129,9 +109,9 @@ export const register: Register = on => {
           {v.url ? <Link href={v.url} label={v.title} /> : <Text>{v.title}</Text>}
           <Text>
             {'  '}
-            {EMOJI.plan_approval} Plan Review: {v.planApproval}
+            {v.emoji.plan_review ?? ''} Plan Review: {v.planApproval}
             {'  '}
-            {EMOJI.pr_approval} PR Review: {v.prApproval}
+            {v.emoji.pr_review ?? ''} PR Review: {v.prApproval}
             {v.waiting.length > 0 ? `  ❓ Waiting on you: ${v.waiting.length}` : ''}
             {v.blocked > 0 ? `  ⛓ Queued behind another story: ${v.blocked}` : ''}
           </Text>
@@ -148,11 +128,11 @@ export const register: Register = on => {
           <Text dimColor>… +{v.waiting.length - asking.length} more waiting on you</Text>
         )}
         {shown.map((w, i) => {
-          const phase = w.phase ? PHASES[w.phase] : undefined
+          const phase = w.phase ? v.phases[w.phase] : undefined
           const detail = clean(w.detail).trim()
           return (
             <Text key={`${w.item}:${i}`} dimColor>
-              {phase ? phase[0] : (EMOJI[w.column] ?? '•')} {clean(w.title)}
+              {phase ? phase[0] : (v.emoji[w.column] ?? '•')} {clean(w.title)}
               {phase ? ` · ${phase[1]}${detail ? ` (${detail})` : ''}` : ''}
             </Text>
           )

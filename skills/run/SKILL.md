@@ -16,7 +16,6 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
    - Exit 6 (several boards set up, none chosen): show the listed boards, ask the user which, run `CGP use <url>`.
    - Exit 5 (another live session is running this board): tell the user and ask whether that session is gone; only then `CGP use <url> --takeover`.
    Each session works one board; parallel sessions must use different boards.
-   - If the output has `migration` with `changed: true`, the board's columns were just brought up to date (the agent-side Plan Review / PR Review columns are gone: review now happens inside Plan and Implement; Plan Approval / PR Approval are now called Plan Review / PR Review). Tell the user in one line, with `movedToReview` stories moved. `migration.error` or `skipped`: tell the user and carry on, the board keeps working in its old layout.
 2. If the output has `remoteControl: true` and you have the `set_remote_control` tool of the ccd_session_mgmt server (a deferred tool: load it with ToolSearch; it exists only in the Claude desktop app), call it with `session_id: "self"` and `enabled: true` so the user can follow and steer the loop from claude.ai/code or the mobile app. The app asks the user to approve it. Best effort: no tool, a refusal or a declined approval is mentioned in one line and never stops the run. Skip it when `remoteControl` is false.
 3. `CGP list --brief` and tell the user the board URL and the counts once.
 
@@ -43,7 +42,7 @@ If `list` or `wait` exits 5, another session took this board over: stop and tell
 
 ## Rules
 
-- The user decides the Plan Review and PR Review columns (keys `plan_approval`, `pr_approval`). Never move a story out of them or work on them. A board that has not been migrated also has agent-side `plan_review` / `pr_review` columns: workers handle them like Plan / Implement.
+- The user decides the Plan Review and PR Review columns (keys `plan_review`, `pr_review`). Never move a story out of them or work on them.
 - `batch` already holds the biggest group of Plan Approved / Implement stories whose declared files don't collide with each other or with running workers; the rest are `deferred` and come back as soon as the story they collide with finishes. Report them like `blocked`.
 - Stories in Plan Approved that wait on another story (`blocked` in the list output) are skipped until their blockers are Done; they do not count toward the no-progress rule.
 - `stalled` lists workers that have run longer than the `maxWorkerMinutes` setting (default 240; 0 = never). Treat each like a crash: `CGP worker stop <item>`, note it in one line, count it as a run without progress for the 3-strikes rule below. (The hung agent may still be running; its story is released regardless.)

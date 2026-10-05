@@ -3,7 +3,7 @@ import fnmatch
 import os
 import time
 from .consts import ACTIONABLE, ALL_KEYS, COLUMNS, HOME, STORY_OPTION, WAITING_FIELD
-from .util import age_seconds, strip_id, covers, die, norm_path, now_iso, out
+from .util import Poll, age_seconds, strip_id, covers, die, norm_path, now_iso, out
 from .gh import rest
 from .store import cfg, load_data, load_json, lock_file, lock_holder, save_board, state_path, stop_requested, update_data, update_state
 from .board import board_keys, clear_field, ensure_story_option, fetch_items, fetch_project, fields_by_name, get_item, parse_item, parse_pr_ref, rank, set_single
@@ -172,7 +172,7 @@ def cmd_status(a):
            "waitingOnYou": [{"title": i["title"], "url": i["url"]} for i in live if i["waiting"]],
            "blocked": [b for b in blocked if b["blockedBy"]], "workers": workers,
            "loop": {"session": session, "heartbeatMinutes": round((time.time() - lock["at"]) / 60, 1)} if lock else None,
-           "review": {k: [{"title": i["title"], "url": i["url"]} for i in by_col.get(k, [])] for k in ("plan_approval", "pr_approval")}}
+           "review": {k: [{"title": i["title"], "url": i["url"]} for i in by_col.get(k, [])] for k in ("plan_review", "pr_review")}}
     if a.json:
         out(res)
         return
@@ -182,8 +182,8 @@ def cmd_status(a):
     print("   " + "  ".join(f"{emoji.get(k, '•')} {names.get(k, k)} {n}" for k, n in res["counts"].items()) + f"  🎉 Done {done}")
     beat = res["loop"] and res["loop"]["heartbeatMinutes"]
     print("🔁 loop: " + (f"running in session {session[:8]}, heartbeat {beat} min ago" if lock else "not running (/cgp:run)"))
-    for title, rows in (("❓ Waiting on you", res["waitingOnYou"]), ("🙋 Plan Review", res["review"]["plan_approval"]),
-                        ("🚦 PR Review", res["review"]["pr_approval"])):
+    for title, rows in (("❓ Waiting on you", res["waitingOnYou"]), ("🙋 Plan Review", res["review"]["plan_review"]),
+                        ("🚦 PR Review", res["review"]["pr_review"])):
         if rows:
             print(f"{title} ({len(rows)})")
             for r in rows:
@@ -196,7 +196,7 @@ def cmd_status(a):
 
 def cmd_wait(a):
     c = cfg()
-    deadline = time.time() + a.timeout
+    poll = Poll(a.timeout, a.interval or c["settings"]["pollSeconds"])
     started = None
     while True:
         snap = snapshot(c)
@@ -205,11 +205,10 @@ def cmd_wait(a):
         released = snap["inFlight"] != started
         # with a stop requested the loop is only waiting for its workers; once none are left there is nothing to wait for
         stopped = snap["stopRequested"] and not snap["inFlight"]
-        if snap["status"] != "idle" or released or stopped or time.time() >= deadline:
+        if snap["status"] != "idle" or released or stopped or not poll.wait():
             snap.pop("items")
             out(snap)
             return
-        time.sleep(a.interval or c["settings"]["pollSeconds"])
 
 
 def story_files(c, st, it):

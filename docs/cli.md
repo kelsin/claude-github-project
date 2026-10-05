@@ -8,7 +8,6 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 |---|---|---|
 | `setup` | `url` `--repo` `--repo-path` `--dry-run` | Configure a board (columns, fields, views) and link a repo |
 | `use` | `url` `--takeover` | Bind this session to a board and claim its loop (exit 5: held by another session, 6: which board?) |
-| `migrate` | `--dry-run` | Bring a board from the ten-column layout to the current columns |
 | `release` |  | Free this session's board lock |
 | `session-title` |  | UserPromptSubmit hook: name the session after the board |
 | `repo-path` | `repo` `path` | Show or set the local clone of a linked repo |

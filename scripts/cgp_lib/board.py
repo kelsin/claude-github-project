@@ -1,11 +1,11 @@
-"""The GitHub Project: fields, items, columns, views, setup/migration and the board-level commands."""
+"""The GitHub Project: fields, items, columns, views, setup and the board-level commands."""
 import os
 import re
 import subprocess
 from .consts import ALL_KEYS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
 from .util import die, norm, out, split_repo
 from .gh import gh, gql
-from .store import board_file, cfg, load_json, lock_holder, save_board
+from .store import board_file, cfg, load_json, save_board
 
 
 PROJECT_FRAGMENT = """
@@ -207,7 +207,7 @@ def ensure_story_option(field):
 
 
 def board_keys(c):
-    """The columns this board actually has, in pipeline order (an unmigrated board still has plan_review and pr_review)."""
+    """The columns this board has, in pipeline order."""
     return [k for k in ALL_KEYS if k in c["fields"]["status"]["options"]]
 
 
@@ -224,45 +224,29 @@ def legacy_layout(options):
 def apply_columns(proj, status, dry_run=False):
     """Make the Status options the current COLUMNS. Returns (Status field, summary).
 
-    A board in the old layout is migrated in place, never by name alone: its agent-side "Plan Review" / "PR Review"
-    would otherwise be matched to the new human columns of the same names and stories nobody reviewed would look
-    approvable. Instead their stories first move to Plan / Implement (whose workers now review inline), and the
-    "Plan Approval" / "PR Approval" options are renamed with their ids kept, so the stories waiting on the user stay put.
-    Safe to repeat: the item moves come first and the options change in one mutation.
+    Options whose name matches a column (ignoring the emoji) keep their id, so their stories keep their status; stories in
+    other options go to Done when closed and to Todo otherwise. The ten-column layout is refused: its agent-side
+    "Plan Review" / "PR Review" would be matched to the human columns of the same names, and stories nobody reviewed
+    would look approvable.
     """
+    if legacy_layout(status["options"]):
+        die("this board still has the ten-column layout (Plan Approval / PR Approval), which is no longer migrated; see docs/migration.md")
     desired = [f"{emoji} {name}" for _, name, emoji, _ in COLUMNS]
-    old = {norm(o["name"]): o["id"] for o in status["options"]}
-    legacy = legacy_layout(status["options"])
-    keep, premove = {n: i for n, i in old.items() if n in {norm(n_) for _, n_, _, _ in COLUMNS}}, {}
-    if legacy:
-        keep.pop("plan review", None)  # the agent-side one; the human column of that name comes from "plan approval"
-        keep.pop("pr review", None)
-        for new, was in (("plan review", "plan approval"), ("pr review", "pr approval")):
-            if was in old:
-                keep[new] = old[was]
-        for was, to in (("plan review", "plan"), ("pr review", "implement")):
-            if was in old:
-                premove[old[was]] = old.get(to)
-    if not legacy and [o["name"] for o in status["options"]] == desired:
+    keep = {norm(o["name"]): o["id"] for o in status["options"] if norm(o["name"]) in {norm(n) for _, n, _, _ in COLUMNS}}
+    if [o["name"] for o in status["options"]] == desired:
         return status, {"changed": False}
     matched = set(keep.values())
-    moves, remap = [], {}
+    remap = {}
     for raw in fetch_items(proj["id"]):
         cur = (raw.get("fvStatus") or {}).get("optionId")
-        if cur and premove.get(cur):
-            moves.append((raw["id"], premove[cur]))
-        elif cur and cur in matched:
+        if cur and cur in matched:
             continue  # option id is preserved below, so the item keeps its status
-        else:
-            closed = (raw.get("content") or {}).get("state") in ("CLOSED", "MERGED")
-            remap[raw["id"]] = "Done" if closed else ""
-    summary = {"changed": True, "legacy": legacy, "movedToReview": len(moves),
-               "remapped": {"todo": sum(1 for t in remap.values() if t != "Done"),
-                            "done": sum(1 for t in remap.values() if t == "Done")}}
+        closed = (raw.get("content") or {}).get("state") in ("CLOSED", "MERGED")
+        remap[raw["id"]] = "Done" if closed else ""
+    summary = {"changed": True, "remapped": {"todo": sum(1 for t in remap.values() if t != "Done"),
+                                             "done": sum(1 for t in remap.values() if t == "Done")}}
     if dry_run:
         return status, {**summary, "dryRun": True}
-    for item, option in moves:
-        set_single({"board": {"id": proj["id"]}}, item, status["id"], option)
     data = gql("""mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){
       updateProjectV2Field(input:{fieldId:$f,singleSelectOptions:$o}){ projectV2Field{
         ... on ProjectV2SingleSelectField{ id options{id name} } } } }""",
@@ -327,7 +311,7 @@ def cmd_setup(a):
              "fieldsToAdd": [n for n in (WAITING_FIELD, *TEXT_FIELDS.values(), AUTO_FIELD) if n not in fields],
              "viewsToAdd": [v[0] for v in VIEWS if v[0] not in have_views], "repoToLink": a.repo})
         return
-    status, migration = apply_columns(proj, status)
+    status, cols = apply_columns(proj, status)
     options = status_options(status)
 
     def ensure(name, dtype, opts=None):
@@ -373,33 +357,8 @@ def cmd_setup(a):
             c["repos"][a.repo] = os.path.abspath(a.repo_path)
     save_board(c)
 
-    out({"board": c["board"], "repos": c["repos"], "itemsRemapped": migration.get("remapped", {"todo": 0, "done": 0}),
-         "migration": migration, "viewsCreated": views,
+    out({"board": c["board"], "repos": c["repos"], "itemsRemapped": cols.get("remapped", {"todo": 0, "done": 0}), "viewsCreated": views,
          "note": "items whose old status matched a new column name kept it; closed ones went to Done, all others to Todo"})
-
-
-def migrate_columns(c, dry_run=False):
-    """Bring a board's Status options up to the current columns (see apply_columns) and its config with them."""
-    b = c["board"]
-    proj = fetch_project(b["kind"], b["owner"], b["number"])
-    status = fields_by_name(proj).get("Status")
-    if not status or "options" not in status:
-        die("project has no single-select Status field")
-    status, summary = apply_columns(proj, status, dry_run)
-    if not dry_run:
-        c["fields"]["status"] = {"id": status["id"], "options": status_options(status)}
-        c["schema"] = SCHEMA
-        save_board(c)
-    return summary
-
-
-def cmd_migrate(a):
-    """Update this board's columns by hand (`cgp use` does it by itself unless autoMigrate is 0)."""
-    c = cfg()
-    holder = lock_holder(c["board"]["id"])
-    if holder and not a.dry_run:
-        die("another session is running this board's loop; migrate when it has stopped")
-    out(migrate_columns(c, a.dry_run))
 
 
 def cmd_repo_path(a):

@@ -4,10 +4,10 @@ import os
 import re
 import sys
 import time
-from .consts import DEFAULT_PHASE, HOME, LOCKS, LOCK_STALE_SECONDS, PHASES, SCHEMA
+from .consts import DEFAULT_PHASE, HOME, LOCKS, LOCK_STALE_SECONDS, PHASES
 from .util import die, now_iso, out, safe, strip_id
 from .store import cfg, ensure_home, list_boards, load_board, load_json, lock_file, lock_holder, locked, save_json, sid, state_path, stop_path, update_state
-from .board import get_item, migrate_columns, parse_board_url
+from .board import get_item, parse_board_url
 
 
 def cmd_use(a):
@@ -39,14 +39,6 @@ def cmd_use(a):
         os.remove(stop_path())  # a stop request left from an earlier run
     c = boards[key]
     res = {"board": c["board"], "session": sid(), "remoteControl": bool(c["settings"].get("remoteControl", 1))}
-    if c.get("schema", 1) < SCHEMA:  # under the lock just claimed, so no loop can be running on the old columns
-        if not c["settings"].get("autoMigrate", 1):
-            res["migration"] = {"skipped": "autoMigrate is 0; this board keeps its old columns until: cgp migrate"}
-        else:
-            try:
-                res["migration"] = migrate_columns(c)
-            except SystemExit:  # the board is still in a layout the loop can run; the error is on stderr
-                res["migration"] = {"error": "could not update the board's columns; it keeps its old ones (see stderr) and is retried next run"}
     out(res)
 
 

@@ -2,7 +2,7 @@
 import json
 import re
 import sys
-from .consts import DEFAULT_PHASE, SKIP, LINKS_END, LINKS_START, MARK, NETLIFY_BOT, QMARK, TEXT_FIELDS
+from .consts import DEFAULT_PHASE, KEY_RENAMES, SKIP, LINKS_END, LINKS_START, MARK, NETLIFY_BOT, QMARK, TEXT_FIELDS
 from .util import call, die, now_iso, out
 from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
 from .store import cfg, load_data, update_data, update_state
@@ -41,6 +41,7 @@ def process_replies(c, items):
 
 def cmd_move(a):
     c = cfg()
+    a.column = KEY_RENAMES.get(a.column, a.column)  # the user's columns were called plan_approval / pr_approval before schema 3
     if a.column not in board_keys(c):
         die(f"column must be one of {board_keys(c)}")
     it = get_item(c, a.item)
@@ -52,7 +53,7 @@ def cmd_move(a):
     if a.column in ("plan_approved", "pr_approved") and not (
             auto and it["autoApprove"][auto[0]] and it["column"] == auto[1] and (auto[0] == "plan" or parse_pr_ref(c, it["pr"]))):
         die(f"only the user moves stories into {a.column}; it is a human approval (unless Auto Approve covers it)")
-    if it["column"] in ("plan_approval", "pr_approval"):
+    if it["column"] in ("plan_review", "pr_review"):
         die(f"story is in {it['column']}: only the user moves it out")
     ref = parse_pr_ref(c, it["pr"])
     if a.column == "done" and not (it["closed"] and it["kind"] == "issue"):  # a closed issue is finished already
@@ -61,7 +62,7 @@ def cmd_move(a):
     if a.column != "done" and it["column"] == "pr_approved" and ref:
         cancel_auto_merge(*ref)  # leaving PR Approved must not leave a merge armed
     set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
-    if a.column == "pr_approval" and ref:
+    if a.column == "pr_review" and ref:
         record_reviewed(a.item, ref)  # the commit the user is about to review: merge accepts only this one
 
     def upd(st):

@@ -5,6 +5,7 @@ import io
 import json
 import re
 import sys
+import time
 from datetime import datetime, timezone
 
 
@@ -71,3 +72,20 @@ def call(fn, **kw):
         return json.loads(buf.getvalue())
     except ValueError:
         return {"error": (err.getvalue() or buf.getvalue()).strip()}
+
+
+class Poll:
+    """The deadline and pause of a polling loop: `if not poll.wait(): return <pending result>` ends a loop that has run out of time,
+    otherwise sleeps one interval and goes on."""
+
+    def __init__(self, timeout, interval):
+        self.deadline, self.interval = time.time() + timeout, interval
+
+    def expired(self):
+        return time.time() >= self.deadline
+
+    def wait(self):
+        if self.expired():
+            return False
+        time.sleep(self.interval)
+        return True

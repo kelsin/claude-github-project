@@ -2,7 +2,7 @@
 import argparse
 
 
-from .board import (cmd_adopt, cmd_config, cmd_discover, cmd_migrate, cmd_repo_path, cmd_repos, cmd_setup)
+from .board import (cmd_adopt, cmd_config, cmd_discover, cmd_repo_path, cmd_repos, cmd_setup)
 from .doctor import cmd_doctor, cmd_gc
 from .gitwt import cmd_guard, cmd_sync, cmd_worktree, cmd_worktree_remove
 from .pr import cmd_ci_wait, cmd_merge, cmd_merge_wait, cmd_pr_state
@@ -20,8 +20,6 @@ COMMANDS = [
         A("--dry-run", action="store_true", help="print what would change; touch nothing")]),
     ("use", cmd_use, "Bind this session to a board and claim its loop (exit 5: held by another session, 6: which board?)", [
         A("url", nargs="?"), A("--takeover", action="store_true")]),
-    ("migrate", cmd_migrate, "Bring a board from the ten-column layout to the current columns", [
-        A("--dry-run", action="store_true")]),
     ("release", cmd_release, "Free this session's board lock", []),
     ("session-title", cmd_session_title, "UserPromptSubmit hook: name the session after the board", []),
     ("repo-path", cmd_repo_path, "Show or set the local clone of a linked repo", [A("repo", nargs="?"), A("path", nargs="?")]),

@@ -1,6 +1,6 @@
 # Column: Implement
 
-Implementation and PR review in one run. Stories arrive from Plan Approved (no `pr` link yet), are sent back (the user commented in PR Review) or stalled (a `pr` link exists). On a board that has not been migrated, a story in `pr_review` is handled exactly like this.
+Implementation and PR review in one run. Stories arrive from Plan Approved (no `pr` link yet), are sent back (the user commented in PR Review) or stalled (a `pr` link exists).
 
 1. Rule 1 (`CGP prepare`), then rate the story (rule 4). `CGP worker phase <item> implementing`.
 2. **No `pr` link:** run `CGP overlap` first as in `plan_approved.md` step 1 (a block recorded here is honored by the loop). Spawn implementers by the plan's step list, splitting only into disjoint-file parts. Each writes code and tests, runs the repo's own test and lint commands, and commits. Run the full checks yourself in the worktree afterwards. Open the PR per rule 7, with a description that has what and why, a link to the plan (or "Plan: skipped" when `story.skipPlan`), how it was tested, and `Closes <issueRepo>#<number>` (full `owner/repo#n` form when the repos differ).
@@ -9,4 +9,4 @@ Implementation and PR review in one run. Stories arrive from Plan Approved (no `
 4. `CGP worker phase <item> fixing`. Fix every accepted finding at once: separate fix agents (disjoint files in parallel), commit, push after `CGP sync` and `CGP guard`. Rejected findings need a one-line reason in your status comment. High risk only: one more reviewer after the fixes to confirm none remain and nothing new broke.
 5. `CGP worker phase <item> ci`. `CGP ci-wait <repo> <pr> --sha <pushed sha>` and fix until `green` or `none` (max 5 rounds, then ask), then `CGP preview <item>`.
 6. Reply on the PR to each addressed comment with `CGP comment <item> --pr` (one summary comment is fine, also saying what was reviewed and fixed), then a status comment on the story (PR link, rating, what was tested).
-7. If `story.autoApprove.pr` is true (the user set Auto Approve to PR or Both), add "auto-approved" to the status comment and `CGP move <item> pr_approved` (the CLI allows it from here only because of that field); the next cycle merges. Otherwise `CGP move <item> pr_approval` (the user's PR Review column).
+7. If `story.autoApprove.pr` is true (the user set Auto Approve to PR or Both), add "auto-approved" to the status comment and `CGP move <item> pr_approved` (the CLI allows it from here only because of that field); the next cycle merges. Otherwise `CGP move <item> pr_review` (the user's PR Review column).

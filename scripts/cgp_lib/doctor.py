@@ -139,7 +139,6 @@ def cmd_doctor(a):
         waiting = fields.get(WAITING_FIELD, {})
         check(f"{title}: Waiting On has 'You' and '{STORY_OPTION}'",
               {"You", STORY_OPTION} <= {o["name"] for o in waiting.get("options", [])}, "run /cgp:setup again", warn=True)
-        check(f"{title}: columns migrated", c.get("schema", 1) >= 2, "run: cgp migrate", warn=True)
         for repo, path in c["repos"].items():
             ok = bool(path) and os.path.isdir(path)
             check(f"{title}: clone of {repo}", ok, path or f"unknown: cgp repo-path {repo} <path>")

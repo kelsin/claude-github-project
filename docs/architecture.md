@@ -12,7 +12,7 @@ The plugin has three parts: skills (prompts), the `scripts/cgp` CLI that does ev
 | `util` | errors, JSON output, name normalising, `call` (run a command in-process) |
 | `gh` | `gh` wrappers (GraphQL, paginated REST) and the comment trust model |
 | `store` | everything under `~/.config/claude-github-project`: board configs, per-board data, session state, locks |
-| `board` | the project: fields, items, columns, views, setup and migration, board-level commands |
+| `board` | the project: fields, items, columns, views, setup, board-level commands |
 | `session` | session binding (`use`, `release`, `stop`) and the worker registry |
 | `gitwt` | story worktrees: create, `sync` (rebase), `guard`, remove |
 | `pr` | checks, CI waiting, merging, the review-bound merge gate |

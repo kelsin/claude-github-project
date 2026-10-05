@@ -3,7 +3,7 @@ import fcntl
 import json
 import os
 import time
-from .consts import BOARDS, DEFAULTS, HOME, LEGACY_CONFIG, LOCKS, LOCK_STALE_SECONDS, PATHS
+from .consts import BOARDS, DEFAULTS, HOME, KEY_RENAMES, LOCKS, META, LOCK_STALE_SECONDS, PATHS, SCHEMA
 from .util import die, safe, strip_id
 
 
@@ -69,10 +69,6 @@ def list_boards():
     ensure_home()
     keys = [f[:-5] for f in sorted(os.listdir(BOARDS))
             if f.endswith(".json") and not f.endswith(".data.json")] if os.path.isdir(BOARDS) else []
-    legacy = load_json(LEGACY_CONFIG, None)
-    if legacy and legacy.get("board", {}).get("id") and safe(legacy["board"]["id"]) not in keys:
-        save_board(legacy)  # migrate the single-board config of earlier versions
-        keys.append(safe(legacy["board"]["id"]))
     return keys
 
 
@@ -80,6 +76,14 @@ def load_board(key):
     raw = load_json(board_file(key), None)
     if not raw:
         die("unknown board; run /cgp:setup <board-url>")
+    if raw.get("schema", 1) < 2:
+        die(f"{raw['board']['title']} still has the ten-column layout, which this version no longer migrates. Run /cgp:run once with "
+            "cgp 0.1.x (the last version that does), or recreate its Status options with /cgp:setup on a copy; see docs/migration.md")
+    if raw["schema"] < SCHEMA:  # 2 -> 3: the user's columns were called plan_approval / pr_approval
+        opts = raw["fields"]["status"]["options"]
+        raw["fields"]["status"]["options"] = {KEY_RENAMES.get(k, k): v for k, v in opts.items()}
+        raw["schema"] = SCHEMA
+        save_json(board_file(key), raw)
     paths = load_json(PATHS, {})
     raw["repos"] = {r: paths.get(r) for r in raw["repos"]}
     raw["settings"] = {**DEFAULTS, **raw.get("settings", {})}  # configs saved before a setting existed lack it
@@ -151,6 +155,7 @@ def update_state(fn):
     with locked():
         st = load_json(state_path(), {"workers": [], "counts": {}, "waiting": []})
         fn(st)
+        st["meta"] = META
         save_json(state_path(), st)
         if st.get("boardKey"):
             touch_lock(st["boardKey"])

@@ -28,7 +28,7 @@ class TestReviewedMerge(PRBase):
     def reviewed(self, sha="aaa111"):
         self.prs(self.view(headRefOid=sha))
         self.force("i1", "implement")
-        self.cgp("move", "i1", "pr_approval")  # records the commit the user will see
+        self.cgp("move", "i1", "pr_review")  # records the commit the user will see
         self.force("i1", "pr_approved")
 
     def test_merge_refuses_a_head_that_changed_after_review(self):
@@ -46,7 +46,7 @@ class TestReviewedMerge(PRBase):
         self.reviewed()
         self.prs(self.view(headRefOid="bbb222"))
         self.force("i1", "implement")
-        self.cgp("move", "i1", "pr_approval")
+        self.cgp("move", "i1", "pr_review")
         self.force("i1", "pr_approved")
         self.assertEqual(self.cgp("merge", "i1"), {"requested": True})
 
@@ -135,13 +135,13 @@ class TestStalledWorkers(Base):
 class TestStatus(Base):
     def test_table_and_json(self):
         self.setup_board()
-        self.force("i2", "plan_approval")
+        self.force("i2", "plan_review")
         before = self.read_db()
         text = self.cgp("status", ok=False)  # not JSON
         self.assertEqual(text.returncode, 0, text.stderr)
         self.assertIn("🙋 Plan Review (1)", text.stdout)
         self.assertIn("two", text.stdout)
-        self.assertEqual(self.cgp("status", "--json")["counts"]["plan_approval"], 1)
+        self.assertEqual(self.cgp("status", "--json")["counts"]["plan_review"], 1)
         self.assertEqual(self.read_db()["items"], before["items"])  # reads only
 
 

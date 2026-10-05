@@ -1,5 +1,10 @@
-# Upgrading a board from the ten-column layout
+# The ten-column layout
 
-Boards from the ten-column layout (it had agent-side Plan Review and PR Review columns, and the human ones were called Plan Approval and PR Approval): nothing to do. `/cgp:run` brings the board up to date when it starts, under the board's lock: stories in the old agent-side columns move to Plan / Implement (where the worker now reviews them), Plan Approval / PR Approval are renamed Plan Review / PR Review with their stories where they were, and the old columns are removed. It reports what it changed. `scripts/cgp migrate --dry-run` shows the effect first, `scripts/cgp migrate` does it by hand, and `scripts/cgp config autoMigrate 0` stops `/cgp:run` from doing it (the board then keeps working in its old layout). A failed migration never blocks the run and is retried next time.
+Early versions used ten columns: agent-side Plan Review and PR Review columns, and the user's columns called Plan Approval and PR Approval. Versions up to 0.1.x migrated such a board when `/cgp:run` started. Version 0.2 no longer does, and refuses to run on one (`cgp` stops with an error naming the board) rather than guess: its agent-side "Plan Review" and "PR Review" would otherwise be matched by name to the user's columns of the same names, and stories nobody reviewed would look approvable.
 
-The legacy handling (the old config layout, the agent-side `plan_review` / `pr_review` columns and their prompt shims) exists only for this upgrade. It is planned for removal in 0.4: boards that have run `/cgp:run` once on any version from 0.2 on are already migrated; `cgp doctor` reports a board that is not.
+To bring such a board forward:
+
+1. Install cgp 0.1.x, run `/cgp:run` once on the board (it migrates under the board's lock and reports what it moved), and stop it.
+2. Update to the current version. Boards already on the eight-column layout are upgraded on first use: their saved config renames the column keys `plan_approval` / `pr_approval` to `plan_review` / `pr_review` (schema 3). Nothing changes on GitHub.
+
+`cgp move` still accepts `plan_approval` and `pr_approval` as aliases for the new keys.
