@@ -2,9 +2,10 @@
 import os
 import re
 import subprocess
-from .consts import ALL_KEYS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
+from .consts import ALL_KEYS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
 from .util import die, norm, out, split_repo
 from .gh import gh, gql
+from .models import parse as parse_models
 from .store import board_file, cfg, load_json, save_board
 
 
@@ -49,7 +50,7 @@ def check_scope():
 
 # Status, Waiting On, Plan, PR, Preview and Auto Approve are asked for by name: a positional fieldValues(first:N) can miss them on boards with many fields.
 VALUE_FIELDS = (("fvStatus", "Status"), ("fvWaiting", WAITING_FIELD), ("fvPlan", TEXT_FIELDS["plan"]), ("fvPr", TEXT_FIELDS["pr"]),
-                ("fvPreview", TEXT_FIELDS["preview"]), ("fvAuto", AUTO_FIELD))
+                ("fvPreview", TEXT_FIELDS["preview"]), ("fvAuto", AUTO_FIELD), ("fvPriority", PRIORITY_FIELD))
 
 
 FIELD_VALUES = " ".join(
@@ -113,6 +114,8 @@ def parse_item(raw, c):
     text = lambda n: (vals.get(n) or {}).get("text") or None
     waiting_on = (vals.get(WAITING_FIELD) or {}).get("name") or None
     auto = (vals.get(AUTO_FIELD) or {}).get("name")
+    priority = (vals.get(PRIORITY_FIELD) or {}).get("name")
+    ranks = [n for n, _ in PRIORITY_OPTIONS]
     return {
         "item": raw["id"],
         "kind": kind,
@@ -123,6 +126,9 @@ def parse_item(raw, c):
         "column": column or "todo",
         "unset": column is None,
         "plan": text("Plan"),
+        "priority": priority,
+        "priorityRank": ranks.index(priority) if priority in ranks else len(ranks),
+        "held": priority == "Hold",
         "skipPlan": (text("Plan") or "").strip().lower() == SKIP,
         "autoApprove": {"plan": auto in ("Plan", "Both"), "pr": auto in ("PR", "Both")},
         "pr": text("PR"),
@@ -308,7 +314,7 @@ def cmd_setup(a):
     if a.dry_run:
         have_views = {v["name"] for v in proj["views"]["nodes"]}
         out({"dryRun": True, "columns": apply_columns(proj, status, dry_run=True)[1],
-             "fieldsToAdd": [n for n in (WAITING_FIELD, *TEXT_FIELDS.values(), AUTO_FIELD) if n not in fields],
+             "fieldsToAdd": [n for n in (WAITING_FIELD, *TEXT_FIELDS.values(), AUTO_FIELD, PRIORITY_FIELD) if n not in fields],
              "viewsToAdd": [v[0] for v in VIEWS if v[0] not in have_views], "repoToLink": a.repo})
         return
     status, cols = apply_columns(proj, status)
@@ -327,6 +333,7 @@ def cmd_setup(a):
                                                       {"name": STORY_OPTION, "color": "YELLOW", "description": ""}])
     text_ids = {k: ensure(n, "TEXT")["id"] for k, n in TEXT_FIELDS.items()}
     ensure(AUTO_FIELD, "SINGLE_SELECT", [{"name": n, "color": "GREEN", "description": ""} for n in AUTO_OPTIONS])
+    priority = ensure(PRIORITY_FIELD, "SINGLE_SELECT", [{"name": n, "color": col, "description": ""} for n, col in PRIORITY_OPTIONS])
     fields = fields_by_name(fetch_project(kind, owner, number))  # now with the fields added above
     views = ensure_views(proj, fields)
 
@@ -340,6 +347,7 @@ def cmd_setup(a):
         "fields": {"status": {"id": status["id"], "options": options},
                    "waiting": {"id": waiting["id"], "you": waiting_you(waiting),
                                "story": ensure_story_option(waiting)},
+                   "priority": {"id": priority["id"], "options": {o["name"]: o["id"] for o in priority.get("options", [])}},
                    **text_ids},
         "repos": repos,
         "settings": {**DEFAULTS, **old.get("settings", {})},
@@ -401,6 +409,12 @@ def cmd_config(a):
             if a.value is None:
                 die(f"usage: cgp config {a.key} <comma-separated globs, or empty for none>")
             c["settings"][a.key] = [g.strip() for g in a.value.split(",") if g.strip()]
+        elif a.key in STRING_SETTINGS:
+            if a.value is None:
+                die(f"usage: cgp config {a.key} <text, or empty to unset>")
+            if a.key.endswith("Model"):
+                parse_models(a.value)  # dies on a bad value
+            c["settings"][a.key] = a.value.strip()
         else:
             if a.value is None or not re.fullmatch(r"\d+", a.value):
                 die(f"usage: cgp config {a.key} <non-negative integer>")

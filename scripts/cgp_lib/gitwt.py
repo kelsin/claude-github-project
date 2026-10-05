@@ -3,11 +3,11 @@ import fnmatch
 import os
 import subprocess
 import sys
-import time
-from .consts import HOME
 from .util import covers, die, norm_path, out
 from .store import cfg, load_data, update_data
 from .board import issue_item
+from .gitutil import default_ref, fetch, git, resolve_repo_path, wt_path
+from .repoconf import merged_globs
 from .pr import allow_head
 
 
@@ -20,45 +20,6 @@ def cleanup_worktree(c, it):
             git(base, "branch", "-D", f"cgp/{it['number']}", check=False)
     except SystemExit:
         pass
-
-
-def resolve_repo_path(c, repo):
-    path = c["repos"].get(repo)
-    if not path or not os.path.isdir(path):
-        die(f"no local clone known for {repo}; run: cgp repo-path {repo} <path>")
-    return path
-
-
-def git(path, *args, check=True):
-    p = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True)
-    if check and p.returncode:
-        die(f"git {' '.join(args)} failed: {p.stderr.strip()}")
-    return p.stdout.strip()
-
-
-def wt_path(it):
-    owner, name = it["issueRepo"].split("/")
-    return os.path.join(HOME, "worktrees", owner, name, str(it["number"]))
-
-
-def fetch(path):
-    for _ in range(3):  # concurrent workers fetching one repo can briefly lock each other out
-        p = subprocess.run(["git", "-C", path, "fetch", "origin", "--prune"], capture_output=True, text=True)
-        if p.returncode == 0:
-            return
-        time.sleep(2)
-    die(f"git fetch failed: {p.stderr.strip()}")
-
-
-def default_ref(path):
-    sym = lambda: git(path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False)
-    ref = sym()
-    if not ref:
-        git(path, "remote", "set-head", "origin", "--auto", check=False)
-        ref = sym()
-    if not ref:
-        die("cannot determine the default branch (origin/HEAD unset and remote unreachable)")
-    return ref
 
 
 def cmd_worktree(a):
@@ -165,7 +126,7 @@ def cmd_guard(a):
         die("no worktree for this story")
     names = git(wt, "diff", "--name-only", "--no-renames", f"{default_ref(wt)}...HEAD").splitlines()
     allowed = [norm_path(t) for t in load_data().get("touches", {}).get(a.item, [])]
-    guarded = c["settings"]["guardFiles"]
+    guarded = merged_globs(c, "guardFiles", [it["issueRepo"]])
     bad = [n for n in names if any(fnmatch.fnmatchcase(x, g) for g in guarded for x in (n, os.path.basename(n)))
            and not any(covers(t, n) for t in allowed)]
     out({"ok": not bad, "violations": bad})

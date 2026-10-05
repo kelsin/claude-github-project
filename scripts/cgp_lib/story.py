@@ -8,6 +8,8 @@ from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
 from .store import cfg, load_data, update_data, update_state
 from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, set_single, set_text
 from .session import set_phase, worker_pr
+from .history import record
+from .repoconf import repo_config, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
 from .pr import cancel_auto_merge, cmd_pr_state, pr_view, record_reviewed
 
@@ -62,7 +64,10 @@ def cmd_move(a):
     if a.column != "done" and it["column"] == "pr_approved" and ref:
         cancel_auto_merge(*ref)  # leaving PR Approved must not leave a merge armed
     set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
+    record(a.item, "move", it["title"], was=it["column"], to=a.column)
     if a.column == "pr_review" and ref:
+        if (pr := pr_view(*ref, check=False)) and pr["isDraft"]:  # draftPRs opens PRs as drafts: ready for review now
+            gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
         record_reviewed(a.item, ref)  # the commit the user is about to review: merge accepts only this one
 
     def upd(st):
@@ -114,25 +119,57 @@ def sync_links(c, item):
         gh("api", "-X", "PATCH", path, "-f", f"body={new}", check=False)
 
 
+# provider -> (the bot whose comment carries the URL, the URL pattern; {pr} is the PR number). "deployments" asks GitHub's
+# Deployments API instead, which needs no bot. A repo's .cgp.json can name a provider or give its own {bot, pattern}.
+PREVIEW_PROVIDERS = {
+    "netlify": (NETLIFY_BOT, r"https://deploy-preview-{pr}--[a-z0-9-]+\.netlify\.app\b"),
+    "vercel": ("vercel[bot]", r"https://[a-z0-9-]+\.vercel\.app\b"),
+    "cloudflare": ("cloudflare-workers-and-pages[bot]", r"https://[a-z0-9.-]+\.pages\.dev\b"),
+}
+
+
+def preview_url(c, repo, pr):
+    """The newest deploy preview URL of a PR from the story's provider, or None."""
+    conf = repo_config(c, repo).get("preview", {})
+    provider = conf.get("provider") or c["settings"].get("previewProvider") or "netlify"
+    if conf.get("bot") and conf.get("pattern"):
+        bot, pattern = conf["bot"], conf["pattern"]
+    elif provider == "deployments":
+        head = (pr_view(repo, pr, check=False) or {}).get("headRefOid")
+        for dep in (rest(f"repos/{repo}/deployments?sha={head}") if head else []):
+            for st in rest(f"repos/{repo}/deployments/{dep['id']}/statuses"):
+                url = st.get("environment_url") or ""
+                if st.get("state") == "success" and re.fullmatch(r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]{1,500}", url):
+                    return url
+        return None
+    elif provider in PREVIEW_PROVIDERS:
+        bot, pattern = PREVIEW_PROVIDERS[provider]
+    else:
+        die(f"unknown previewProvider {provider!r}; one of {[*PREVIEW_PROVIDERS, 'deployments']}")
+    url_re = safe_pattern(pattern, pr)
+    if not url_re:
+        die("the preview pattern is not a valid regular expression")
+    urls = [m.group(0) for cm in rest(f"repos/{repo}/issues/{pr}/comments")
+            if (cm.get("user") or {}).get("login") == bot  # only the provider's own bot: anyone can type a URL
+            for m in [url_re.search(cm.get("body") or "")] if m]
+    return urls[-1] if urls else None
+
+
 def cmd_preview(a):
-    """Copy the Netlify deploy preview URL from the story's PR into the Preview field, once Netlify has posted it."""
+    """Copy the deploy preview URL from the story's PR into the Preview field, once the provider has posted it."""
     c = cfg()
     if "preview" not in c["fields"]:
         die("this board has no Preview field; run /cgp:setup again to add it")
     ref = parse_pr_ref(c, get_item(c, a.item)["pr"])
     if not ref:
         die("story has no valid PR field set")
-    repo, pr = ref
-    url_re = re.compile(rf"https://deploy-preview-{pr}--[a-z0-9-]+\.netlify\.app\b")
-    urls = [m.group(0) for cm in rest(f"repos/{repo}/issues/{pr}/comments")
-            if (cm.get("user") or {}).get("login") == NETLIFY_BOT  # only Netlify's own bot: anyone can type a URL
-            for m in [url_re.search(cm.get("body") or "")] if m]
-    if not urls:
-        out({"item": a.item, "preview": None, "note": "no Netlify deploy preview on the PR yet"})
+    url = preview_url(c, *ref)
+    if not url:
+        out({"item": a.item, "preview": None, "note": "no deploy preview on the PR yet"})
         return
-    set_text(c, a.item, c["fields"]["preview"], urls[-1])
+    set_text(c, a.item, c["fields"]["preview"], url)
     sync_links(c, a.item)
-    out({"item": a.item, "preview": urls[-1]})
+    out({"item": a.item, "preview": url})
 
 
 def read_body():
@@ -179,6 +216,7 @@ def cmd_ask(a):
     set_single(c, a.item, c["fields"]["waiting"]["id"], c["fields"]["waiting"]["you"])
 
     advance_cursor(a.item, asked=cm.get("created_at"))
+    record(a.item, "ask", round=rounds + 1)
     out({"url": cm["html_url"], "round": rounds + 1})
 
 
@@ -253,6 +291,8 @@ def cmd_prepare(a):
     if ref:
         worker_pr(a.item, ref)
         res["prState"] = call(cmd_pr_state, repo=ref[0], pr=ref[1])
+    res["repoConfig"] = repo_config(c, it["issueRepo"])  # test / lint commands, reviewers, ... from the repo's .cgp.json
+    res["settings"] = {"draftPRs": bool(c["settings"].get("draftPRs"))}
     res["worktree"] = call(cmd_worktree, item=a.item)
     if "error" not in res["worktree"]:
         res["sync"] = call(cmd_sync, item=a.item)

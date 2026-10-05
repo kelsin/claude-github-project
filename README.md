@@ -4,7 +4,7 @@ A Claude Code plugin that turns a GitHub Projects v2 board into an agent pipelin
 
 It has three parts:
 
-- **Skills**: `/cgp:setup` configures a board, `/cgp:run` runs the loop, `/cgp:status` shows the board, `/cgp:stop` stops the loop cleanly, `/cgp:doctor` checks the installation.
+- **Skills**: `/cgp:setup` configures a board, `/cgp:run` runs the loop, `/cgp:add` puts a story on the board (or imports issues by label), `/cgp:status` shows the board, `/cgp:stop` stops the loop cleanly, `/cgp:doctor` checks the installation.
 - **`scripts/cgp`**: a Python CLI doing every deterministic step (GraphQL, comments, CI polling, merging, worktrees), so agents only make decisions. Python 3.8+ and `gh` are the only requirements; macOS and Linux (WSL on Windows).
 - **A mod**: a band above the prompt showing the board link, what is waiting on you, and one line per active worker ([details](docs/mod.md)).
 
@@ -24,7 +24,7 @@ gh auth refresh -s project
 ## Use
 
 1. From a checkout of one of your repos: `/cgp:setup https://github.com/orgs/<org>/projects/<n>` (or `/users/<user>/projects/<n>`).
-   - Replaces the Status options with the 8 columns below (a board in the old ten-column layout is refused, see [migration](docs/migration.md)), adds fields `Waiting On`, `Plan`, `PR`, `Preview` (the Netlify deploy preview URL, copied from the PR by `cgp preview`) and `Auto Approve` (see below; run setup again on an existing board to get it), links the current repo to the board and records its local path. It also adds three tabs if the board lacks them (an untouched starter "View 1" becomes the first): **Tasks** (table), **Board** (columns by Status) and **Approvals** (Status board filtered to Plan Review and PR Review). GitHub's API can't set a view's grouping or sort, so turn on group-by Repository in Board and Approvals yourself if you want it; existing views are never changed.
+   - Replaces the Status options with the 8 columns below (a board in the old ten-column layout is refused, see [migration](docs/migration.md)), adds fields `Waiting On`, `Plan`, `PR`, `Preview` (the Netlify deploy preview URL, copied from the PR by `cgp preview`) `Auto Approve` and `Priority` (see below; run setup again on an existing board to get it), links the current repo to the board and records its local path. It also adds three tabs if the board lacks them (an untouched starter "View 1" becomes the first): **Tasks** (table), **Board** (columns by Status) and **Approvals** (Status board filtered to Plan Review and PR Review). GitHub's API can't set a view's grouping or sort, so turn on group-by Repository in Board and Approvals yourself if you want it; existing views are never changed.
    - `/cgp:setup <url> --dry-run` shows what would change without touching the board. Existing items whose old status name matches a new column keep it, closed issues go to Done, everything else lands in Todo. Closed issues anywhere on the board are filed under Done.
    - Run it again from another repo's checkout (same URL) to link more repos. Repos without a known local path are asked for.
 2. `/cgp:run`. Add stories to Todo on the board (issues, or draft items which get converted to issues in the repo the agent picks) and leave it running. It ends only when every story is Done, or when you stop it. To stop cleanly, press **Stop after this cycle** in the board band above the prompt (or run `scripts/cgp stop [board-url-or-key]` from a separate shell; the argument may be left out when exactly one live session holds a board lock, otherwise pass the board URL): the loop lets the running workers finish, then stops before dispatching more. `/cgp:run` picks up from the board.
@@ -45,6 +45,8 @@ gh auth refresh -s project
 | 🎉 Done | nobody | |
 
 Colors: Todo blue, Plan yellow, Plan Review purple, Plan Approved blue, Implement red, PR Review purple, PR Approved blue, Done green.
+
+**Priority.** Set a story's `Priority` to High, Medium or Low and stories in the same column are dispatched in that order (unset after Low); `Hold` keeps a story from being dispatched at all. `scripts/cgp add "<title>" --priority High` creates an issue and puts it on the board; `scripts/cgp import <label>` adds existing labelled issues.
 
 **Skip planning.** Type `Skip` in a Todo story's `Plan` field and no plan is made: the worker writes `- Plan: Skip` into the story description instead of a plan link and moves the story from Todo straight to Implement, working from the description and iterating there.
 
@@ -77,7 +79,7 @@ claude plugin test .                           # mod tests (hooks/*.test.ts); ne
                                                # builds older than ~2.1.280 warn about `types`/`modules` and skip the band)
 ```
 
-Not covered by tests: the real GitHub GraphQL schema and a live agent run. Test against a throwaway board first.
+The unit tests use a fake gh, so the real GraphQL schema is not covered. `CGP_LIVE_TEST=1 CGP_LIVE_BOARD=<board url> python3 tests/live_smoke.py` runs the read-only commands against a throwaway board with your real token. A live agent run is not covered either: try a throwaway board first.
 
 ## License
 

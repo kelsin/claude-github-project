@@ -8,6 +8,8 @@ from .gh import rest
 from .store import cfg, load_data, load_json, lock_file, lock_holder, save_board, state_path, stop_requested, update_data, update_state
 from .board import board_keys, clear_field, ensure_story_option, fetch_items, fetch_project, fields_by_name, get_item, parse_item, parse_pr_ref, rank, set_single
 from .gitwt import cleanup_worktree
+from .notify import check
+from .repoconf import merged_globs
 from .story import process_replies
 
 
@@ -39,7 +41,7 @@ def pick_compatible(c, actionable, live, in_flight):
     don't collide with each other or with a worker already running; the rest wait (deferred) so no worker is spent on a story
     that would only block. Greedy by fewest conflicts, board order breaking ties."""
     touches = load_data().get("touches", {})
-    patterns = c["settings"]["sharedFiles"]
+    patterns = merged_globs(c, "sharedFiles", {i["issueRepo"] for i in actionable})
     files = lambda i: {norm_path(f) for f in touches.get(i["item"], [])}
     gate = lambda i: i["column"] == "plan_approved" or (i["column"] == "implement" and not i["pr"])
     cands = [i for i in actionable if gate(i)]
@@ -66,7 +68,7 @@ def stalled_workers(c):
     limit = c["settings"]["maxWorkerMinutes"] * 60
     if not limit:
         return []
-    return [{"item": w["item"], "title": w.get("title"), "minutes": round(age_seconds(w.get("startedAt")) / 60)}
+    return [{"item": w["item"], "title": w.get("title"), "startedAt": w.get("startedAt"), "minutes": round(age_seconds(w.get("startedAt")) / 60)}
             for w in load_json(state_path(), {}).get("workers", []) if age_seconds(w.get("startedAt")) > limit]
 
 
@@ -104,14 +106,16 @@ def snapshot(c):
     blocked = [i for i in live if i["blockedBy"] and (i["column"] == "plan_approved"
                                                       or (i["column"] == "implement" and not i["pr"]))]
     in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these
-    actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and i not in blocked
+    actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and not i["held"] and i not in blocked
                   and i["item"] not in in_flight]
-    actionable.sort(key=lambda i: ACTIONABLE.index(i["column"]))
+    actionable.sort(key=lambda i: (ACTIONABLE.index(i["column"]), i["priorityRank"]))  # stable: board order breaks ties
     actionable, deferred = pick_compatible(c, actionable, live, in_flight)
     waiting = [i for i in live if i["waiting"]]
     cap = c["settings"]["concurrency"]
     batch = [] if stop_requested() else actionable[: max(cap - len(in_flight), 0)] if cap > 0 else actionable  # a stop request dispatches nothing new
     status = "done" if not live else "work" if batch else "idle"  # idle also when the cap is full
+    stalled = stalled_workers(c)
+    check(c, items, stalled)
     snap = {
         "status": status,
         "stopRequested": stop_requested(),
@@ -124,7 +128,8 @@ def snapshot(c):
         "waitingOnYou": waiting,
         "blocked": [{"title": i["title"], "blockedBy": i["blockedBy"], "blockers": i["blockers"]} for i in blocked],
         "deferred": [{"title": i["title"], "conflictsWith": i["conflictsWith"]} for i in deferred],
-        "stalled": stalled_workers(c),
+        "stalled": stalled,
+        "held": [i["title"] for i in live if i["held"]],
         "items": items,
     }
 
@@ -171,6 +176,7 @@ def cmd_status(a):
     res = {"board": c["board"], "counts": {k: len(v) for k, v in by_col.items()}, "done": done,
            "waitingOnYou": [{"title": i["title"], "url": i["url"]} for i in live if i["waiting"]],
            "blocked": [b for b in blocked if b["blockedBy"]], "workers": workers,
+           "held": [i["title"] for i in live if i["held"]],
            "loop": {"session": session, "heartbeatMinutes": round((time.time() - lock["at"]) / 60, 1)} if lock else None,
            "review": {k: [{"title": i["title"], "url": i["url"]} for i in by_col.get(k, [])] for k in ("plan_review", "pr_review")}}
     if a.json:
@@ -190,6 +196,8 @@ def cmd_status(a):
                 print(f"   {r['title']}  {r['url']}")
     for w in workers:
         print(f"{emoji.get(w['column'], '•')} {w['title']} · {w.get('phase', '?')}{' (' + w['detail'] + ')' if w.get('detail') else ''} · {w['minutes']} min")
+    if res["held"]:
+        print(f"⏸ On hold ({len(res['held'])}): {', '.join(res['held'])}")
     for b in res["blocked"]:
         print(f"⛓ {b['title']} waits for {', '.join(b['blockedBy'])}")
 
@@ -246,7 +254,7 @@ def cmd_overlap(a):
     items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
     blocks = st.get("blocks", {})
     found, unknown = [], []
-    patterns = c["settings"]["sharedFiles"]
+    patterns = merged_globs(c, "sharedFiles", {me["issueRepo"]})
     for o in items:
         if (o["item"] == a.item or o["kind"] != "issue" or o["closed"] or o["archived"]
                 or o["column"] in ("todo", "done")):

@@ -19,4 +19,6 @@ When a worker moves a story to PR Review, `cgp move` records the PR's head commi
 
 Story titles are text anyone can write. They never travel through a command line (`cgp worker start <item>` reads the title from the board) and the worker spawn prompt carries only ids; titles reach a worker through `cgp prepare`, as data.
 
+A repo's `.cgp.json` is read only from its default branch and can only add guarded files, never remove them. The `notifyCommand` receives story text through environment variables, never on its command line.
+
 `cgp doctor` checks whether the permission denies recommended above are present in your Claude Code settings.

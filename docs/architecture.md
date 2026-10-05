@@ -19,6 +19,12 @@ The plugin has three parts: skills (prompts), the `scripts/cgp` CLI that does ev
 | `story` | comments, questions, feedback, field updates, `move`, `prepare` |
 | `sched` | which stories are actionable, file overlap and blocking, `list` / `status` / `wait` |
 | `doctor` | `doctor` and `gc` |
+| `intake` | `add` and `import` (stories onto the board) |
+| `history` | the per-story event log, `replay` and `report` |
+| `notify` | the `notifyCommand` hook |
+| `repoconf` | a repo's `.cgp.json` (read from its default branch) |
+| `models` | the model per sub-agent role |
+| `gitutil` | plain git helpers |
 | `cli` | the command table (`COMMANDS`) and argument parsing |
 
 Add a command by writing `cmd_<name>(a)` in the module it belongs to and adding one row to `COMMANDS` in `cli.py`; `scripts/gen-cli-docs` regenerates [cli.md](cli.md) from that table.

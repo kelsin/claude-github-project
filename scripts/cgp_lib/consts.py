@@ -44,22 +44,30 @@ WAITING_FIELD = "Waiting On"
 AUTO_FIELD = "Auto Approve"  # single-select Plan / PR / Both, set by the user: the agent may then pass that human gate itself
 AUTO_OPTIONS = ("Plan", "PR", "Both")
 SKIP = "skip"  # a Plan field of "Skip" (set by the user on a Todo story) means the story is implemented without a plan
+PRIORITY_FIELD = "Priority"  # single-select; stories are dispatched High before Medium before Low before unset, Hold is never dispatched
+PRIORITY_OPTIONS = (("High", "RED"), ("Medium", "YELLOW"), ("Low", "BLUE"), ("Hold", "GRAY"))
 STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a blocker; "You" is the user
 # concurrency 0 = no cap; sharedFiles: fnmatch globs for files many stories edit (registries, lockfiles): overlaps on them never block
 # remoteControl 1: /cgp:run turns on Remote Control for its session (desktop app only), so the loop can be followed from claude.ai or the phone
+# previewProvider: netlify | vercel | cloudflare | deployments (a repo's .cgp.json "preview" overrides it)
+# draftPRs 1: workers open PRs as drafts and `cgp move ... pr_review` marks them ready
+# plannerModel / reviewerModel / implementerModel: sonnet | opus | haiku | fable, or low:haiku,medium:sonnet,high:opus (see models.py)
+# notifyCommand: a command run when a story starts waiting on you, enters a review column, is Done or stalls (see notify.py)
 # maxWorkerMinutes: a worker running longer is reported as stalled by `cgp list` (0 = never), so the loop can release its story
 # guardFiles: fnmatch globs (tried on the path and on its file name) for files an agent may only change when the approved plan lists them
-DEFAULTS = {"concurrency": 0, "pollSeconds": 30, "remoteControl": 1, "maxWorkerMinutes": 240,
+DEFAULTS = {"concurrency": 0, "pollSeconds": 30, "remoteControl": 1, "notifyCommand": "", "previewProvider": "netlify", "draftPRs": 0,
+            "plannerModel": "", "reviewerModel": "", "implementerModel": "", "maxWorkerMinutes": 240,
             "guardFiles": [".github/*", "CODEOWNERS", "*/CODEOWNERS", ".husky/*", ".pre-commit-config.yaml", ".npmrc", ".yarnrc*",
                            "Makefile", "Dockerfile*", ".gitmodules", ".claude/*", ".mcp.json"],
             "sharedFiles": ["*package-lock.json", "*yarn.lock", "*pnpm-lock.yaml", "*.schema.json", "*locales/*",
                             "*__snapshots__/*", "*.md"]}
+STRING_SETTINGS = ("notifyCommand", "previewProvider", "plannerModel", "reviewerModel", "implementerModel")
 PR_URL = re.compile(r"^https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pull/(\d+)/?$")
 # name, layout, visible fields, filter. The same three tabs as the 18xx-maker board. The API can set a view's name, layout,
 # visible fields and filter, but not its grouping or sort, so "Board" and "Approvals" are columns by Status (GitHub's default)
 # and group-by Repository is left for the user to turn on.
 VIEWS = [
-    ("Tasks", "TABLE_LAYOUT", ["Title", "Status", "Repository", WAITING_FIELD, "Plan", "PR", "Preview", AUTO_FIELD], ""),
+    ("Tasks", "TABLE_LAYOUT", ["Title", "Status", "Repository", WAITING_FIELD, "Plan", "PR", "Preview", AUTO_FIELD, PRIORITY_FIELD], ""),
     ("Board", "BOARD_LAYOUT", ["Title", "Assignees", "Status"], ""),
     ("Approvals", "BOARD_LAYOUT", ["Title", "Status"],
      "status:" + ",".join(f'"{e} {n}"' for k, n, e, _ in COLUMNS if k in ("plan_review", "pr_review"))),

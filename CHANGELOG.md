@@ -13,6 +13,10 @@ Fixes
 - Replies to a question are fetched since the question was posted instead of paging through every comment on every poll.
 - `paths.json` is updated under the state lock; the lock is re-entrant.
 
+Features
+- `Priority` field (High / Medium / Low / Hold) orders dispatch within a column; Hold is never dispatched. `cgp add` / `cgp import` (and `/cgp:add`) put stories on the board from the terminal.
+- `notifyCommand` hook; per-story history with `cgp replay` and `cgp report`; `.cgp.json` per-repo settings (`cgp repo-config`); preview providers Netlify, Vercel, Cloudflare Pages and the Deployments API; `plannerModel` / `reviewerModel` / `implementerModel` with `cgp models`; `draftPRs`.
+
 New
 - `cgp status` (human-readable, read-only), `cgp doctor`, `cgp gc`, `cgp setup --dry-run`; skills `/cgp:status`, `/cgp:stop`, `/cgp:doctor`.
 - `docs/` (architecture, safety, settings, migration, troubleshooting, generated CLI reference); LICENSE.

@@ -7,12 +7,12 @@ import shutil
 import subprocess
 import sys
 import time
-from .consts import AUTO_FIELD, HOME, LOCK_STALE_SECONDS, LOCKS, STORY_OPTION, TEXT_FIELDS, WAITING_FIELD
+from .consts import AUTO_FIELD, PRIORITY_FIELD, HOME, LOCK_STALE_SECONDS, LOCKS, STORY_OPTION, TEXT_FIELDS, WAITING_FIELD
 from .util import die, out, strip_id
 from .gh import gh
 from .store import list_boards, load_board, load_json
 from .board import fetch_items, fetch_project, fields_by_name, parse_board_url, parse_item
-from .gitwt import git
+from .gitutil import git
 
 # Permission rules the README recommends for sessions that run the loop; doctor only reports whether they are present.
 RECOMMENDED_DENY = ("Bash(gh pr merge:*)", "Bash(gh auth token:*)", "Bash(gh api graphql:*)")
@@ -134,7 +134,7 @@ def cmd_doctor(a):
             continue
         fields = fields_by_name(proj)
         missing = [n for n in (WAITING_FIELD, *TEXT_FIELDS.values()) if n not in fields]
-        check(f"{title}: Auto Approve field", AUTO_FIELD in fields, "run /cgp:setup again", warn=True)
+        check(f"{title}: Auto Approve and Priority fields", {AUTO_FIELD, PRIORITY_FIELD} <= set(fields), "run /cgp:setup again", warn=True)
         check(f"{title}: fields", not missing, f"missing {missing}: run /cgp:setup again" if missing else "")
         waiting = fields.get(WAITING_FIELD, {})
         check(f"{title}: Waiting On has 'You' and '{STORY_OPTION}'",

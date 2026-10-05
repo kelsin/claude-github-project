@@ -68,7 +68,7 @@ def board_file(key):
 def list_boards():
     ensure_home()
     keys = [f[:-5] for f in sorted(os.listdir(BOARDS))
-            if f.endswith(".json") and not f.endswith(".data.json")] if os.path.isdir(BOARDS) else []
+            if f.endswith(".json") and not f.endswith((".data.json", ".history.json"))] if os.path.isdir(BOARDS) else []
     return keys
 
 

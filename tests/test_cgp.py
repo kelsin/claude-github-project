@@ -14,7 +14,7 @@ def load_cgp():
     sys.path.insert(0, os.path.join(ROOT, "scripts"))
     try:
         ns = types.SimpleNamespace(mods={})  # mods: the modules themselves, for patching a function where it is used
-        for sub in ("gh", "store", "board", "sched"):
+        for sub in ("gh", "store", "board", "sched", "history", "models"):
             ns.mods[sub] = importlib.import_module(f"cgp_lib.{sub}")
             vars(ns).update({k: v for k, v in vars(ns.mods[sub]).items() if not k.startswith("__")})
         return ns
@@ -119,7 +119,7 @@ class TestSetup(Base):
         views = {v["name"]: v for v in self.read_db()["views"]}
         self.assertEqual(views["Tasks"]["layout"], "TABLE_LAYOUT")
         self.assertEqual(views["Approvals"]["filter"], 'status:"🙋 Plan Review","🚦 PR Review"')
-        self.assertEqual(len(views["Tasks"]["fieldIds"]), 8)
+        self.assertEqual(len(views["Tasks"]["fieldIds"]), 9)
         self.assertEqual(self.setup_board()["viewsCreated"], [])
         self.assertEqual(len(self.read_db()["views"]), 3)
 

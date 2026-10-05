@@ -33,3 +33,15 @@ jobs:
           git config --global user.email ci@example.com
           git config --global init.defaultBranch main
       - run: python3 -m unittest discover -s tests
+
+  mod:
+    # The band's tests need a Claude Code build that knows mods (`claude plugin test`); not required to pass until that is in a release.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install -g @anthropic-ai/claude-code
+      - run: claude plugin test .
