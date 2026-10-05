@@ -10,6 +10,10 @@ from .store import cfg, ensure_home, list_boards, load_board, load_json, lock_fi
 from .board import get_item, parse_board_url
 
 
+def session_title(kind, name):
+    return f"{'🚀' if kind == 'run' else '🛠️'} {name}"
+
+
 def cmd_use(a):
     """Bind this session to a board and claim its loop. Exit 5: another live session runs it; 6: which board?"""
     keys = list_boards()
@@ -38,7 +42,8 @@ def cmd_use(a):
     if os.path.exists(stop_path()):
         os.remove(stop_path())  # a stop request left from an earlier run
     c = boards[key]
-    res = {"board": c["board"], "session": sid(), "remoteControl": bool(c["settings"].get("remoteControl", 1))}
+    res = {"board": c["board"], "session": sid(), "remoteControl": bool(c["settings"].get("remoteControl", 1)),
+           "sessionTitle": session_title("run", c["board"]["title"])}
     out(res)
 
 
@@ -60,7 +65,7 @@ def cmd_session_title(a):
             found = next((b for b in boards if safe(b["id"]) == key), None) or (boards[0] if len(boards) == 1 else None)
             name = found["title"] if found else None
         if name:
-            out({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "sessionTitle": f"{'🚀' if m.group(1) == 'run' else '🛠️'} {name}"}})
+            out({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "sessionTitle": session_title(m.group(1), name)}})
     except (Exception, SystemExit):
         return  # a naming hook must never get in the way of the prompt
 

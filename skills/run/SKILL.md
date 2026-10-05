@@ -17,7 +17,8 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
    - Exit 5 (another live session is running this board): tell the user and ask whether that session is gone; only then `CGP use <url> --takeover`.
    Each session works one board; parallel sessions must use different boards.
 2. If the output has `remoteControl: true` and you have the `set_remote_control` tool of the ccd_session_mgmt server (a deferred tool: load it with ToolSearch; it exists only in the Claude desktop app), call it with `session_id: "self"` and `enabled: true` so the user can follow and steer the loop from claude.ai/code or the mobile app. The app asks the user to approve it. Best effort: no tool, a refusal or a declined approval is mentioned in one line and never stops the run. Skip it when `remoteControl` is false.
-3. `CGP list --brief` and tell the user the board URL and the counts once.
+3. If you have the `set_session_title` tool of the ccd_session_mgmt server (deferred, like `set_remote_control`), call it with `session_id: "self"` and `title` set to the output's `sessionTitle`, because the prompt hook can only name the session when the board is given or the only one. Best effort: no tool or a refusal never stops the run.
+4. `CGP list --brief` and tell the user the board URL and the counts once.
 
 ## Cycle (repeat forever)
 

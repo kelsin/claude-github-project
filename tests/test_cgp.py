@@ -871,6 +871,11 @@ class TestSessionTitle(Base):
         self.assertEqual(self.title("/cgp:run https://github.com/orgs/acme/projects/1"), f"🚀 {board}")
         self.assertEqual(self.title("/cgp:setup https://github.com/orgs/other/projects/7"), "🛠️ other project 7")
 
+    def test_use_returns_the_title_for_the_skill_to_apply(self):
+        self.setup_board()
+        board = self.cgp("list")["board"]["title"]
+        self.assertEqual(self.cgp("use", "https://github.com/orgs/acme/projects/1")["sessionTitle"], f"🚀 {board}")
+
     def test_a_bad_url_never_makes_the_hook_fail(self):
         self.assertIsNone(self.title("/cgp:run https://example.com/not-a-board"))
 
