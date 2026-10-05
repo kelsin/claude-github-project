@@ -42,7 +42,7 @@ Agents ask questions as comments on the story and wait for your reply. Per-story
 - [Safety](docs/safety.md): threat model, human gates, recommended permission rules
 - [Settings](docs/settings.md) and the [CLI reference](docs/cli.md)
 - [The mod](docs/mod.md), [troubleshooting](docs/troubleshooting.md), [the ten-column layout](docs/migration.md)
-- [Architecture](docs/architecture.md) and [Development](docs/development.md)
+- [Architecture](docs/architecture.md) and [Development](docs/development.md) (tests, releases)
 - [Changelog](CHANGELOG.md)
 
 ## License
