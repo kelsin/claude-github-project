@@ -9,4 +9,4 @@ Planning and plan review in one run. Stories arrive from Todo (no `plan` link ye
 4. `CGP worker phase <item> revising`. Spawn agents to apply every accepted finding (one per independent section). Record each finding and its resolution in the Review log; reject a finding only with a reason recorded there.
 5. A finding that needs a decision only the user can make goes in the plan's Open questions and `CGP ask` with your proposed default; then stop without moving.
 6. Make sure the published artifact is current, then post a status comment (plan link, rating, key assumptions, review summary and counts).
-7. `CGP move <item> plan_approval` (the user's Plan Review column).
+7. If `story.autoApprove.plan` is true (the user set Auto Approve to Plan or Both), add "auto-approved" to the status comment and `CGP move <item> plan_approved` (the CLI allows it from here only because of that field); the next cycle starts Plan Approved. Otherwise `CGP move <item> plan_approval` (the user's Plan Review column).
