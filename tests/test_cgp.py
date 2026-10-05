@@ -521,7 +521,8 @@ class TestOverlap(Base):
         self.cgp("block", "i2", "i1")
 
 
-class TestSync(Base):
+class SyncBase(Base):
+    """Shared fixture (origin + clone + worktree); has no tests of its own so subclasses don't re-run them."""
     def git(self, path, *args):
         subprocess.run(["git", "-C", path, *args], check=True, capture_output=True, text=True,
                        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
@@ -547,6 +548,8 @@ class TestSync(Base):
         self.git(self.clone, "commit", "-qam", "main moves")
         self.git(self.clone, "push", "-q", "origin", "HEAD:main")
 
+
+class TestSync(SyncBase):
     def test_clean_then_rebased(self):
         self.assertEqual(self.cgp("sync", "i1")["state"], "clean")
         with open(os.path.join(self.wt, "g.txt"), "w") as f:
@@ -680,7 +683,7 @@ class TestMoreOverlap(Base):
         self.assertEqual(self.cgp("list")["blocked"], [])
 
 
-class TestMoreSync(TestSync):
+class TestMoreSync(SyncBase):
     def test_non_conflict_failure_is_an_error_not_a_conflict(self):
         with open(os.path.join(self.wt, "g.txt"), "w") as f:
             f.write("untracked, will collide\n")
@@ -1020,7 +1023,34 @@ class TestWorkers(Base):
             self.cgp("worker", "start", i, "todo", i)
         p = subprocess.Popen([sys.executable, CGP, "wait", "--timeout", "30", "--interval", "1"],
                              stdout=subprocess.PIPE, text=True, env=self.env)
-        time.sleep(1)
+        # stop the worker only once wait has finished its first snapshot (its baseline) and started a second;
+        # a fixed sleep races a slow process start under load
+        def gh_calls():
+            try:
+                with open(self.db + ".invocations") as f:
+                    return len(f.read().splitlines())
+            except OSError:
+                return 0
+
+        def until(cond, what):
+            deadline = time.time() + 20
+            while not cond():
+                self.assertLess(time.time(), deadline, f"wait never reached: {what}")
+                time.sleep(0.05)
+
+        base = gh_calls()
+        until(lambda: gh_calls() > base, "first snapshot")
+        seen, quiet = gh_calls(), time.time()
+
+        def settled():
+            nonlocal seen, quiet
+            n = gh_calls()
+            if n != seen:
+                seen, quiet = n, time.time()
+            return time.time() - quiet > 0.4
+
+        until(settled, "end of first snapshot")
+        until(lambda: gh_calls() > seen, "second snapshot")
         self.cgp("worker", "stop", "i1")
         out, _ = p.communicate(timeout=10)
         r = json.loads(out)
