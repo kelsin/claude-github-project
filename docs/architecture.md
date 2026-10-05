@@ -36,7 +36,7 @@ Add a command by writing `cmd_<name>(a)` in the module it belongs to and adding 
 
 ## Sub-agent sizing
 
-Workers rate each story low / medium / high on complexity and risk (auth, migrations, money, public APIs, infra, concurrency, irreversibility) and size planners, reviewers and implementers from it, e.g. 1 / 2 / 3-4 reviewers with different lenses. The rating is posted in the status comment. Whether a worker can spawn its own sub-agents depends on your Claude Code build; if it cannot, it does the same passes itself in sequence.
+Workers rate each story low / medium / high on complexity and risk (auth, migrations, money, public APIs, infra, concurrency, irreversibility) and size planners, reviewers and implementers from it, e.g. 1 / 2 / 3-4 reviewers with different lenses. The rating is posted in the status comment. Sub-agents are mandatory: every planning, review, implementation and fix phase spawns at least one (the status comment lists the counts per phase). A worker works inline only after the Agent tool is missing or a spawn call fails, and says so in a status comment quoting the error.
 
 ## Parallel sessions (one board per session)
 

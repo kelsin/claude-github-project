@@ -2,6 +2,7 @@
 import json
 import os
 import stat
+import unittest
 
 import test_cgp
 
@@ -179,3 +180,21 @@ class TestDraftPRs(PRBase):
         self.force("i1", "implement")
         self.cgp("move", "i1", "pr_review")
         self.assertEqual(len(self.calls("ready")), 1)  # a PR that is not a draft is left alone
+
+
+class TestMandatorySubagents(unittest.TestCase):
+    def read(self, name):
+        with open(os.path.join(test_cgp.ROOT, "skills", "run", "columns", name)) as f:
+            return f.read()
+
+    def test_shared_rules_require_sub_agents(self):
+        s = self.read("shared.md")
+        self.assertIn("at least one", s)
+        self.assertNotIn("do the same passes yourself", s)
+        self.assertNotIn("ran inline", s)
+        with open(os.path.join(test_cgp.ROOT, "skills", "run", "SKILL.md")) as f:
+            self.assertIn("Agent tool", f.read())
+
+    def test_column_files_spawn_at_least_one(self):
+        for name in ("implement.md", "plan.md"):
+            self.assertIn("at least one", self.read(name))
