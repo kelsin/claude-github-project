@@ -41,6 +41,13 @@ def process_replies(c, items):
             update_data(lambda d, i=it["item"]: d.setdefault("answered", []).append(i))
 
 
+def auto_allows(c, it, target):
+    """True when the user's Auto Approve field lets the agent pass the human gate `target` for this item: only from the agent column
+    just before it, and a PR needs its link."""
+    auto = {"plan_approved": ("plan", "plan"), "pr_approved": ("pr", "implement")}.get(target)
+    return bool(auto and it["autoApprove"][auto[0]] and it["column"] == auto[1] and (auto[0] == "plan" or parse_pr_ref(c, it["pr"])))
+
+
 def cmd_move(a):
     c = cfg()
     a.column = KEY_RENAMES.get(a.column, a.column)  # the user's columns were called plan_approval / pr_approval before schema 3
@@ -50,10 +57,12 @@ def cmd_move(a):
     if it["column"] == a.column:
         out({"item": a.item, "column": a.column, "unchanged": True, "note": f"already in {a.column}"})
         return
-    # the user's Auto Approve field delegates a gate to the agent: only from the agent column just before it, and a PR needs its link
-    auto = {"plan_approved": ("plan", "plan"), "pr_approved": ("pr", "implement")}.get(a.column)
-    if a.column in ("plan_approved", "pr_approved") and not (
-            auto and it["autoApprove"][auto[0]] and it["column"] == auto[1] and (auto[0] == "plan" or parse_pr_ref(c, it["pr"]))):
+    requested = None
+    gate = {"plan_review": "plan_approved", "pr_review": "pr_approved"}.get(a.column)
+    if gate and auto_allows(c, it, gate):  # the field is read live: the user may have set it after the worker started
+        requested, a.column = a.column, gate
+    # the user's Auto Approve field delegates a gate to the agent
+    if a.column in ("plan_approved", "pr_approved") and not auto_allows(c, it, a.column):
         die(f"only the user moves stories into {a.column}; it is a human approval (unless Auto Approve covers it)")
     if it["column"] in ("plan_review", "pr_review"):
         die(f"story is in {it['column']}: only the user moves it out")
@@ -69,6 +78,9 @@ def cmd_move(a):
         if not shown or not shown.get("headRefOid"):
             die("could not read the PR head; not moving the story to pr_review")
     set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
+    if requested == "pr_review":  # redirected to pr_approved: no review to record, but a merge refuses a draft
+        if (pr_view(*ref, check=False) or {}).get("isDraft"):
+            gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
     if shown:
         if shown["isDraft"]:  # draftPRs opens PRs as drafts: ready for review now
             gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
@@ -86,7 +98,7 @@ def cmd_move(a):
                     w.update(phase=DEFAULT_PHASE[a.column], phaseAt=now_iso())
     update_state(upd)
     update_data(lambda d: d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]))
-    out({"item": a.item, "column": a.column})
+    out({"item": a.item, "column": a.column, **({"autoApproved": True, "requested": requested} if requested else {})})
 
 
 def snapshot_touches(item):
