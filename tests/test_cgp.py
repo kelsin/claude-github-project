@@ -1023,7 +1023,34 @@ class TestWorkers(Base):
             self.cgp("worker", "start", i, "todo", i)
         p = subprocess.Popen([sys.executable, CGP, "wait", "--timeout", "30", "--interval", "1"],
                              stdout=subprocess.PIPE, text=True, env=self.env)
-        time.sleep(1)
+        # stop the worker only once wait has finished its first snapshot (its baseline) and started a second;
+        # a fixed sleep races a slow process start under load
+        def gh_calls():
+            try:
+                with open(self.db + ".invocations") as f:
+                    return len(f.read().splitlines())
+            except OSError:
+                return 0
+
+        def until(cond, what):
+            deadline = time.time() + 20
+            while not cond():
+                self.assertLess(time.time(), deadline, f"wait never reached: {what}")
+                time.sleep(0.05)
+
+        base = gh_calls()
+        until(lambda: gh_calls() > base, "first snapshot")
+        seen, quiet = gh_calls(), time.time()
+
+        def settled():
+            nonlocal seen, quiet
+            n = gh_calls()
+            if n != seen:
+                seen, quiet = n, time.time()
+            return time.time() - quiet > 0.4
+
+        until(settled, "end of first snapshot")
+        until(lambda: gh_calls() > seen, "second snapshot")
         self.cgp("worker", "stop", "i1")
         out, _ = p.communicate(timeout=10)
         r = json.loads(out)
