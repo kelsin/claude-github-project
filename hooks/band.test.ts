@@ -4,7 +4,11 @@ const now = Date.parse('2026-10-03T12:00:00Z')
 const state = (over: object) =>
   JSON.stringify({
     board: { title: 'My Board', url: 'https://github.com/users/kelsin/projects/3' },
-    counts: { plan_approval: 2, pr_approval: 1 },
+    counts: { plan_review: 2, pr_review: 1 },
+    meta: {
+      emoji: { plan: '🧠', plan_review: '🙋', implement: '🔨', pr_review: '🚦' },
+      phases: { planning: ['🧠', 'planning'], reviewing: ['🔍', 'reviewing'], ci: ['⏳', 'waiting on CI'] },
+    },
     waiting: [],
     workers: [
       { item: 'a', column: 'implement', title: 'Story A' },

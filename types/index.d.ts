@@ -9,6 +9,8 @@ export type BoardView = {
   blocked: number
   workers: Worker[]
   stopping: boolean
+  emoji: Record<string, string>
+  phases: Record<string, [string, string]>
 }
 
 declare module 'claude-code' {

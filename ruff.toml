@@ -1,3 +1,5 @@
+target-version = "py38"
+
 [lint]
-# correctness only: the codebase is deliberately dense (semicolons, one-line lambdas)
-select = ["E9", "F"]
+# correctness and likely bugs only: the codebase is deliberately dense (semicolons, one-line lambdas)
+select = ["E9", "F", "B"]

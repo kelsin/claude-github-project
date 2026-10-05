@@ -39,11 +39,13 @@ def seq(entry):
     return entry
 
 
-if args[:2] == ["auth", "status"]:
+if args[:1] == ["--version"]:
+    print("gh version 2.0.0")
+elif args[:2] == ["auth", "status"]:
     print(f"Token scopes: {db['scopes']}")
 elif args[:2] == ["api", "user"]:
     print("kelsin")
-elif args[0] == "pr" and args[1] in ("view", "merge", "checks", "update-branch"):
+elif args[0] == "pr" and args[1] in ("view", "merge", "checks", "update-branch", "ready"):
     repo, num = args[args.index("-R") + 1], args[2]
     key = f"{repo}#{num}"
     db.setdefault("calls", []).append(args)
@@ -51,7 +53,7 @@ elif args[0] == "pr" and args[1] in ("view", "merge", "checks", "update-branch")
         prs = db.get("prs")
         if prs is not None and key not in prs:
             sys.exit(f"fakegh: no pull request {key}")
-        v = seq(prs[key]) if prs is not None else seq(db.get("pr_view", {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"}))
+        v = seq(prs[key]) if prs is not None else seq(db.get("pr_view", {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "isDraft": False, "headRefOid": "aaa111", "headRefName": f"cgp/{num}"}))
         save()
         print(json.dumps(v))
     elif args[1] == "checks":
@@ -96,6 +98,13 @@ elif args[:2] == ["api", "graphql"]:
         if v.get("c"):
             view["fieldIds"] = v["c"]["visibleFieldIds"]
         r = {}
+    elif "addProjectV2ItemById" in q:
+        issue = next(i for lst in db.get("repo_issues", {}).values() for i in lst if i["node_id"] == v["c"])
+        item = {"id": f"item{len(db['items']) + 1}", "values": {}, "content": {
+            "__typename": "Issue", "number": issue["number"], "title": issue["title"], "state": "OPEN", "url": issue["html_url"],
+            "repository": {"nameWithOwner": issue["repo"]}}}
+        db["items"].append(item)
+        r = {"addProjectV2ItemById": {"item": {"id": item["id"]}}}
     elif "updateProjectV2ItemFieldValue" in q:
         fname = next(x["name"] for x in db["fields"] if x["id"] == v["f"])
         item = next(i for i in db["items"] if i["id"] == v["i"])
@@ -147,6 +156,26 @@ elif args[0] == "api" and any(re.match(r"repos/[^/]+/[^/]+/(pulls/\d+/(comments|
     else:
         m = re.match(r"repos/([^/]+/[^/]+)/pulls/(\d+)/(comments|reviews)", path)
         print(json.dumps(db.get(f"pr_{m.group(3)}", {}).get(f"{m.group(1)}#{m.group(2)}", [])))
+elif args[0] == "api" and re.match(r"repos/[^/]+/[^/]+/deployments", next((a for a in args if a.startswith("repos/")), "")):
+    path = next(a for a in args if a.startswith("repos/"))
+    ms = re.search(r"/deployments/(\d+)/statuses", path)
+    deps = db.get("deployments", [])
+    print(json.dumps(next(d["statuses"] for d in deps if str(d["id"]) == ms.group(1)) if ms else [{"id": d["id"]} for d in deps]))
+elif args[0] == "api" and re.match(r"repos/[^/]+/[^/]+/issues(\?|$)", next((a for a in args if a.startswith("repos/")), "")):
+    path = next(a for a in args if a.startswith("repos/"))
+    repo = re.match(r"repos/([^/]+/[^/]+)/issues", path).group(1)
+    lst = db.setdefault("repo_issues", {}).setdefault(repo, [])
+    if "-f" in args:  # create
+        fields = {a.split("=", 1)[0]: a.split("=", 1)[1] for a in args if re.match(r"^(title|body)=", a)}
+        n = max([i["number"] for l in db["repo_issues"].values() for i in l] + [100]) + 1
+        issue = {"number": n, "node_id": f"I_{n}", "title": fields["title"], "body": fields.get("body", ""), "repo": repo, "labels": [],
+                 "html_url": f"https://github.com/{repo}/issues/{n}"}
+        lst.append(issue)
+        save()
+        print(json.dumps(issue))
+    else:
+        want = re.search(r"labels=([^&]+)", path)
+        print(json.dumps([i for i in lst if not want or want.group(1) in [l["name"] for l in i["labels"]]]))
 elif args[0] == "api":
     path = next(a for a in args[1:] if a.startswith("repos/"))
     mi = re.fullmatch(r"repos/([^/]+/[^/]+)/issues/(\d+)", path)

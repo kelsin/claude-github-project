@@ -1,6 +1,6 @@
 # Column: Plan
 
-Planning and plan review in one run. Stories arrive from Todo (no `plan` link yet) or are sent back (the user commented in Plan Review) or stalled (a `plan` link exists). On a board that has not been migrated, a story in `plan_review` is handled exactly like this.
+Planning and plan review in one run. Stories arrive from Todo (no `plan` link yet) or are sent back (the user commented in Plan Review) or stalled (a `plan` link exists).
 
 1. Rule 1 (`CGP prepare`), then rate the story (rule 4). `CGP worker phase <item> planning`.
 2. **No `plan` link:** explore the code in the worktree `prepare` returned. Spawn planners (count by rating) and merge their drafts into one plan. Put every assumption in the Assumptions section. If the story changes how anything looks, planners must include graphics of the intended result (see `plan_artifact.md`). `CGP touches <item> <paths...>` with the files and directories the plan changes. Publish the artifact (`plan_artifact.md`) and `CGP set <item> plan <url>`.
@@ -9,4 +9,4 @@ Planning and plan review in one run. Stories arrive from Todo (no `plan` link ye
 4. `CGP worker phase <item> revising`. Spawn agents to apply every accepted finding (one per independent section). Record each finding and its resolution in the Review log; reject a finding only with a reason recorded there.
 5. A finding that needs a decision only the user can make goes in the plan's Open questions and `CGP ask` with your proposed default; then stop without moving.
 6. Make sure the published artifact is current, then post a status comment (plan link, rating, key assumptions, review summary and counts).
-7. If `story.autoApprove.plan` is true (the user set Auto Approve to Plan or Both), add "auto-approved" to the status comment and `CGP move <item> plan_approved` (the CLI allows it from here only because of that field); the next cycle starts Plan Approved. Otherwise `CGP move <item> plan_approval` (the user's Plan Review column).
+7. If `story.autoApprove.plan` is true (the user set Auto Approve to Plan or Both), add "auto-approved" to the status comment and `CGP move <item> plan_approved` (the CLI allows it from here only because of that field); the next cycle starts Plan Approved. Otherwise `CGP move <item> plan_review` (the user's Plan Review column).
