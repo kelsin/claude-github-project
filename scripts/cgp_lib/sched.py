@@ -5,7 +5,7 @@ import time
 from .consts import ACTIONABLE, ALL_KEYS, COLUMNS, HOME, STORY_OPTION, WAITING_FIELD
 from .util import Poll, age_seconds, strip_id, covers, die, norm_path, now_iso, out
 from .gh import rest
-from .store import cfg, load_data, load_json, lock_file, lock_holder, save_board, state_path, stop_requested, update_data, update_state
+from .store import cfg, load_data, load_json, lock_file, lock_holder, state_path, stop_requested, update_board, update_data, update_state
 from .board import board_keys, clear_field, ensure_story_option, fetch_items, fetch_project, fields_by_name, get_item, parse_item, parse_pr_ref, rank, set_single
 from .gitwt import cleanup_worktree
 from .notify import check
@@ -20,7 +20,7 @@ def sync_story_field(c, live):
         b = c["board"]
         field = fields_by_name(fetch_project(b["kind"], b["owner"], b["number"]))[WAITING_FIELD]
         w["story"] = ensure_story_option(field)
-        save_board(c)
+        update_board(lambda cur: cur["fields"]["waiting"].__setitem__("story", w["story"]))
     for i in live:
         if i["blockedBy"] and not i["waitingOn"]:
             set_single(c, i["item"], w["id"], w["story"])
@@ -36,21 +36,31 @@ def hard_conflict(a, b, patterns):
     return any(not any(fnmatch.fnmatchcase(f, g) for g in patterns) for f in (a & b) - dirs)
 
 
-def pick_compatible(c, actionable, live, in_flight):
+def pick_compatible(c, actionable, live, in_flight, slots=None):
     """Of the stories about to start work (Plan Approved, or Implement with no PR), keep the largest group whose declared files
     don't collide with each other or with a worker already running; the rest wait (deferred) so no worker is spent on a story
-    that would only block. Greedy by fewest conflicts, board order breaking ties."""
+    that would only block. Greedy by fewest conflicts, board order breaking ties; with a limit of `slots` free workers, plainly in
+    priority order so a low-priority story never takes the slot of a high-priority one."""
     touches = load_data().get("touches", {})
     patterns = merged_globs(c, "sharedFiles", {i["issueRepo"] for i in actionable})
     files = lambda i: {norm_path(f) for f in touches.get(i["item"], [])}
     gate = lambda i: i["column"] == "plan_approved" or (i["column"] == "implement" and not i["pr"])
     cands = [i for i in actionable if gate(i)]
     running = [i for i in live if i["item"] in in_flight and gate(i)]
-    clash = lambda a, b: hard_conflict(files(a), files(b), patterns)
+    clash = lambda a, b: a["issueRepo"] == b["issueRepo"] and hard_conflict(files(a), files(b), patterns)  # paths are per repo
     for i in cands:
         i["conflictsWith"] = [r["title"] for r in running if clash(i, r)]
     pool = [i for i in cands if not i["conflictsWith"]]
     chosen = []
+    if slots is not None:
+        for i in pool:
+            hit = next((o for o in chosen if clash(i, o)), None)
+            if hit:
+                i["conflictsWith"] = [hit["title"]]
+            elif len(chosen) < slots:
+                chosen.append(i)
+        deferred = [i for i in cands if i.get("conflictsWith")]
+        return [i for i in actionable if i not in deferred], deferred
     while pool:
         pick = min(pool, key=lambda i: sum(clash(i, o) for o in pool if o is not i))
         chosen.append(pick)
@@ -109,9 +119,9 @@ def snapshot(c):
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and not i["held"] and i not in blocked
                   and i["item"] not in in_flight]
     actionable.sort(key=lambda i: (ACTIONABLE.index(i["column"]), i["priorityRank"]))  # stable: board order breaks ties
-    actionable, deferred = pick_compatible(c, actionable, live, in_flight)
-    waiting = [i for i in live if i["waiting"]]
     cap = c["settings"]["concurrency"]
+    actionable, deferred = pick_compatible(c, actionable, live, in_flight, max(cap - len(in_flight), 0) if cap > 0 else None)
+    waiting = [i for i in live if i["waiting"]]
     batch = [] if stop_requested() else actionable[: max(cap - len(in_flight), 0)] if cap > 0 else actionable  # a stop request dispatches nothing new
     status = "done" if not live else "work" if batch else "idle"  # idle also when the cap is full
     stalled = stalled_workers(c)
@@ -213,7 +223,9 @@ def cmd_wait(a):
         released = snap["inFlight"] != started
         # with a stop requested the loop is only waiting for its workers; once none are left there is nothing to wait for
         stopped = snap["stopRequested"] and not snap["inFlight"]
-        if snap["status"] != "idle" or released or stopped or not poll.wait():
+        # `done` with a worker still running (its issue was closed, or a stop is pending) keeps waiting for that worker
+        over = snap["status"] == "work" or (snap["status"] == "done" and not snap["inFlight"])
+        if over or released or stopped or not poll.wait():
             snap.pop("items")
             out(snap)
             return
@@ -257,7 +269,7 @@ def cmd_overlap(a):
     patterns = merged_globs(c, "sharedFiles", {me["issueRepo"]})
     for o in items:
         if (o["item"] == a.item or o["kind"] != "issue" or o["closed"] or o["archived"]
-                or o["column"] in ("todo", "done")):
+                or o["column"] in ("todo", "done") or o["issueRepo"] != me["issueRepo"]):  # paths are per repo
             continue
         theirs = story_files(c, st, o)
         if not theirs:

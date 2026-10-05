@@ -110,6 +110,11 @@ class TestHistory(Base):
         s = m.story_summary(story)
         self.assertEqual((s["runs"], s["reviews"], s["questions"], s["hours"]), (2, 1, 1, 6.0))
         self.assertIsNone(m.story_summary({"title": "x", "events": [{"at": "2026-01-01T00:00:00Z", "kind": "ask"}]})["hours"])
+        story["events"].append({"at": "2026-01-02T00:00:00Z", "kind": "move", "was": "done", "to": "todo"})
+        self.assertIsNone(m.story_summary(story)["doneAt"])  # reopened: not done any more
+        story["events"] = story["events"][3:]
+        story["startedAt"] = "2025-12-31T18:00:00Z"
+        self.assertEqual(m.story_summary({**story, "events": story["events"][:2]})["hours"], 12.0)  # start survives trimming
         self.setup_board()
         self.assertEqual(self.cgp("report", "--json")["done"], 0)
 

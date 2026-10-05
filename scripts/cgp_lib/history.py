@@ -23,6 +23,7 @@ def record(item, kind, title=None, **fields):
             story = h.setdefault(item, {"title": title or "", "events": []})
             if title:
                 story["title"] = title
+            story.setdefault("startedAt", story["events"][0]["at"] if story["events"] else ev["at"])  # survives trimming
             story["events"] = (story["events"] + [ev])[-PER_STORY:]
             if len(h) > STORIES:
                 for k in sorted(h, key=lambda k: h[k]["events"][-1]["at"])[: len(h) - STORIES]:
@@ -53,11 +54,12 @@ def cmd_replay(a):
 def story_summary(story):
     """Cycle time (first event to Done), worker runs and review rounds of one story; None when it is not Done."""
     ev = story["events"]
-    done = next((e for e in reversed(ev) if e["kind"] == "move" and e.get("to") == "done"), None)
+    last = next((e for e in reversed(ev) if e["kind"] == "move"), None)
+    done = last if last and last.get("to") == "done" else None  # a story moved out of Done again is not done
     return {"title": story["title"], "runs": sum(1 for e in ev if e["kind"] == "worker-start"),
             "reviews": sum(1 for e in ev if e["kind"] == "move" and e.get("to") in ("plan_review", "pr_review")),
             "questions": sum(1 for e in ev if e["kind"] == "ask"), "doneAt": done["at"] if done else None,
-            "hours": round((_ts(done["at"]) - _ts(ev[0]["at"])) / 3600, 1) if done else None}
+            "hours": round((_ts(done["at"]) - _ts(story.get("startedAt") or ev[0]["at"])) / 3600, 1) if done else None}
 
 
 def _ts(iso):

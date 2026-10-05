@@ -12,7 +12,7 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `session-title` |  | UserPromptSubmit hook: name the session after the board |
 | `repo-path` | `repo` `path` | Show or set the local clone of a linked repo |
 | `discover` | `roots` | Find local clones of the board's repos under ~/src, ~/code, ... |
-| `config` | `key` `value` | Show or set a board setting (concurrency, pollSeconds, autoMigrate, remoteControl, sharedFiles, ...) |
+| `config` | `key` `value` | Show or set a board setting (concurrency, pollSeconds, remoteControl, sharedFiles, ...) |
 | `repos` |  | Repos linked to the board and their local clones |
 | `status` | `--json` | Human-readable board overview: counts, what waits on you, workers, blocked stories |
 | `list` | `--brief` | JSON snapshot of the board (also files closed issues under Done and clears answered questions) |

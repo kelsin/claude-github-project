@@ -95,7 +95,8 @@ def cmd_sync(a):
     moved = ahead_of_us = 0
     remote = f"origin/{branch}"
     if git(wt, "rev-parse", "--verify", remote, check=False):
-        ahead_of_us = int(git(wt, "rev-list", "--count", f"HEAD..{remote}") or 0)
+        # commits on the remote that are not (patch-equivalent to) ours: a local rebase not yet pushed is not someone else's push
+        ahead_of_us = int(git(wt, "rev-list", "--count", "--cherry-pick", "--right-only", f"HEAD...{remote}") or 0)
         if ahead_of_us:  # someone (e.g. a GitHub suggested change) pushed to the PR branch: keep their commits
             res = run_rebase(wt, remote)
             if res:
