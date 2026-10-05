@@ -4,6 +4,7 @@ import argparse
 
 from .board import (cmd_adopt, cmd_config, cmd_discover, cmd_repo_path, cmd_repos, cmd_setup)
 from .epics import cmd_split
+from .daemon import cmd_daemon
 from .doctor import cmd_doctor, cmd_gc
 from .models import RATINGS, cmd_models
 from .policy import cmd_rate
@@ -77,6 +78,10 @@ COMMANDS = [
     ("rate", cmd_rate, "Record your risk rating of a story (the auto-approval policy reads it)", [A("item"), A("rating", choices=list(RATINGS))]),
     ("repo-config", cmd_repo_config, "The .cgp.json of a repo's default branch (test and lint commands, shared and guarded files, ...)", [
         A("target", help="owner/name or a story's item id")]),
+    ("daemon", cmd_daemon, "Experimental: run the loop headless, one `claude -p` worker per story (see docs/daemon.md)", [
+        A("--once", action="store_true", help="dispatch one cycle, wait for those workers, then exit"),
+        A("--dry-run", action="store_true", help="print what would be dispatched; start nothing"),
+        A("--verbose", action="store_true")]),
     ("doctor", cmd_doctor, "Check the installation: gh, token scopes, board, clones, stale files", [
         A("--board", help="board URL; default: the only or bound board")]),
     ("gc", cmd_gc, "Delete state of dead sessions and worktrees of finished stories", [

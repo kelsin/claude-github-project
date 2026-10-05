@@ -144,9 +144,20 @@ def update_board(fn):
         return c
 
 
+def env_board():
+    """The board named by $CGP_BOARD (its key or its URL), set by `cgp daemon` for the sessions it starts; None when unset or unknown."""
+    want = (os.environ.get("CGP_BOARD") or "").strip().rstrip("/")
+    if not want:
+        return None
+    for k in list_boards():
+        if k == want or (load_json(board_file(k), {}).get("board", {}).get("url") or "").rstrip("/") == want:
+            return k
+    return None
+
+
 def board_key():
-    """The board for this command: the session's bound board (cgp use), else the one the current repo is on, else the only board."""
-    key = load_json(state_path(), {}).get("boardKey")
+    """The board for this command: $CGP_BOARD, else the session's bound board (cgp use), else the one the current repo is on, else the only board."""
+    key = env_board() or load_json(state_path(), {}).get("boardKey")
     if key and os.path.exists(board_file(key)):
         return key
     keys = list_boards()

@@ -23,6 +23,7 @@ The plugin has three parts: skills (prompts), the `scripts/cgp` CLI that does ev
 | `notify` | the `notifyCommand` hook |
 | `repoconf` | a repo's `.cgp.json` (read from its default branch) |
 | `models` | the model per sub-agent role |
+| `daemon` | `cgp daemon`: the headless dispatcher loop ([daemon](daemon.md)) |
 | `gitutil` | plain git helpers |
 | `cli` | the command table (`COMMANDS`) and argument parsing |
 
@@ -45,6 +46,7 @@ Run `/cgp:run` in as many sessions as you like, as long as each uses a different
 - **Per-session UI and state.** The mod gives each session an id (`CGP_SESSION`, exported to everything that session runs), so each band shows only that session's board, counts and workers, and one session's workers are never cleared by another. A session that never ran `/cgp:run` shows no band.
 - **One loop per board.** `cgp use` claims the board for the session (a lock file kept alive by every update the session makes; a lock untouched for 30 minutes counts as abandoned). A second session asking for the same board is refused, and offered `--takeover` if the first is gone; the session that was taken over stops at its next poll. `cgp release` frees the board (the loop does this when everything is Done).
 - **Board data outlives sessions.** Blocks, epic ordering, touched-file lists and feedback cursors are stored per board, so restarting a session loses nothing. Repo clone paths are shared by all boards.
+- **`CGP_BOARD`.** `cgp daemon` sets it (a board key or URL) for the workers it starts; `board_key()` reads it before anything else, because a worker's session id can be overwritten by the mod and its working directory is neutral, which with several boards would otherwise end in exit 6.
 - If a session was started before the mod was loaded, `cgp` falls back to a `default` session id (`default-<board>` inside a board's repo, so terminals on different boards stay apart; it changes if you `cd` out of the repo), which is fine for a single session. Each worker row shows the emoji of the story's current column; it updates as the worker moves the story.
 
 ## Files

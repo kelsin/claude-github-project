@@ -15,6 +15,7 @@ from .board import fetch_items, fetch_project, fields_by_name, parse_board_url, 
 from .gitutil import git
 from .gitwt import is_dirty
 from .notify import command_problem
+from .daemon import FLAGS as DAEMON_FLAGS
 from .util import printable
 
 # Permission rules docs/safety.md recommends for sessions that run the loop; doctor only reports whether they are present.
@@ -166,6 +167,11 @@ def cmd_doctor(a):
             if ok:
                 head = git(path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False)
                 check(f"{title}: default branch of {repo}", bool(head), head or "run: git remote set-head origin --auto", warn=True)
+    claude = subprocess.run(["claude", "--help"], capture_output=True, text=True).stdout if shutil.which("claude") else None
+    unknown = [f for f in DAEMON_FLAGS if f not in (claude or "")]
+    check("claude for cgp daemon", claude is not None and not unknown,
+          "cgp daemon needs the claude CLI on PATH" if claude is None else f"this claude does not list {', '.join(unknown)}: update it before running cgp daemon",
+          warn=True)
     lock = list_stale_locks()
     check("no stale locks", not lock, f"{len(lock)} abandoned lock(s): cgp gc", warn=True)
     old = session_files(7)

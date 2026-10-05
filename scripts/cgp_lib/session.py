@@ -6,7 +6,7 @@ import sys
 import time
 from .consts import DEFAULT_PHASE, HOME, LOCKS, LOCK_STALE_SECONDS, PHASES
 from .util import die, now_iso, out, safe, strip_id
-from .store import board_for_cwd, cfg, ensure_home, list_boards, load_board, load_json, lock_file, lock_holder, locked, save_json, sid, state_path, stop_path, update_state
+from .store import board_for_cwd, cfg, env_board, ensure_home, list_boards, load_board, load_json, lock_file, lock_holder, locked, save_json, sid, state_path, stop_path, update_state
 from .board import get_item, parse_board_url
 
 
@@ -24,6 +24,8 @@ def cmd_use(a):
                     if b["board"]["number"] == number and b["board"]["owner"].lower() == owner.lower()), None)
         if not key:
             die(f"that board is not set up yet; run /cgp:setup {a.url} first")
+    elif env_board() in boards:  # $CGP_BOARD (the daemon's) decides
+        key = env_board()
     elif board_for_cwd() in boards:  # the repo you are in decides
         key = board_for_cwd()
     elif load_json(state_path(), {}).get("boardKey") in boards:

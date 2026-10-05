@@ -5,7 +5,7 @@ import os
 import re
 import subprocess
 import sys
-from .consts import ALL_KEYS, BOOL_SETTINGS, LIST_SETTINGS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
+from .consts import ALL_KEYS, BOOL_SETTINGS, FLOAT_SETTINGS, LIST_SETTINGS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
 from .util import die, norm, out, safe, split_repo
 from .gh import gh, gql
 from .gitutil import origin_ok
@@ -504,6 +504,8 @@ def cmd_config(a):
             val = [g.strip() for g in a.value.split(",") if g.strip()]
             if a.key == "autoApproveFiles":
                 policy.check_globs(val)
+            elif a.key == "daemonAllowedTools" and not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\([^()]+\))?", t) for t in val):
+                die("daemonAllowedTools: comma-separated Claude Code permission rules like Bash(npm test:*) or Read (no commas inside a rule)")
         elif a.key == "autoApprove":
             if a.value is None:
                 die("usage: cgp config autoApprove plan:low,pr:never (levels never, low, medium, high)")
@@ -511,6 +513,12 @@ def cmd_config(a):
                 val = policy.render(policy.parse(a.value))
             except ValueError as e:
                 die(str(e))
+        elif a.key in FLOAT_SETTINGS:
+            if a.value is None or not re.fullmatch(r"\d+(\.\d+)?", a.value.strip()):
+                die(f"usage: cgp config {a.key} <dollars, e.g. 5 or 2.5; 0 = no cap>")
+            val = float(a.value)
+            if a.key == "daemonMaxBudgetUsd" and not val:
+                die("daemonMaxBudgetUsd must be above 0: every worker run needs a cap")
         elif a.key in BOOL_SETTINGS:
             if a.value is None or a.value.strip().lower() not in ("on", "off", "1", "0"):
                 die(f"usage: cgp config {a.key} on|off")
@@ -525,6 +533,8 @@ def cmd_config(a):
             if a.value is None or not re.fullmatch(r"\d+", a.value):
                 die(f"usage: cgp config {a.key} <non-negative integer>")
             val = int(a.value)
+            if a.key == "daemonMaxTurns" and not val:
+                die("daemonMaxTurns must be at least 1")
         c = update_board(lambda c: c["settings"].__setitem__(a.key, val))
         if a.key.startswith(policy.HUMAN_ONLY):
             fire(c, "policy", f"{a.key} set to {val}", c["board"]["url"])
