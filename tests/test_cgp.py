@@ -959,6 +959,20 @@ class TestPreview(PRBase):
         self.assertEqual(self.cgp("list")["items"][0]["preview"], url)
         self.assertNotEqual(self.cgp("set", "i1", "preview", "https://x.example", ok=False).returncode, 0)
 
+    def test_links_are_added_to_the_issue_body(self):
+        d = self.read_db(); d["issue_bodies"] = {"acme/app#1": "Original description"}; self.write_db(d)
+        body = lambda: self.read_db()["issue_bodies"]["acme/app#1"]
+        self.cgp("set", "i1", "plan", "https://claude.ai/artifact/x")
+        self.assertIn("Original description", body())
+        self.assertIn("- Plan: https://claude.ai/artifact/x", body())
+        self.assertNotIn("Preview", body())
+        self.comment("netlify[bot]", "Ready https://deploy-preview-1--site.netlify.app")
+        self.cgp("preview", "i1")
+        self.cgp("preview", "i1")
+        self.assertEqual(body().count("<!-- cgp:links -->"), 1)
+        self.assertIn("- PR: https://github.com/acme/app/pull/1", body())
+        self.assertIn("- Preview: https://deploy-preview-1--site.netlify.app", body())
+
 
 class TestMerge(PRBase):
     def test_merge_prefers_auto_and_falls_back_to_direct(self):
