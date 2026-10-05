@@ -4,7 +4,6 @@ import re
 import time
 from .util import Poll, die, out
 from .gh import gh
-from .history import record
 from .store import cfg, load_data, update_data
 from .board import get_item, parse_pr_ref, require_repo
 from .session import set_phase
@@ -170,7 +169,6 @@ def cmd_merge(a):
         if p2.returncode:
             out({"requested": False, "error": (p2.stderr or p.stderr).strip()})
             return
-    record(a.item, "merge-requested")
     out({"requested": True})
 
 

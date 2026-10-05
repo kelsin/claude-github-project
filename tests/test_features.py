@@ -1,4 +1,4 @@
-"""Priority, intake, notifications, history, repo config, preview providers, models, draft PRs."""
+"""Priority, intake, notifications, repo config, preview providers, models, draft PRs."""
 import json
 import os
 import stat
@@ -86,42 +86,6 @@ class TestNotify(Base):
         self.setup_board()
         self.cgp("config", "notifyCommand", "echo hi")
         self.assertEqual(self.cgp("config", "notifyCommand", "")["notifyCommand"], "")
-
-
-class TestHistory(Base):
-    def test_moves_and_worker_runs_are_logged_and_replayed(self):
-        self.setup_board()
-        self.cgp("worker", "start", "i1")
-        self.cgp("move", "i1", "plan")
-        self.cgp("worker", "stop", "i1")
-        p = self.cgp("replay", "i1", ok=False)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        for word in ("worker-start", "move", "was=todo to=plan", "worker-stop"):
-            self.assertIn(word, p.stdout)
-        kinds = [e["kind"] for e in self.cgp("replay", "i1", "--json")["events"]]
-        self.assertEqual(kinds, ["worker-start", "move", "worker-stop"])
-
-    def test_report_summarises_finished_stories(self):
-        m = test_cgp.load_cgp()
-        story = {"title": "S", "events": [
-            {"at": "2026-01-01T00:00:00Z", "kind": "worker-start"}, {"at": "2026-01-01T01:00:00Z", "kind": "move", "was": "plan", "to": "plan_review"},
-            {"at": "2026-01-01T02:00:00Z", "kind": "ask"}, {"at": "2026-01-01T03:00:00Z", "kind": "worker-start"},
-            {"at": "2026-01-01T06:00:00Z", "kind": "move", "was": "pr_approved", "to": "done"}]}
-        s = m.story_summary(story)
-        self.assertEqual((s["runs"], s["reviews"], s["questions"], s["hours"]), (2, 1, 1, 6.0))
-        self.assertIsNone(m.story_summary({"title": "x", "events": [{"at": "2026-01-01T00:00:00Z", "kind": "ask"}]})["hours"])
-        story["events"].append({"at": "2026-01-02T00:00:00Z", "kind": "move", "was": "done", "to": "todo"})
-        self.assertIsNone(m.story_summary(story)["doneAt"])  # reopened: not done any more
-        story["events"] = story["events"][3:]
-        story["startedAt"] = "2025-12-31T18:00:00Z"
-        self.assertEqual(m.story_summary({**story, "events": story["events"][:2]})["hours"], 12.0)  # start survives trimming
-        self.setup_board()
-        self.assertEqual(self.cgp("report", "--json")["done"], 0)
-
-    def test_the_history_file_is_not_mistaken_for_a_board(self):
-        self.setup_board()
-        self.cgp("worker", "start", "i1")
-        self.assertEqual(self.cgp("repos"), {"acme/app": None})  # still works with <board>.history.json present
 
 
 class TestRepoConfig(test_cgp.TestSync):
