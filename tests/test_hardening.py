@@ -50,6 +50,12 @@ class TestReviewedMerge(PRBase):
         self.force("i1", "pr_approved")
         self.assertEqual(self.cgp("merge", "i1"), {"requested": True})
 
+    def test_a_story_with_auto_approve_pr_is_not_held_to_a_reviewed_commit(self):
+        self.reviewed()
+        d = self.read_db(); d["items"][0]["values"]["Auto Approve"] = {"optionId": "o_PR"}; self.write_db(d)  # made by setup
+        self.prs(self.view(headRefOid="bbb222"))
+        self.assertEqual(self.cgp("merge", "i1"), {"requested": True})
+
     def test_story_without_a_record_is_taken_as_reviewed(self):
         self.assertEqual(self.cgp("merge", "i1"), {"requested": True})  # approved before the check existed
 
