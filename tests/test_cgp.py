@@ -255,6 +255,72 @@ class TestSkipAndAutoApprove(Base):
         self.force("i1", "plan_review")
         self.assertNotEqual(self.cgp("move", "i1", "plan_approved", ok=False).returncode, 0)  # leaving Plan Review stays human
 
+    def reviewed(self):
+        boards = os.path.join(self.env["CGP_HOME"], "boards")
+        with open(os.path.join(boards, next(n for n in os.listdir(boards) if n.endswith(".data.json")))) as f:
+            return json.load(f).get("reviewed", {})
+
+    def test_move_to_plan_review_is_redirected_by_the_live_field(self):
+        self.setup_board()
+        for option, column in (("Plan", "plan_approved"), ("Both", "plan_approved"), ("PR", "plan_review"), (None, "plan_review")):
+            self.force("i1", "plan")
+            if option:
+                self.set_auto("i1", option)
+            r = self.cgp("move", "i1", "plan_review")
+            self.assertEqual(r["column"], column, option)
+            self.assertEqual(r.get("autoApproved"), True if column == "plan_approved" else None, option)
+            if column == "plan_approved":
+                self.assertEqual(r["requested"], "plan_review")
+        self.set_auto("i1", "Both")
+        self.force("i1", "todo")
+        self.assertEqual(self.cgp("move", "i1", "plan_review")["column"], "plan_review")  # only from the agent column
+
+    def test_move_to_pr_review_is_redirected_by_the_live_field(self):
+        self.setup_board()
+        for option, has_pr, column in (("PR", True, "pr_approved"), ("Both", True, "pr_approved"), ("PR", False, "pr_review"),
+                                       ("Plan", True, "pr_review"), (None, True, "pr_review")):
+            d = self.read_db()
+            values = next(i for i in d["items"] if i["id"] == "i1")["values"]
+            values.pop("Auto Approve", None)
+            values.pop("PR", None)
+            if has_pr:
+                values["PR"] = {"text": "https://github.com/acme/app/pull/1"}
+            if option:
+                values["Auto Approve"] = {"optionId": f"o_{option}"}
+            d["reviewed"] = {}
+            self.write_db(d)
+            self.force("i1", "implement")
+            r = self.cgp("move", "i1", "pr_review")
+            self.assertEqual(r["column"], column, (option, has_pr))
+            self.assertEqual(r.get("autoApproved"), True if column == "pr_approved" else None, (option, has_pr))
+            if column == "pr_approved":
+                self.assertEqual(r["requested"], "pr_review")
+            self.assertEqual(bool(self.reviewed()), column == "pr_review" and has_pr, (option, has_pr))
+
+    def test_pr_redirect_readies_a_draft_and_records_the_final_column(self):
+        self.setup_board()
+        self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/1")
+        self.cgp("worker", "start", "i1", "implement", "one")
+        d = self.read_db()
+        d["pr_view"] = {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "isDraft": True, "headRefOid": "aaa111",
+                        "headRefName": "cgp/1", "isCrossRepository": False, "baseRefName": "main"}
+        self.write_db(d)
+        self.force("i1", "implement")
+        self.set_auto("i1", "PR")
+        self.assertEqual(self.cgp("move", "i1", "pr_review")["column"], "pr_approved")
+        self.assertIn(["pr", "ready", "1", "-R", "acme/app"], self.read_db()["calls"])
+        w = self.state()["workers"][0]
+        self.assertEqual(w["column"], "pr_approved")
+        self.assertEqual(w["phase"], "merging")
+        self.assertEqual(self.reviewed(), {})
+
+    def test_move_to_pr_review_without_the_field_still_records_the_reviewed_commit(self):
+        self.setup_board()
+        self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/1")
+        self.force("i1", "implement")
+        self.assertEqual(self.cgp("move", "i1", "pr_review")["column"], "pr_review")
+        self.assertIn("aaa111", json.dumps(self.reviewed()))
+
 
 class TestQuestions(Base):
     def test_ask_blocks_until_human_reply(self):
