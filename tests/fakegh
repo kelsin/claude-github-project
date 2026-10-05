@@ -128,7 +128,7 @@ elif args[:2] == ["api", "graphql"]:
                                 "nodes": nodes}}}
     elif "projectV2(number" in q:
         p = {"id": f"P{v['n']}", "title": f"Test Board {v['n']}", "url": f"https://github.com/orgs/acme/projects/{v['n']}",
-             "repositories": {"nodes": [{"nameWithOwner": "acme/app"}]},
+             "repositories": {"nodes": [{"nameWithOwner": r} for r in db.get("linked_repos", ["acme/app"])]},
              "views": {"nodes": [dict(x, visibleFields={"nodes": [{"id": i} for i in x.get("fieldIds", [])]}) for x in db.get("views", [])]},
              "fields": {"nodes": [dict({"__typename": "x"}, **f) for f in db["fields"]]}}
         r = {"organization": {"projectV2": p}}

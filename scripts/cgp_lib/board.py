@@ -3,10 +3,10 @@ import os
 import re
 import subprocess
 from .consts import ALL_KEYS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
-from .util import die, norm, out, split_repo
+from .util import die, norm, out, safe, split_repo
 from .gh import gh, gql
 from .models import parse as parse_models
-from .store import board_file, cfg, load_json, save_board, update_board
+from .store import board_file, cfg, list_boards, load_json, save_board, update_board
 
 
 PROJECT_FRAGMENT = """
@@ -344,6 +344,16 @@ def cmd_setup(a):
         repo_id = gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }",
                       o=owner_, n=name_)["repository"]["id"]
 
+    here = safe(proj["id"])
+    taken = {}  # repo (lower case) -> title of another board that already has it: a repo belongs to one board
+    for k in list_boards():
+        if k != here:
+            other = load_json(board_file(k), {})
+            taken.update({r.lower(): other.get("board", {}).get("title", k) for r in other.get("repos", {})})
+    if a.repo and a.repo.lower() in taken:
+        die(f"{a.repo} already belongs to the board '{taken[a.repo.lower()]}'; a repo can be on one board only. "
+            "Remove it from that board's linked repositories first")
+
     if a.dry_run:
         have_views = {v["name"]: v for v in proj["views"]["nodes"]}
         tasks = have_views.get("Tasks")
@@ -391,8 +401,12 @@ def cmd_setup(a):
         "settings": {**DEFAULTS, **old.get("settings", {})},
     }
 
+    skipped = []
     for r in proj["repositories"]["nodes"]:
-        c["repos"].setdefault(r["nameWithOwner"], None)
+        if r["nameWithOwner"].lower() in taken:
+            skipped.append(r["nameWithOwner"])
+        else:
+            c["repos"].setdefault(r["nameWithOwner"], None)
     if a.repo:
         rid = repo_id
         a.repo = known_repo(c, a.repo) or a.repo  # keep the spelling already stored
@@ -404,7 +418,7 @@ def cmd_setup(a):
             c["repos"][a.repo] = os.path.abspath(a.repo_path)
     save_board(c)
 
-    out({"board": c["board"], "repos": c["repos"], "itemsRemapped": cols.get("remapped", {"todo": 0, "done": 0}), "viewsCreated": views, "viewsUpdated": views_updated,
+    out({"board": c["board"], "repos": c["repos"], "skippedRepos": skipped, "itemsRemapped": cols.get("remapped", {"todo": 0, "done": 0}), "viewsCreated": views, "viewsUpdated": views_updated,
          "note": "items whose old status matched a new column name kept it; closed ones went to Done, all others to Todo"})
 
 

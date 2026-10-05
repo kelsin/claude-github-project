@@ -4,6 +4,7 @@ import json
 import os
 import time
 from .consts import BOARDS, DEFAULTS, HOME, KEY_RENAMES, LOCKS, META, LOCK_STALE_SECONDS, PATHS, SCHEMA
+from .gitutil import cwd_repo
 from .util import die, safe, strip_id
 
 
@@ -57,9 +58,34 @@ class locked:
             locked.f.close()
 
 
+_cwd_board = []
+
+
+def boards_of_repo(repo):
+    """Keys of the boards whose repos include this one (a repo belongs to one board; legacy configs may list it on several)."""
+    return [k for k in list_boards() if repo.lower() in {r.lower() for r in (load_json(board_file(k), None) or {}).get("repos", {})}]
+
+
+def board_for_cwd():
+    """Key of the board the current directory's repo is on, None when it is not on one. Exit 6 when several boards list it."""
+    if not _cwd_board:
+        repo = cwd_repo()
+        keys = boards_of_repo(repo) if repo else []
+        if len(keys) > 1:
+            die(f"{repo} is on several boards ({', '.join(keys)}); a repo should belong to one. Remove it from the others, "
+                "or bind this session with: cgp use <board-url>", code=6)
+        _cwd_board.append(keys[0] if keys else None)
+    return _cwd_board[0]
+
+
 def sid():
-    """This session's id (exported by the mod as CGP_SESSION); 'default' when run outside a session."""
-    return strip_id(os.environ.get("CGP_SESSION")) or "default"
+    """This session's id (exported by the mod as CGP_SESSION). Outside a session it is 'default', or 'default-<board>' in a
+    board's repo, so bare terminals on different boards do not share state, locks or stop files."""
+    s = strip_id(os.environ.get("CGP_SESSION"))
+    if s:
+        return s
+    key = board_for_cwd()
+    return f"default-{safe(key)}" if key else "default"
 
 
 def state_path():
@@ -118,7 +144,15 @@ def update_board(fn):
 
 
 def board_key():
-    key = load_json(state_path(), {}).get("boardKey")
+    """The board for this command: the one the current repo is on, else the session's bound board, else the only board."""
+    here = board_for_cwd()
+    bound = load_json(state_path(), {}).get("boardKey")
+    if here:
+        if bound and bound != here and os.path.exists(board_file(bound)):
+            die(f"this session is bound to board {bound} but {cwd_repo()} is on board {here}; run: cgp release, "
+                "or work from a directory in the bound board's repo", code=6)
+        return here
+    key = bound
     if key and os.path.exists(board_file(key)):
         return key
     keys = list_boards()

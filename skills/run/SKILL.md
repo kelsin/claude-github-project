@@ -11,9 +11,9 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
 
 ## Start
 
-1. `CGP use [<board-url>]` (pass the URL if the user gave one). It binds this session to that board, claims its loop, clears stale workers and drops a stop request left from an earlier run.
+1. `CGP use [<board-url>]` (pass the URL if the user gave one; without it the board is the one the current directory's repo is on). It binds this session to that board, claims its loop, clears stale workers and drops a stop request left from an earlier run.
    - Error "no board configured" / "not set up yet": tell the user to run `/cgp:setup <board-url>` and stop.
-   - Exit 6 (several boards set up, none chosen): show the listed boards, ask the user which, run `CGP use <url>`.
+   - Exit 6 (several boards set up, and the current directory's repo is on none of them or on several): show the listed boards, ask the user which, run `CGP use <url>`.
    - Exit 5 (another live session is running this board): tell the user and ask whether that session is gone; only then `CGP use <url> --takeover`.
    Each session works one board; parallel sessions must use different boards.
 2. If the output has `remoteControl: true` and you have the `set_remote_control` tool of the ccd_session_mgmt server (a deferred tool: load it with ToolSearch; it exists only in the Claude desktop app), call it with `session_id: "self"` and `enabled: true` so the user can follow and steer the loop from claude.ai/code or the mobile app. The app asks the user to approve it. Best effort: no tool, a refusal or a declined approval is mentioned in one line and never stops the run. Skip it when `remoteControl` is false.

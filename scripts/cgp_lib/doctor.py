@@ -124,6 +124,13 @@ def cmd_doctor(a):
         boards = [c for c in boards if c["board"]["number"] == number and c["board"]["owner"].lower() == owner.lower()]
         if not boards:
             die("that board is not set up yet")
+    seen = {}
+    for c in [load_board(k) for k in keys]:
+        for r in c["repos"]:
+            seen.setdefault(r.lower(), []).append(c["board"]["title"])
+    dupes = {r: t for r, t in seen.items() if len(t) > 1}
+    check("each repo is on one board", not dupes,
+          "; ".join(f"{r} is on {', '.join(t)}" for r, t in dupes.items()) + ": remove it from all but one board", warn=True)
     for c in boards:
         title = c["board"]["title"]
         b = c["board"]
