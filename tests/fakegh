@@ -53,7 +53,9 @@ elif args[0] == "pr" and args[1] in ("view", "merge", "checks", "update-branch",
         prs = db.get("prs")
         if prs is not None and key not in prs:
             sys.exit(f"fakegh: no pull request {key}")
-        v = seq(prs[key]) if prs is not None else seq(db.get("pr_view", {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "isDraft": False, "headRefOid": "aaa111", "headRefName": f"cgp/{num}"}))
+        v = seq(prs[key]) if prs is not None else seq(db.get("pr_view", {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "isDraft": False, "headRefOid": "aaa111", "headRefName": f"cgp/{num}", "isCrossRepository": False, "baseRefName": "main"}))
+        if db.get("auto_merge_stuck"):  # --disable-auto did not take: the view still shows auto-merge armed
+            v = dict(v, autoMergeRequest={"enabledAt": "2026-01-01T00:00:00Z"})
         save()
         print(json.dumps(v))
     elif args[1] == "checks":
@@ -66,11 +68,17 @@ elif args[0] == "pr" and args[1] in ("view", "merge", "checks", "update-branch",
         print(json.dumps(r))
     elif args[1] == "merge":
         save()
+        if "--match-head-commit" in args and db.get("head_is") and args[args.index("--match-head-commit") + 1] != db["head_is"]:
+            sys.exit("Head branch was modified. Review and try the merge again.")  # the pin refuses a head that moved
         if "--auto" in args and db.get("auto_merge_unavailable"):
             sys.exit("auto-merge is not allowed for this repository")
         sys.exit(db.get("merge_rc", 0))
     else:
         save()
+elif args[:3] == ["api", "-X", "PUT"] and args[3].endswith("/update-branch"):
+    db.setdefault("update_branch_calls", []).append(args)
+    save()
+    sys.exit(db.get("update_branch_rc", 0))
 elif args[:2] == ["run", "view"]:
     print("\n".join(f"log line {n}" for n in range(100)))
 elif args[:2] == ["api", "graphql"]:
@@ -134,6 +142,9 @@ elif args[:2] == ["api", "graphql"]:
         r = {"organization": {"projectV2": p}}
     elif "isArchived" in q and "node(id:$i)" in q:
         it = next(i for i in db["items"] if i["id"] == v["i"])
+        if db.get("status_seq", {}).get(it["id"]):  # one Status option id per read, the last one repeats (see merge-wait revocation)
+            it["values"]["Status"] = {"optionId": seq(db["status_seq"][it["id"]])}
+            save()
         r = {"node": {"id": it["id"], "isArchived": False, "content": it["content"], **values(it, q)}}
     elif "node(id:$i)" in q:
         it = next(i for i in db["items"] if i["id"] == v["i"])
@@ -175,7 +186,8 @@ elif args[0] == "api" and re.match(r"repos/[^/]+/[^/]+/issues(\?|$)", next((a fo
         print(json.dumps(issue))
     else:
         want = re.search(r"labels=([^&]+)", path)
-        print(json.dumps([i for i in lst if not want or want.group(1) in [l["name"] for l in i["labels"]]]))
+        print(json.dumps([{"user": {"login": "kelsin"}, "author_association": "OWNER", **i}
+                          for i in lst if not want or want.group(1) in [l["name"] for l in i["labels"]]]))
 elif args[0] == "api":
     path = next(a for a in args[1:] if a.startswith("repos/"))
     mi = re.fullmatch(r"repos/([^/]+/[^/]+)/issues/(\d+)", path)
@@ -184,7 +196,9 @@ elif args[0] == "api":
         if "-f" in args:
             db.setdefault("issue_bodies", {})[key] = args[args.index("-f") + 1][len("body="):]
             save()
-        print(json.dumps({"body": db.get("issue_bodies", {}).get(key, "")}))
+        who = db.get("issue_authors", {}).get(key, {"login": "kelsin", "author_association": "OWNER"})
+        print(json.dumps({"body": db.get("issue_bodies", {}).get(key, ""), "user": {"login": who["login"]},
+                          "author_association": who["author_association"]}))
         sys.exit(0)
     m = re.match(r"repos/([^/]+/[^/]+)/issues/(\d+)/comments", path)
     key = f"{m.group(1)}#{m.group(2)}"

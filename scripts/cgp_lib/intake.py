@@ -4,7 +4,7 @@ import sys
 from urllib.parse import quote
 from .consts import PRIORITY_OPTIONS
 from .util import die, out
-from .gh import gh, gql, rest
+from .gh import gh, gql, rest, trusted
 from .store import cfg
 from .board import fetch_items, parse_item, require_repo, set_single
 
@@ -59,11 +59,14 @@ def cmd_import(a):
         it = parse_item(raw, c)
         if it["kind"] == "issue":
             on_board.add((it["issueRepo"], it["number"]))
-    added = []
+    added, skipped = [], []
     for repo in repos:
         for issue in rest(f"repos/{repo}/issues?state=open&labels={quote(a.label, safe='')}"):
             if "pull_request" in issue or (repo, issue["number"]) in on_board:
                 continue
+            if not trusted(repo, issue):  # anyone can open an issue with a label on a public repo: only trusted authors are taken in
+                skipped.append({"repo": repo, "number": issue["number"], "author": (issue.get("user") or {}).get("login")})
+                continue
             added.append({"repo": repo, "number": issue["number"], "title": issue["title"],
                           "item": put_on_board(c, issue["node_id"])})
-    out({"label": a.label, "added": added})
+    out({"label": a.label, "added": added, "skippedUntrusted": skipped})

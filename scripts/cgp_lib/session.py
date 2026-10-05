@@ -75,9 +75,10 @@ def cmd_session_title(a):
 def cmd_release(a):
     key = load_json(state_path(), {}).get("boardKey")
     if key:
-        lk = load_json(lock_file(key), None)
-        if lk and lk.get("session") == sid():
-            os.remove(lock_file(key))
+        with locked():  # read and remove together: a session that claimed the board meanwhile keeps its lock
+            lk = load_json(lock_file(key), None)
+            if lk and lk.get("session") == sid():
+                os.remove(lock_file(key))
     update_state(lambda st: st.update(boardKey=None, workers=[], counts={}, waiting=[], updatedAt=None))
     out({"released": key})
 

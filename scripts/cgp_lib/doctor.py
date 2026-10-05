@@ -13,6 +13,9 @@ from .gh import gh
 from .store import list_boards, load_board, load_json
 from .board import fetch_items, fetch_project, fields_by_name, parse_board_url, parse_item
 from .gitutil import git
+from .gitwt import is_dirty
+from .notify import command_problem
+from .util import printable
 
 # Permission rules the README recommends for sessions that run the loop; doctor only reports whether they are present.
 RECOMMENDED_DENY = ("Bash(gh pr merge:*)", "Bash(gh auth token:*)", "Bash(gh api graphql:*)")
@@ -49,7 +52,7 @@ def finished_stories(c):
 def stale_worktrees(done):
     root = os.path.join(HOME, "worktrees")
     return [p for p in glob.glob(os.path.join(root, "*", "*", "*"))
-            if tuple(os.path.relpath(p, root).split(os.sep)) in done]
+            if tuple(os.path.relpath(p, root).split(os.sep)) in done and not is_dirty(p)]  # uncommitted work is kept
 
 
 def cmd_gc(a):
@@ -146,6 +149,9 @@ def cmd_doctor(a):
         waiting = fields.get(WAITING_FIELD, {})
         check(f"{title}: Waiting On has 'You' and '{STORY_OPTION}'",
               {"You", STORY_OPTION} <= {o["name"] for o in waiting.get("options", [])}, "run /cgp:setup again", warn=True)
+        cmd = (c["settings"].get("notifyCommand") or "").strip()
+        problem = command_problem(cmd) if cmd else None
+        check(f"{title}: notifyCommand", not problem, f"it will not run: {problem}", warn=True)
         for repo, path in c["repos"].items():
             ok = bool(path) and os.path.isdir(path)
             check(f"{title}: clone of {repo}", ok, path or f"unknown: cgp repo-path {repo} <path>")
@@ -165,6 +171,6 @@ def cmd_doctor(a):
 
 def report(results):
     for r in results:
-        print(f"{'✅' if r['ok'] else '⚠️ ' if r['warn'] else '❌'} {r['check']}{'  ' + r['detail'] if r['detail'] else ''}")
+        print(printable(f"{'✅' if r['ok'] else '⚠️ ' if r['warn'] else '❌'} {r['check']}{'  ' + r['detail'] if r['detail'] else ''}"))
     if any(not r["ok"] and not r["warn"] for r in results):
         sys.exit(1)

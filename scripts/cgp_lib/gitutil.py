@@ -59,3 +59,15 @@ def default_ref(path):
     if not ref:
         die("cannot determine the default branch (origin/HEAD unset and remote unreachable)")
     return ref
+
+
+def origin_ok(path, repo):
+    """False when the clone's origin points somewhere other than github.com/<repo> (https or ssh, any case). A local path
+    (a bare repo used as origin) is allowed; any other remote URL is not."""
+    url = git(path, "remote", "get-url", "origin", check=False)
+    if not url:
+        return False
+    owner, name = re.escape(repo.split("/")[0]), re.escape(repo.split("/")[1])
+    if re.fullmatch(rf"(https://([^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/){owner}/{name}(\.git)?/?", url, re.I):
+        return True
+    return "://" not in url and not re.match(r"[^/@]+@[^/]+:", url) or url.startswith("file://")

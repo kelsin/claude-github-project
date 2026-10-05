@@ -5,6 +5,7 @@ import subprocess
 from .consts import ALL_KEYS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
 from .util import die, norm, out, safe, split_repo
 from .gh import gh, gql
+from .gitutil import origin_ok
 from .models import parse as parse_models
 from .store import board_file, cfg, list_boards, load_json, save_board, update_board
 
@@ -427,7 +428,12 @@ def cmd_repo_path(a):
     if a.repo:
         a.repo = require_repo(c, a.repo)
     if a.path:
-        c = update_board(lambda c: c["repos"].__setitem__(a.repo, os.path.abspath(a.path)))
+        path = os.path.abspath(a.path)
+        if c["repos"].get(a.repo) and c["repos"][a.repo] != path:
+            die(f"{a.repo} already has a local clone ({c['repos'][a.repo]}); edit paths.json yourself to change it")
+        if not os.path.isdir(path) or not origin_ok(path, a.repo):
+            die(f"{path} is not a clone of {a.repo} (its origin remote must be github.com/{a.repo})")
+        c = update_board(lambda c: c["repos"].__setitem__(a.repo, path))
     out(c["repos"] if not a.repo else {a.repo: c["repos"].get(a.repo)})
 
 

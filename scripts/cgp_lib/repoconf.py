@@ -2,6 +2,7 @@
 otherwise loosen its own guard). Unknown keys and wrong types are ignored."""
 import json
 import re
+from .consts import DEFAULTS
 from .util import die, out
 from .store import cfg
 from .board import get_item, require_repo
@@ -44,8 +45,10 @@ def repo_config(c, repo):
 
 
 def merged_globs(c, key, repos=()):
-    """The board setting `key` plus the same key from each repo's .cgp.json (a repo can only add to a guard, never remove)."""
-    seen = list(c["settings"].get(key, []))
+    """The board setting `key` plus the same key from each repo's .cgp.json (a repo can only add to a guard, never remove).
+    The built-in guardFiles are always included: a worker that empties the setting must not switch the guard off."""
+    seen = list(DEFAULTS.get(key, [])) if key == "guardFiles" else []
+    seen += [g for g in c["settings"].get(key, []) if g not in seen]
     for r in repos:
         seen += [g for g in repo_config(c, r).get(key, []) if g not in seen]
     return seen
