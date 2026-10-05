@@ -14,6 +14,6 @@ The unit tests use a fake gh, so the real GraphQL schema is not covered. `CGP_LI
 
 ## Releases
 
-Versions are automated with [release-please](https://github.com/googleapis/release-please). PR titles must be [conventional commits](https://www.conventionalcommits.org) (`feat:`, `fix:`, `feat!:` ...; checked in CI) because squash merges use the title as the commit message. Merging to `main` keeps a release PR open that bumps `.claude-plugin/plugin.json` and `CHANGELOG.md`; merging that PR tags `vX.Y.Z` and publishes a GitHub release, which is what installed plugins update to. Pin a release with `claude plugin marketplace add kelsin/claude-github-project#vX.Y.Z`.
+Versions are automated with [release-please](https://github.com/googleapis/release-please). PR titles must be [conventional commits](https://www.conventionalcommits.org) (`feat:`, `fix:`, `feat!:` ...; checked in CI) because squash merges use the title as the commit message. Workers write conventional titles for the PRs they open. Merging to `main` keeps a release PR open that bumps `.claude-plugin/plugin.json` and `CHANGELOG.md`; merging that PR tags `vX.Y.Z` and publishes a GitHub release, which is what installed plugins update to. Pin a release with `claude plugin marketplace add kelsin/claude-github-project#vX.Y.Z`.
 
 See [Architecture](architecture.md) for the code layout.
