@@ -74,7 +74,7 @@ def cmd_move(a):
             gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
         record_reviewed(a.item, ref, shown["headRefOid"])  # the commit the user is about to review: merge accepts only this one
     if a.column == "implement" and it["column"] == "plan_approved":
-        snapshot_touches(a.item, replace=True)  # what the user approved is what the guard allows
+        snapshot_touches(a.item)  # fills a missing snapshot only: what the user approved is what the guard allows
 
     def upd(st):
         for w in st["workers"]:
@@ -89,12 +89,12 @@ def cmd_move(a):
     out({"item": a.item, "column": a.column})
 
 
-def snapshot_touches(item, replace=False):
+def snapshot_touches(item):
     """Save the files the story declared when it entered Plan Approved / Implement: `cgp guard` allows guarded paths only from
     this copy, so a worker cannot widen it afterwards by re-declaring its touches."""
     def upd(d):
         snap = d.setdefault("approvedTouches", {})
-        if replace or item not in snap:
+        if item not in snap:
             snap[item] = list(d.get("touches", {}).get(item, []))
     update_data(upd)
 
@@ -103,7 +103,7 @@ def valid_plan(value):
     """`Skip`, or an https URL on claude.ai or github.com (no credentials, port or whitespace); anything else is not a plan link."""
     if value.lower() == SKIP:
         return True
-    if not re.fullmatch(r"\S+", value):
+    if not re.fullmatch(r"[^\s()\[\]<>]+", value):
         return False
     u = urlsplit(value)
     return u.scheme == "https" and u.netloc == (u.hostname or "?") and u.hostname in ("claude.ai", "github.com")

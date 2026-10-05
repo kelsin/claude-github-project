@@ -179,7 +179,8 @@ def cancel_auto_merge(repo, pr):
         v = pr_view(repo, pr, check=False)
         if v and not v.get("autoMergeRequest"):
             return True
-        time.sleep(0.3 * (n + 1))
+        if n < 2:
+            time.sleep(0.3 * (n + 1))
     return False
 
 
@@ -242,7 +243,11 @@ def cmd_merge_wait(a):
         if v["state"] == "CLOSED":
             out({"state": "closed"})
             return
-        if not a.delegated and not still_approved(c, a.item):  # taken back while we waited: nothing may merge on the old approval
+        if not still_approved(c, a.item):  # taken back while we waited: nothing may merge on the old approval
+            now = pr_view(a.repo, a.pr, check=False)  # a merge may just have moved the card to Done
+            if now and now["state"] == "MERGED":
+                out({"state": "merged"})
+                return
             cancel_auto_merge(a.repo, a.pr)
             out({"state": "revoked", "note": "the story is no longer in pr_approved; auto-merge was disarmed"})
             return
@@ -263,15 +268,19 @@ def cmd_merge_wait(a):
         last_head = v["headRefOid"]
         if v["mergeStateStatus"] == "BEHIND":
             if update_branch(a.repo, a.pr, v["headRefOid"]):
-                moved = pr_view(a.repo, a.pr, check=False)  # the update commit is this tool's own: no re-approval, if the head was approved
-                if moved and (a.delegated or is_approved_head(a.item, v["headRefOid"])):
-                    allow_head(a.item, moved["headRefOid"])
+                # the REST call only queues the update: wait for the new head. It is this tool's own commit, so no re-approval
+                for _ in range(8):
+                    moved = pr_view(a.repo, a.pr, check=False)
+                    if moved and moved["headRefOid"] != v["headRefOid"]:
+                        if a.delegated or is_approved_head(a.item, v["headRefOid"]):
+                            allow_head(a.item, moved["headRefOid"])
+                        break
+                    time.sleep(1)
         elif v["reviewDecision"] in ("CHANGES_REQUESTED", "REVIEW_REQUIRED") and v["mergeStateStatus"] == "BLOCKED":
             out({"state": "blocked", "pr": v})
             return
         elif (v["mergeStateStatus"] == "CLEAN" and not v.get("autoMergeRequest") and checks is not None
-              and all(x["bucket"] in ("pass", "skipping") for x in checks)
-              and (a.delegated or still_approved(c, a.item))):
+              and all(x["bucket"] in ("pass", "skipping") for x in checks)):
             gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--delete-branch", *pin(v), check=False)
         if not poll.wait():
             out({"state": "pending", "pr": v})

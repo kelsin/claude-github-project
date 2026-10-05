@@ -70,4 +70,4 @@ def origin_ok(path, repo):
     owner, name = re.escape(repo.split("/")[0]), re.escape(repo.split("/")[1])
     if re.fullmatch(rf"(https://([^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/){owner}/{name}(\.git)?/?", url, re.I):
         return True
-    return "://" not in url and not re.match(r"[^/@]+@[^/]+:", url) or url.startswith("file://")
+    return os.path.isabs(url) or url.startswith("file://")

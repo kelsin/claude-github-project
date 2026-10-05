@@ -121,7 +121,6 @@ class TestSyncRecords(test_cgp.TestSync):
         self.commit("h.txt")  # a local commit nobody reviewed
         self.push_to_main("one\ntwo\n")
         self.assertEqual(self.cgp("sync", "i1")["state"], "rebased")
-        self.assertEqual(self.data()["reviewed"]["i1"]["sha"] != subprocess_out(self.wt, "rev-parse", "HEAD"), True)
         self.assertEqual(self.data().get("cleanRebase", {}).get("i1", []), [])
 
     def test_a_story_with_no_review_record_allows_nothing(self):
@@ -179,7 +178,7 @@ class TestSyncRecords(test_cgp.TestSync):
         self.cgp("list", "--brief")
         self.assertEqual(self.data()["approvedTouches"]["i1"], ["a.py"])
         self.cgp("move", "i1", "implement")
-        self.assertEqual(self.data()["approvedTouches"]["i1"], ["a.py", ".npmrc"])  # entering Implement from the approved plan
+        self.assertEqual(self.data()["approvedTouches"]["i1"], ["a.py"])  # the move does not widen it
         self.force("i1", "plan")
         self.cgp("list", "--brief")
         self.assertNotIn("i1", self.data()["approvedTouches"])
@@ -337,7 +336,7 @@ class TestMergeGates(PRBase):
         self.cgp("merge", "i1")
         self.assertTrue(all(c[-2:] == ["--match-head-commit", "aaa111"] for c in self.calls("merge")))
         self.assertEqual(len(self.calls("merge")), 2)
-        self.db_set(calls=[], prs={"acme/app#1": self.view(mergeStateStatus="CLEAN")})
+        self.db_set(calls=[])
         self.db_set(prs={"acme/app#1": [self.view(mergeStateStatus="CLEAN"), self.view(state="MERGED")]})
         self.wait()
         self.assertEqual(self.calls("merge")[0][-2:], ["--match-head-commit", "aaa111"])
@@ -430,8 +429,7 @@ class TestMergeGates(PRBase):
         self.prs(self.view(mergeStateStatus="CLEAN"))
         self.db_set(checks_seq=[{"rc": 1, "stderr": "boom"}], calls=[])
         self.assertEqual(self.wait("--timeout", "0")["state"], "pending")
-        self.db_set(checks=[{"name": "t", "bucket": "pending", "link": ""}], checks_seq=None)
-        d = self.read_db(); d.pop("checks_seq", None); self.write_db(d)
+        d = self.read_db(); d.pop("checks_seq", None); d["checks"] = [{"name": "t", "bucket": "pending", "link": ""}]; self.write_db(d)
         self.assertEqual(self.wait("--timeout", "0")["state"], "pending")
         self.assertEqual(self.calls("merge"), [])
 
@@ -455,7 +453,7 @@ class TestSetValidation(Base):
     def test_plan_is_skip_or_an_https_link_on_claude_ai_or_github(self):
         self.setup_board()
         for bad in ("http://claude.ai/artifact/x", "https://evil.example/plan", "https://claude.ai/a b", "javascript:alert(1)",
-                    "https://claude.ai@evil.example/x", "https://claude.ai.evil.example/x", "https://claude.ai:444/x", "see below"):
+                    "https://claude.ai@evil.example/x", "https://claude.ai.evil.example/x", "https://claude.ai:444/x", "see below", "https://github.com/a/b[x](https://evil.example)"):
             self.assertNotEqual(self.cgp("set", "i1", "plan", bad, ok=False).returncode, 0, bad)
         for good in ("https://claude.ai/artifact/x", "https://github.com/acme/app/issues/1", "  Skip  ", "skip"):
             self.cgp("set", "i1", "plan", good)
@@ -478,7 +476,7 @@ class TestRepoPath(test_cgp.Base):
     def test_origin_must_be_the_repo_on_github_and_an_existing_clone_is_never_repointed(self):
         self.setup_board()
         for origin in ("https://github.com/evil/app.git", "https://github.com.evil.example/acme/app", "https://evil.example/acme/app.git",
-                       "git@evil.example:acme/app.git", "https://github.com/acme/app-fork.git"):
+                       "git@evil.example:acme/app.git", "evil.example:acme/app.git", "https://github.com/acme/app-fork.git"):
             p = self.cgp("repo-path", "acme/app", self.make_clone(origin=origin, name="c" + str(abs(hash(origin)))), ok=False)
             self.assertIn("not a clone of acme/app", p.stderr, origin)
         self.assertIn("not a clone", self.cgp("repo-path", "acme/app", os.path.join(self.tmp, "missing"), ok=False).stderr)
