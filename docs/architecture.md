@@ -40,11 +40,11 @@ Workers rate each story low / medium / high on complexity and risk (auth, migrat
 
 ## Parallel sessions (one board per session)
 
-Run `/cgp:run` in as many sessions as you like, as long as each uses a different board (`/cgp:setup` each board once; `/cgp:run <board-url>` picks one, or it asks when several are set up).
+Run `/cgp:run` in as many sessions as you like, as long as each uses a different board (`/cgp:setup` each board once). A repo belongs to one board, so the board comes from the repo you run in (the `origin` remote of the current directory; story worktrees count too). `/cgp:run <board-url>` picks one explicitly and wins over the repo; outside any board's repo the session's bound board, or the only board, is used, else exit 6.
 - **Per-session UI and state.** The mod gives each session an id (`CGP_SESSION`, exported to everything that session runs), so each band shows only that session's board, counts and workers, and one session's workers are never cleared by another. A session that never ran `/cgp:run` shows no band.
 - **One loop per board.** `cgp use` claims the board for the session (a lock file kept alive by every update the session makes; a lock untouched for 30 minutes counts as abandoned). A second session asking for the same board is refused, and offered `--takeover` if the first is gone; the session that was taken over stops at its next poll. `cgp release` frees the board (the loop does this when everything is Done).
 - **Board data outlives sessions.** Blocks, touched-file lists and feedback cursors are stored per board, so restarting a session loses nothing. Repo clone paths are shared by all boards.
-- If a session was started before the mod was loaded, `cgp` falls back to a `default` session id, which is fine for a single session. Each worker row shows the emoji of the story's current column; it updates as the worker moves the story.
+- If a session was started before the mod was loaded, `cgp` falls back to a `default` session id (`default-<board>` inside a board's repo, so terminals on different boards stay apart; it changes if you `cd` out of the repo), which is fine for a single session. Each worker row shows the emoji of the story's current column; it updates as the worker moves the story.
 
 ## Files
 

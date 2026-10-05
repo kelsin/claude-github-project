@@ -57,8 +57,8 @@ class Base(unittest.TestCase):
         with open(self.db) as f:
             return json.load(f)
 
-    def cgp(self, *args, input=None, ok=True, env=None):
-        p = subprocess.run([sys.executable, CGP, *args], capture_output=True, text=True,
+    def cgp(self, *args, input=None, ok=True, env=None, cwd=None):
+        p = subprocess.run([sys.executable, CGP, *args], capture_output=True, text=True, cwd=cwd or self.tmp,  # self.tmp is no repo
                            env={**self.env, **(env or {})}, input=input)
         if ok:
             self.assertEqual(p.returncode, 0, p.stderr)
@@ -703,7 +703,11 @@ class TestSessions(Base):
         self.a = {"CGP_SESSION": "a"}
         self.b = {"CGP_SESSION": "b", "FAKE_GH_DB": self.db2}
         self.cgp("setup", "https://github.com/orgs/acme/projects/1", "--repo", "acme/app")
-        self.cgp("setup", "https://github.com/orgs/acme/projects/2", "--repo", "acme/app", env={"FAKE_GH_DB": self.db2})
+        with open(self.db2) as f:
+            d = json.load(f)
+        with open(self.db2, "w") as f:
+            json.dump({**d, "linked_repos": ["acme/other"]}, f)  # a repo belongs to one board
+        self.cgp("setup", "https://github.com/orgs/acme/projects/2", "--repo", "acme/other", env={"FAKE_GH_DB": self.db2})
 
     def file(self, name):
         with open(os.path.join(self.env["CGP_HOME"], name)) as f:
@@ -786,9 +790,117 @@ class TestSessions(Base):
 
     def test_repo_paths_are_shared_across_boards(self):
         self.cgp("use", "https://github.com/orgs/acme/projects/2", env=self.b)
-        self.cgp("repo-path", "acme/app", self.tmp, env=self.b)
+        self.cgp("repo-path", "acme/other", self.tmp, env=self.b)
         self.cgp("use", "https://github.com/orgs/acme/projects/1", env=self.a)
-        self.assertEqual(self.cgp("repo-path", env=self.a)["acme/app"], self.tmp)
+        self.cgp("repo-path", "acme/app", self.tmp, env=self.a)
+        self.assertEqual(self.file("paths.json"), {"acme/other": self.tmp, "acme/app": self.tmp})
+
+
+class TestBoardOfRepo(Base):
+    """The repo you run in decides the board."""
+    U1, U2 = "https://github.com/orgs/acme/projects/1", "https://github.com/orgs/acme/projects/2"
+
+    def repo(self, name, origin):
+        path = os.path.join(self.tmp, name)
+        subprocess.run(["git", "init", "-q", path], check=True)
+        if origin:
+            subprocess.run(["git", "-C", path, "remote", "add", "origin", origin], check=True)
+        return path
+
+    def setUp(self):
+        super().setUp()
+        self.db2 = os.path.join(self.tmp, "db2.json")
+        with open(self.db) as f:
+            d = json.load(f)
+        d["linked_repos"] = ["acme/other"]
+        with open(self.db2, "w") as f:
+            json.dump(d, f)
+        self.env2 = {"FAKE_GH_DB": self.db2}
+        self.cgp("setup", self.U1, "--repo", "acme/app")
+        self.cgp("setup", self.U2, "--repo", "acme/other", env=self.env2)
+        self.app = self.repo("app", "git@github.com:acme/app.git")
+        self.other = self.repo("other", "https://github.com/Acme/Other")  # mixed case, no .git
+        self.stray = self.repo("stray", "https://github.com/someone/else.git")
+
+    def board(self, cwd, env=None):
+        return self.cgp("list", cwd=cwd, env=env)["board"]["number"]
+
+    def test_the_repo_you_are_in_chooses_the_board(self):
+        self.assertEqual(self.board(self.app), 1)
+        self.assertEqual(self.board(self.other), 2)
+        subprocess.run(["git", "-C", self.app, "worktree", "add", "-q", os.path.join(self.tmp, "wt"), "-b", "x"],
+                       check=True, capture_output=True)
+        self.assertEqual(self.board(os.path.join(self.tmp, "wt")), 1)  # worktrees share the origin
+
+    def test_origin_forms(self):
+        for n, url in enumerate(("https://github.com/acme/app", "https://github.com/acme/app.git", "git@github.com:acme/app.git",
+                                 "ssh://git@github.com/acme/app.git", "https://github.com/ACME/App/")):
+            self.assertEqual(self.board(self.repo(f"f{n}", url)), 1, url)
+        self.assertEqual(self.cgp("list", cwd=self.repo("fake", "https://notgithub.com/acme/app"), ok=False).returncode, 6)
+
+    def test_a_directory_on_no_board_falls_back_to_the_bound_or_only_board(self):
+        self.assertEqual(self.cgp("list", cwd=self.stray, ok=False).returncode, 6)  # two boards, nothing bound
+        noorigin = self.repo("noorigin", None)
+        self.assertEqual(self.cgp("list", cwd=noorigin, ok=False).returncode, 6)
+        self.cgp("use", self.U2, env={"CGP_SESSION": "s"})
+        self.assertEqual(self.board(self.stray, {"CGP_SESSION": "s"}), 2)
+        self.assertEqual(self.board(self.tmp, {"CGP_SESSION": "s"}), 2)
+
+    def test_an_explicit_binding_wins_over_the_repo(self):
+        s = {"CGP_SESSION": "s"}
+        self.cgp("use", self.U1, cwd=self.other, env=s)  # board 1 from board 2's checkout
+        self.assertEqual(self.board(self.other, s), 1)
+        self.assertEqual(self.board(self.app, s), 1)
+
+    def test_bare_terminals_on_different_boards_do_not_share_state(self):
+        self.cgp("use", cwd=self.app)
+        self.cgp("use", cwd=self.other)  # no URL, no session: the repo chooses; a shared lock identity would clash or overwrite
+        home = self.env["CGP_HOME"]
+        names = sorted(n for n in os.listdir(home) if n.startswith("state-"))
+        self.assertEqual(names, ["state-default-P1.json", "state-default-P2.json"])
+        self.cgp("use", cwd=self.app)  # the same terminal can re-claim its board
+
+    def test_use_without_a_url_follows_the_repo(self):
+        self.assertEqual(self.cgp("use", cwd=self.other, env={"CGP_SESSION": "s"})["board"]["number"], 2)
+
+    def test_session_title_hook_picks_the_repos_board(self):
+        def title(cwd):
+            p = self.cgp("session-title", input=json.dumps({"prompt": "/cgp:run"}), cwd=cwd, ok=False)
+            return json.loads(p.stdout)["hookSpecificOutput"]["sessionTitle"] if p.stdout.strip() else None
+        self.assertEqual(title(self.other), "🚀 Test Board 2")
+        self.assertIsNone(title(self.stray))
+
+    def test_setup_refuses_a_repo_another_board_has(self):
+        p = self.cgp("setup", self.U2, "--repo", "ACME/app", ok=False, env=self.env2)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Test Board 1", p.stderr)
+        self.assertEqual(self.cgp("setup", self.U1, "--repo", "acme/app")["skippedRepos"], [])  # re-running on its own board
+
+    def test_setup_leaves_out_linked_repos_another_board_owns(self):
+        with open(self.db2) as f:
+            d = json.load(f)
+        d["linked_repos"] = ["acme/other", "acme/app"]
+        with open(self.db2, "w") as f:
+            json.dump(d, f)
+        res = self.cgp("setup", self.U2, env=self.env2)
+        self.assertEqual(res["skippedRepos"], ["acme/app"])
+        self.assertEqual(list(res["repos"]), ["acme/other"])
+
+    def test_a_repo_on_two_boards_is_an_error_until_fixed(self):
+        board2 = os.path.join(self.env["CGP_HOME"], "boards", "P2.json")
+        with open(board2) as f:
+            c = json.load(f)
+        c["repos"]["acme/app"] = None
+        with open(board2, "w") as f:
+            json.dump(c, f)
+        self.assertEqual(self.cgp("list", cwd=self.app, ok=False).returncode, 6)
+        for env in ({"CGP_SESSION": "s"}, {}):  # a bare terminal too
+            self.cgp("use", self.U1, cwd=self.app, env=env)  # the URL gets around it
+            self.assertEqual(self.board(self.app, env), 1)
+            self.cgp("release", cwd=self.app, env=env)
+        p = self.cgp("doctor", ok=False)
+        self.assertIn("each repo is on one board", p.stdout)
+        self.assertIn("acme/app is on", p.stdout)
 
 
 class TestWorkers(Base):

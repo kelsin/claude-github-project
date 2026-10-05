@@ -1,5 +1,6 @@
 """Plain git helpers shared by the worktree and repo-config modules."""
 import os
+import re
 import subprocess
 import time
 from .consts import HOME
@@ -11,6 +12,21 @@ def resolve_repo_path(c, repo):
     if not path or not os.path.isdir(path):
         die(f"no local clone known for {repo}; run: cgp repo-path {repo} <path>")
     return path
+
+
+_cwd_repo = []
+
+
+def cwd_repo():
+    """'owner/name' of the GitHub repo the current directory belongs to (its `origin` remote; linked worktrees share it), else None."""
+    if not _cwd_repo:
+        try:
+            url = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+        except OSError:  # no git, or the directory is gone
+            url = ""
+        m = re.search(r"(?:^|[@/])github\.com[:/]([^/]+/[^/]+?)(?:\.git)?/?$", url)
+        _cwd_repo.append(m.group(1) if m else None)
+    return _cwd_repo[0]
 
 
 def git(path, *args, check=True):

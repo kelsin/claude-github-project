@@ -15,6 +15,7 @@ Fixes
 - `paths.json` is updated under the state lock; the lock is re-entrant.
 
 Features
+- Multi-board use: the board is chosen by the repo you run in (its `origin` remote, also from a worktree), so sessions in different repos work different boards without `cgp use`. A repo belongs to one board: setup refuses one another board has, reports `skippedRepos`, and `cgp doctor` flags duplicates. Bare terminals on different boards no longer share state.
 - `Priority` field (High / Medium / Low / Hold) orders dispatch within a column; Hold is never dispatched. `cgp add` / `cgp import` (and `/cgp:add`) put stories on the board from the terminal.
 - `notifyCommand` hook; `.cgp.json` per-repo settings (`cgp repo-config`); preview providers Netlify, Vercel, Cloudflare Pages and the Deployments API; `plannerModel` / `reviewerModel` / `implementerModel` with `cgp models`; `draftPRs`.
 

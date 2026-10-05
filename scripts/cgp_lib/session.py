@@ -6,7 +6,7 @@ import sys
 import time
 from .consts import DEFAULT_PHASE, HOME, LOCKS, LOCK_STALE_SECONDS, PHASES
 from .util import die, now_iso, out, safe, strip_id
-from .store import cfg, ensure_home, list_boards, load_board, load_json, lock_file, lock_holder, locked, save_json, sid, state_path, stop_path, update_state
+from .store import board_for_cwd, cfg, ensure_home, list_boards, load_board, load_json, lock_file, lock_holder, locked, save_json, sid, state_path, stop_path, update_state
 from .board import get_item, parse_board_url
 
 
@@ -24,6 +24,8 @@ def cmd_use(a):
                     if b["board"]["number"] == number and b["board"]["owner"].lower() == owner.lower()), None)
         if not key:
             die(f"that board is not set up yet; run /cgp:setup {a.url} first")
+    elif board_for_cwd() in boards:  # the repo you are in decides
+        key = board_for_cwd()
     elif load_json(state_path(), {}).get("boardKey") in boards:
         key = load_json(state_path(), {})["boardKey"]
     elif len(boards) == 1:
@@ -61,7 +63,7 @@ def cmd_session_title(a):
             found = next((b for b in boards if b["number"] == number and b["owner"].lower() == owner.lower()), None)
             name = found["title"] if found else f"{owner} project {number}"
         else:
-            key = load_json(state_path(), {}).get("boardKey")
+            key = board_for_cwd() or load_json(state_path(), {}).get("boardKey")
             found = next((b for b in boards if safe(b["id"]) == key), None) or (boards[0] if len(boards) == 1 else None)
             name = found["title"] if found else None
         if name:
