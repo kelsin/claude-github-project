@@ -17,7 +17,7 @@ from .gitwt import is_dirty
 from .notify import command_problem
 from .util import printable
 
-# Permission rules the README recommends for sessions that run the loop; doctor only reports whether they are present.
+# Permission rules docs/safety.md recommends for sessions that run the loop; doctor only reports whether they are present.
 RECOMMENDED_DENY = ("Bash(gh pr merge:*)", "Bash(gh auth token:*)", "Bash(gh api graphql:*)")
 
 
