@@ -8,13 +8,19 @@ from .store import cfg, load_data, update_data
 from .board import issue_item
 from .gitutil import default_ref, fetch, git, resolve_repo_path, wt_path
 from .repoconf import merged_globs
-from .pr import allow_head
+from .pr import allow_head, is_approved_head
+
+
+def is_dirty(wt):
+    """True when the worktree has uncommitted work. (Unpushed commits are not checked: after a squash merge they never look merged.)"""
+    p = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True)
+    return p.returncode != 0 or bool(p.stdout.strip())
 
 
 def cleanup_worktree(c, it):
     try:
         wt = wt_path(it)
-        if os.path.isdir(wt):
+        if os.path.isdir(wt) and not is_dirty(wt):
             base = resolve_repo_path(c, it["issueRepo"])
             git(base, "worktree", "remove", "--force", wt, check=False)
             git(base, "branch", "-D", f"cgp/{it['number']}", check=False)
@@ -93,6 +99,7 @@ def cmd_sync(a):
     if not branch:
         die("worktree is on a detached HEAD; check out the story branch first")
     moved = ahead_of_us = 0
+    old_head = git(wt, "rev-parse", "HEAD")  # before anything moves it: only a rebase of an approved commit is itself approved
     remote = f"origin/{branch}"
     if git(wt, "rev-parse", "--verify", remote, check=False):
         # commits on the remote that are not (patch-equivalent to) ours: a local rebase not yet pushed is not someone else's push
@@ -113,8 +120,8 @@ def cmd_sync(a):
             out({**res, "behind": behind, "base": default})
             return
         moved += behind
-        if not ahead_of_us and a.item not in load_data().get("tainted", []):
-            allow_head(a.item, git(wt, "rev-parse", "HEAD"))  # a clean rebase of our own commits: merge needs no new approval
+        if not ahead_of_us and a.item not in load_data().get("tainted", []) and is_approved_head(a.item, old_head):
+            allow_head(a.item, git(wt, "rev-parse", "HEAD"))  # a clean rebase of the reviewed commit: merge needs no new approval
     out({"state": "rebased" if moved else "clean", "behind": behind, "base": default})
 
 
@@ -125,10 +132,14 @@ def cmd_guard(a):
     wt = wt_path(it)
     if not os.path.isdir(wt):
         die("no worktree for this story")
-    names = git(wt, "diff", "--name-only", "--no-renames", f"{default_ref(wt)}...HEAD").splitlines()
-    allowed = [norm_path(t) for t in load_data().get("touches", {}).get(a.item, [])]
-    guarded = merged_globs(c, "guardFiles", [it["issueRepo"]])
-    bad = [n for n in names if any(fnmatch.fnmatchcase(x, g) for g in guarded for x in (n, os.path.basename(n)))
+    names = [n for n in git(wt, "diff", "-z", "--name-only", "--no-renames", f"{default_ref(wt)}...HEAD").split("\0") if n]  # NUL-split: no quoting
+    d = load_data()
+    snap = d.get("approvedTouches", {}).get(a.item)  # what was declared when the story was approved; a story from before that
+    allowed = [norm_path(t) for t in (snap if snap is not None else d.get("touches", {}).get(a.item, []))]  # existed uses its touches
+    if it["skipPlan"]:
+        allowed = []  # no plan was approved, so nothing guarded was
+    guarded = [g.lower() for g in merged_globs(c, "guardFiles", [it["issueRepo"]])]
+    bad = [n for n in names if any(fnmatch.fnmatchcase(x.lower(), g) for g in guarded for x in (n, os.path.basename(n)))
            and not any(covers(t, n) for t in allowed)]
     out({"ok": not bad, "violations": bad})
     if bad:

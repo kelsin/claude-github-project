@@ -4,17 +4,47 @@ import os
 import re
 import shlex
 import subprocess
+from .consts import HOME
 from .store import update_data
+from .util import printable
 
 REVIEW = ("plan_review", "pr_review")
 
 
+SECRET_ENV = re.compile(r"^(GH_|GITHUB_|GIT_)|_TOKEN$", re.I)
+WORKTREES = os.path.join(HOME, "worktrees")
+
+
+def command_problem(cmd):
+    """Why `notifyCommand` may not run (None when it may): the program must be an absolute path to an executable file that only
+    this user can write, outside worktrees, /tmp and the cgp home, because a worker can write files in all of those."""
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        return "it is not a valid command line"
+    if not argv or not os.path.isabs(argv[0]):
+        return "the program must be an absolute path"
+    path = os.path.realpath(argv[0])
+    if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+        return f"{argv[0]} is not an executable file"
+    st = os.stat(path)
+    if st.st_uid != os.getuid():
+        return f"{argv[0]} is not owned by you"
+    if st.st_mode & 0o022:
+        return f"{argv[0]} is writable by group or others"
+    for bad in (WORKTREES, HOME, "/tmp", "/private/tmp", "/var/tmp"):
+        bad = os.path.realpath(bad)
+        if path == bad or path.startswith(bad + os.sep):
+            return f"{argv[0]} is under {bad}"
+    return None
+
+
 def fire(c, event, title, url):
     cmd = (c["settings"].get("notifyCommand") or "").strip()
-    if not cmd:
+    if not cmd or command_problem(cmd):
         return
-    env = {**os.environ, "CGP_EVENT": event, "CGP_TITLE": re.sub(r"[\x00-\x1f\x7f]", "", title or ""), "CGP_URL": url or "",
-           "CGP_BOARD": c["board"]["title"]}
+    env = {k: v for k, v in os.environ.items() if not SECRET_ENV.search(k)}
+    env.update(CGP_EVENT=event, CGP_TITLE=printable(title), CGP_URL=url or "", CGP_BOARD=c["board"]["title"])
     try:
         subprocess.run(shlex.split(cmd), env=env, timeout=10, stdin=subprocess.DEVNULL, capture_output=True)
     except (OSError, ValueError, subprocess.SubprocessError):

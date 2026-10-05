@@ -3,7 +3,7 @@ import fnmatch
 import os
 import time
 from .consts import ACTIONABLE, ALL_KEYS, COLUMNS, HOME, STORY_OPTION, WAITING_FIELD
-from .util import Poll, age_seconds, strip_id, covers, die, norm_path, now_iso, out
+from .util import Poll, age_seconds, printable, strip_id, covers, die, norm_path, now_iso, out
 from .gh import rest
 from .store import cfg, load_data, load_json, lock_file, lock_holder, state_path, stop_requested, update_board, update_data, update_state
 from .board import board_keys, clear_field, ensure_story_option, fetch_items, fetch_project, fields_by_name, get_item, parse_item, parse_pr_ref, rank, set_single
@@ -155,6 +155,13 @@ def snapshot(c):
         d["deferred"] = [i["item"] for i in deferred]
         d["blocks"] = {k: v for k, v in live_blocks(d.get("blocks")).items() if v}  # re-read under the lock: keeps blocks written meanwhile
         d["touches"] = {k: v for k, v in d.get("touches", {}).items() if k in live_ids}
+        snaps = {k: v for k, v in d.get("approvedTouches", {}).items() if k in live_ids}
+        for i in live:  # the files a story declared when it was approved (see story.snapshot_touches); replanning forgets them
+            if i["column"] in ("plan_approved", "implement") and i["item"] not in snaps:
+                snaps[i["item"]] = list(d.get("touches", {}).get(i["item"], []))
+            elif i["column"] in ("todo", "plan", "plan_review"):
+                snaps.pop(i["item"], None)
+        d["approvedTouches"] = snaps
         for k in ("reviewed", "cleanRebase", "asked"):
             d[k] = {i: v for i, v in d.get(k, {}).items() if i in live_ids}
         d["tainted"] = [i for i in d.get("tainted", []) if i in live_ids]
@@ -192,24 +199,25 @@ def cmd_status(a):
     if a.json:
         out(res)
         return
+    show = lambda text: print(printable(text))  # titles come from the board: no terminal control or bidi characters
     emoji = {k: e for k, _, e, _ in COLUMNS}
     names = {k: n for k, n, _, _ in COLUMNS}
-    print(f"📋 {c['board']['title']}  {c['board']['url']}")
-    print("   " + "  ".join(f"{emoji.get(k, '•')} {names.get(k, k)} {n}" for k, n in res["counts"].items()) + f"  🎉 Done {done}")
+    show(f"📋 {c['board']['title']}  {c['board']['url']}")
+    show("   " + "  ".join(f"{emoji.get(k, '•')} {names.get(k, k)} {n}" for k, n in res["counts"].items()) + f"  🎉 Done {done}")
     beat = res["loop"] and res["loop"]["heartbeatMinutes"]
-    print("🔁 loop: " + (f"running in session {session[:8]}, heartbeat {beat} min ago" if lock else "not running (/cgp:run)"))
+    show("🔁 loop: " + (f"running in session {session[:8]}, heartbeat {beat} min ago" if lock else "not running (/cgp:run)"))
     for title, rows in (("❓ Waiting on you", res["waitingOnYou"]), ("🙋 Plan Review", res["review"]["plan_review"]),
                         ("🚦 PR Review", res["review"]["pr_review"])):
         if rows:
-            print(f"{title} ({len(rows)})")
+            show(f"{title} ({len(rows)})")
             for r in rows:
-                print(f"   {r['title']}  {r['url']}")
+                show(f"   {r['title']}  {r['url']}")
     for w in workers:
-        print(f"{emoji.get(w['column'], '•')} {w['title']} · {w.get('phase', '?')}{' (' + w['detail'] + ')' if w.get('detail') else ''} · {w['minutes']} min")
+        show(f"{emoji.get(w['column'], '•')} {w['title']} · {w.get('phase', '?')}{' (' + w['detail'] + ')' if w.get('detail') else ''} · {w['minutes']} min")
     if res["held"]:
-        print(f"⏸ On hold ({len(res['held'])}): {', '.join(res['held'])}")
+        show(f"⏸ On hold ({len(res['held'])}): {', '.join(res['held'])}")
     for b in res["blocked"]:
-        print(f"⛓ {b['title']} waits for {', '.join(b['blockedBy'])}")
+        show(f"⛓ {b['title']} waits for {', '.join(b['blockedBy'])}")
 
 
 def cmd_wait(a):

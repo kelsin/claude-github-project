@@ -5,7 +5,9 @@
 Security
 - `cgp worker start <item>` reads the story's title and column from the board; the title no longer travels through a shell command line, and the worker spawn prompt carries ids only.
 - `cgp merge` / `merge-wait` merge only the commit the user reviewed (recorded when a story enters PR Review). Clean rebases and branch updates done by the tool are exempt; anything else exits 7 / state `changed`. They also refuse a PR whose branch is not `cgp/<number>`, and drafts, and (without auto-merge) PRs whose checks are not green.
-- `cgp guard` covers more than `.github/` and CODEOWNERS and is configurable (`guardFiles`).
+- `cgp guard` covers more than `.github/` and CODEOWNERS and is configurable (`guardFiles`). The built-in list now always applies (the setting can only add to it, so emptying it no longer switches the guard off) and is extended; guarded paths are allowed only from the touches declared when the story entered Plan Approved.
+- Merge gates: merges are pinned to the head commit that was read, refuse forks and non-default bases, and a missing review record is refused (a story dragged straight to PR Approved needs one pass through PR Review). `merge-wait` returns `revoked` and disarms auto-merge when the story leaves PR Approved. A clean rebase is exempt only when it rebased the reviewed commit.
+- `notifyCommand` runs only when it is an absolute path to an executable you own, outside worktrees and `/tmp`, without token environment variables; `cgp repo-path` checks the clone's origin and never repoints; `cgp set` validates plan and PR links; `cgp prepare` reports `authorTrusted`; `cgp import` skips issues from untrusted authors.
 - Workers older than `maxWorkerMinutes` are reported as `stalled` and released by the loop.
 
 Fixes

@@ -49,6 +49,13 @@ class Base(unittest.TestCase):
                     "CGP_HOME": os.path.join(self.tmp, "home")}
         self.env.pop("CGP_SESSION", None)
 
+    def make_clone(self, name="acme-clone", origin="https://github.com/acme/app.git"):
+        """An empty git repo whose origin remote is `origin` (cgp repo-path checks it)."""
+        path = os.path.join(self.tmp, name)
+        subprocess.run(["git", "init", "-q", path], check=True)
+        subprocess.run(["git", "-C", path, "remote", "add", "origin", origin], check=True)
+        return path
+
     def write_db(self, d):
         with open(self.db, "w") as f:
             json.dump(d, f)
@@ -346,9 +353,9 @@ class TestOverlap(Base):
     def test_overlap_orders_by_stage_then_number_and_blocks_gate_the_loop(self):
         self.setup_board()
         self.force("i1", "plan_approved")
+        self.cgp("set", "i2", "pr", "https://github.com/acme/app/pull/9")
         self.cgp("move", "i2", "pr_review")
         self.cgp("move", "i4", "plan_review")  # draft: ignored by overlap (not an issue)
-        self.cgp("set", "i2", "pr", "https://github.com/acme/app/pull/9")
         d = self.read_db(); d["pr_files"] = {"acme/app#9": ["src/a.py", "src/b.py"]}; self.write_db(d)
         self.cgp("touches", "i1", "src/a.py", "docs/")
         r = self.cgp("overlap", "i1")
@@ -790,10 +797,12 @@ class TestSessions(Base):
 
     def test_repo_paths_are_shared_across_boards(self):
         self.cgp("use", "https://github.com/orgs/acme/projects/2", env=self.b)
-        self.cgp("repo-path", "acme/other", self.tmp, env=self.b)
+        other = self.make_clone("other-clone", "https://github.com/acme/other.git")
+        self.cgp("repo-path", "acme/other", other, env=self.b)
         self.cgp("use", "https://github.com/orgs/acme/projects/1", env=self.a)
-        self.cgp("repo-path", "acme/app", self.tmp, env=self.a)
-        self.assertEqual(self.file("paths.json"), {"acme/other": self.tmp, "acme/app": self.tmp})
+        app = self.make_clone("app-clone")
+        self.cgp("repo-path", "acme/app", app, env=self.a)
+        self.assertEqual(self.file("paths.json"), {"acme/other": other, "acme/app": app})
 
 
 class TestBoardOfRepo(Base):
@@ -1095,11 +1104,15 @@ class PRBase(Base):
         super().setUp()
         self.setup_board()
         self.cgp("set", "i1", "pr", self.PR)
+        self.force("i1", "implement")
+        self.cgp("move", "i1", "pr_review")  # records the head the user reviews (aaa111): merge refuses a story with no record
         self.force("i1", "pr_approved")
+        self.db_set(calls=[])
 
     def view(self, **kw):
         return {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED", "reviewDecision": "APPROVED",
-                "autoMergeRequest": None, "isDraft": False, "headRefOid": "aaa111", "headRefName": "cgp/1", **kw}
+                "autoMergeRequest": None, "isDraft": False, "headRefOid": "aaa111", "headRefName": "cgp/1",
+                "isCrossRepository": False, "baseRefName": "main", **kw}
 
     def db_set(self, **kw):
         d = self.read_db(); d.update(kw); self.write_db(d)
@@ -1183,7 +1196,8 @@ class TestMerge(PRBase):
     def test_wait_updates_a_behind_branch_then_sees_the_merge(self):
         self.prs(self.view(mergeStateStatus="BEHIND"), self.view(state="MERGED"))
         self.assertEqual(self.wait()["state"], "merged")
-        self.assertEqual(len(self.calls("update-branch")), 1)
+        self.assertEqual(len(self.read_db()["update_branch_calls"]), 1)
+        self.assertIn("expected_head_sha=aaa111", self.read_db()["update_branch_calls"][0])
 
     def test_wait_merges_a_clean_pr_without_auto_merge(self):
         self.prs(self.view(mergeStateStatus="CLEAN"), self.view(state="MERGED"))
@@ -1289,7 +1303,8 @@ class TestCleanErrors(Base):
         self.setup_board()
         self.assertIn("not a repo linked", self.fails("repo-path", "evil/x", self.tmp))
         self.assertIn("not a repo linked", self.fails("repo-path", "evil/x"))
-        self.assertEqual(self.cgp("repo-path", "acme/app", self.tmp), {"acme/app": self.tmp})
+        clone = self.make_clone()
+        self.assertEqual(self.cgp("repo-path", "acme/app", clone), {"acme/app": clone})
         self.assertEqual(list(self.cgp("repo-path")), ["acme/app"])
 
 

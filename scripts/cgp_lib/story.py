@@ -2,6 +2,7 @@
 import json
 import re
 import sys
+from urllib.parse import urlsplit
 from .consts import DEFAULT_PHASE, KEY_RENAMES, SKIP, LINKS_END, LINKS_START, MARK, NETLIFY_BOT, QMARK, TEXT_FIELDS
 from .util import call, die, now_iso, out
 from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
@@ -62,11 +63,18 @@ def cmd_move(a):
             die("a story reaches Done only from pr_approved, after its PR merged")
     if a.column != "done" and it["column"] == "pr_approved" and ref:
         cancel_auto_merge(*ref)  # leaving PR Approved must not leave a merge armed
+    shown = None
+    if a.column == "pr_review" and ref:  # read the commit the user will be shown first: a failed read must abort the move,
+        shown = pr_view(*ref)  # not leave the story in PR Review with no record of what was reviewed
+        if not shown or not shown.get("headRefOid"):
+            die("could not read the PR head; not moving the story to pr_review")
     set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
-    if a.column == "pr_review" and ref:
-        if (pr := pr_view(*ref, check=False)) and pr["isDraft"]:  # draftPRs opens PRs as drafts: ready for review now
+    if shown:
+        if shown["isDraft"]:  # draftPRs opens PRs as drafts: ready for review now
             gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
-        record_reviewed(a.item, ref)  # the commit the user is about to review: merge accepts only this one
+        record_reviewed(a.item, ref, shown["headRefOid"])  # the commit the user is about to review: merge accepts only this one
+    if a.column == "implement" and it["column"] == "plan_approved":
+        snapshot_touches(a.item)  # fills a missing snapshot only: what the user approved is what the guard allows
 
     def upd(st):
         for w in st["workers"]:
@@ -81,14 +89,51 @@ def cmd_move(a):
     out({"item": a.item, "column": a.column})
 
 
+def snapshot_touches(item):
+    """Save the files the story declared when it entered Plan Approved / Implement: `cgp guard` allows guarded paths only from
+    this copy, so a worker cannot widen it afterwards by re-declaring its touches."""
+    def upd(d):
+        snap = d.setdefault("approvedTouches", {})
+        if item not in snap:
+            snap[item] = list(d.get("touches", {}).get(item, []))
+    update_data(upd)
+
+
+def valid_plan(value):
+    """`Skip`, or an https URL on claude.ai or github.com (no credentials, port or whitespace); anything else is not a plan link."""
+    if value.lower() == SKIP:
+        return True
+    if not re.fullmatch(r"[^\s()\[\]<>]+", value):
+        return False
+    u = urlsplit(value)
+    return u.scheme == "https" and u.netloc == (u.hostname or "?") and u.hostname in ("claude.ai", "github.com")
+
+
+def valid_preview(url):
+    """An https URL a link in a Markdown issue body can carry safely: no whitespace, no brackets or parentheses, no `@` in the host."""
+    if not url or not re.fullmatch(r"https://[^\s()\[\]<>]+", url):
+        return False
+    return "@" not in urlsplit(url).netloc
+
+
 def cmd_set(a):
     c = cfg()
     key = a.field.lower()
     if key not in TEXT_FIELDS or key == "preview":
         die(f"field must be one of {[k for k in TEXT_FIELDS if k != 'preview']} (Preview is written by: cgp preview)")
-    value = a.value
-    if key == "pr" and value and not parse_pr_ref(c, value):
-        die("PR must be https://github.com/<linked repo>/pull/<n> on a repo linked to this board")
+    value = a.value.strip() if a.value else a.value
+    if key == "plan" and value and not valid_plan(value):
+        die("Plan must be Skip or an https link on claude.ai or github.com")
+    if key == "pr" and value:
+        ref = parse_pr_ref(c, value)
+        if not ref:
+            die("PR must be https://github.com/<linked repo>/pull/<n> on a repo linked to this board")
+        it = get_item(c, a.item)
+        if it["column"] in ("pr_review", "pr_approved") and (it["pr"] or "").strip() != value:
+            die(f"the story is in {it['column']}: the PR the user reviews cannot be replaced. Only the user can fix this: ask them "
+                "to move the story out of that column")
+        if (pr_view(*ref) or {}).get("isCrossRepository") is not False:
+            die("that PR comes from a fork (or its origin could not be read); the loop only works on its own branches")
     set_text(c, a.item, c["fields"][key], value)
     if value:  # a published plan or an opened PR means review comes next
         if key == "pr":
@@ -162,6 +207,8 @@ def cmd_preview(a):
     if not ref:
         die("story has no valid PR field set")
     url = preview_url(c, *ref)
+    if url and not valid_preview(url):
+        die("the deploy preview URL is not a plain https link; not copying it into the story")
     if not url:
         out({"item": a.item, "preview": None, "note": "no deploy preview on the PR yet"})
         return
@@ -206,7 +253,7 @@ def cmd_comment(a):
 def cmd_ask(a):
     c = cfg()
     repo, number, _ = item_issue(a.item)
-    rounds = sum(1 for cm in rest(f"repos/{repo}/issues/{number}/comments") if QMARK in (cm.get("body") or ""))
+    rounds = sum(1 for cm in rest(f"repos/{repo}/issues/{number}/comments") if QMARK in (cm.get("body") or "") and is_agent(cm))
     body = read_body()
     if rounds >= 3:
         body += "\n\n_This story has needed several rounds of questions; consider rescoping or splitting it._"
@@ -269,6 +316,16 @@ def cmd_feedback(a):
     out({"comments": sorted(found, key=lambda f: f["at"]), "ignoredUntrusted": ignored})
 
 
+def author_trusted(it):
+    """False when the issue was written by someone who may not steer the loop (not you, an owner, or a collaborator with write
+    access): its title and body are then only data. Fails closed when the author cannot be read."""
+    try:
+        issue = json.loads(gh("api", f"repos/{it['issueRepo']}/issues/{it['number']}").stdout)
+        return trusted(it["issueRepo"], issue)
+    except (SystemExit, ValueError, TypeError):
+        return False
+
+
 def cmd_prepare(a):
     """Everything a worker reads before acting, in one call: the story, feedback, the Q&A history when the user just
     answered, the PR state, and the worktree brought up to date. Each part fails on its own (`error`) so one problem
@@ -281,6 +338,7 @@ def cmd_prepare(a):
         res["note"] = "a draft: convert it first (cgp adopt <item> <owner/repo>); drafts have no comments or worktree"
         out(res)
         return
+    res["authorTrusted"] = author_trusted(it)
     res["feedback"] = call(cmd_feedback, item=a.item)
     if a.item in load_data().get("answered", []):
         res["answers"] = call(cmd_answers, item=a.item)

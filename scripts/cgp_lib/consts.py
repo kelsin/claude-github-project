@@ -54,11 +54,13 @@ STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a b
 # plannerModel / reviewerModel / implementerModel: sonnet | opus | haiku | fable, or low:haiku,medium:sonnet,high:opus (see models.py)
 # notifyCommand: a command run when a story starts waiting on you, enters a review column, is Done or stalls (see notify.py)
 # maxWorkerMinutes: a worker running longer is reported as stalled by `cgp list` (0 = never), so the loop can release its story
-# guardFiles: fnmatch globs (tried on the path and on its file name) for files an agent may only change when the approved plan lists them
+# guardFiles: fnmatch globs (tried on the path and on its file name, ignoring case) for files an agent may only change when the approved plan lists them;
+# these built-in ones always apply, the setting can only add to them
 DEFAULTS = {"concurrency": 0, "pollSeconds": 30, "remoteControl": 1, "notifyCommand": "", "previewProvider": "netlify", "draftPRs": 0,
             "plannerModel": "", "reviewerModel": "", "implementerModel": "", "maxWorkerMinutes": 240,
             "guardFiles": [".github/*", "CODEOWNERS", "*/CODEOWNERS", ".husky/*", ".pre-commit-config.yaml", ".npmrc", ".yarnrc*",
-                           "Makefile", "Dockerfile*", ".gitmodules", ".claude/*", ".mcp.json"],
+                           "Makefile", "GNUmakefile", "Dockerfile*", ".gitmodules", ".claude/*", ".mcp.json", ".cgp.json", ".envrc",
+                           ".gitlab-ci.yml", "Jenkinsfile", "lefthook.yml", ".githooks/*"],
             "sharedFiles": ["*package-lock.json", "*yarn.lock", "*pnpm-lock.yaml", "*.schema.json", "*locales/*",
                             "*__snapshots__/*", "*.md"]}
 STRING_SETTINGS = ("notifyCommand", "previewProvider", "plannerModel", "reviewerModel", "implementerModel")

@@ -1,7 +1,8 @@
 """Priority, intake, notifications, repo config, preview providers, models, draft PRs."""
 import json
 import os
-import stat
+import shutil
+import tempfile
 import unittest
 
 import test_cgp
@@ -58,13 +59,24 @@ class TestIntake(Base):
 
 
 class TestNotify(Base):
-    def script(self):
+    def script(self, body='echo "$CGP_EVENT|$CGP_TITLE|$CGP_BOARD" >> "$OUT"'):
+        """A notifier the CLI accepts: owned by us and not group/world writable, and outside /tmp (the temp dir may be under it)."""
+        here = tempfile.mkdtemp(dir=os.path.dirname(os.path.abspath(__file__)))
+        self.addCleanup(shutil.rmtree, here, True)
         out = os.path.join(self.tmp, "events.txt")
-        path = os.path.join(self.tmp, "notify.sh")
+        path = os.path.join(here, "notify.sh")
         with open(path, "w") as f:
-            f.write(f'#!/bin/sh\necho "$CGP_EVENT|$CGP_TITLE|$CGP_BOARD" >> "{out}"\n')
-        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+            f.write(f'#!/bin/sh\nOUT="{out}"\n{body}\n')
+        os.chmod(path, 0o700)
         return path, out
+
+    def seeded(self, command):
+        self.setup_board()
+        self.force("i2", "plan_review")
+        self.cgp("config", "notifyCommand", command)
+        self.cgp("list")  # seeds
+        self.force("i1", "pr_review")
+        self.cgp("list")
 
     def events(self, out):
         return open(out).read().splitlines() if os.path.exists(out) else []
@@ -82,6 +94,33 @@ class TestNotify(Base):
         self.cgp("list")  # no change: no new events
         got = sorted(e.rsplit("|", 1)[0] for e in self.events(out))
         self.assertEqual(got, ["review|one", "waiting|two"])
+
+    def test_the_command_runs_without_tokens_in_its_environment(self):
+        path, out = self.script('env | grep -E "^(GH_|GITHUB_|GIT_|MY_)" >> "$OUT"; echo ran >> "$OUT"')
+        self.env.update(GH_TOKEN="s1", GITHUB_PAT="s2", GIT_ASKPASS="s3", MY_TOKEN="s4")
+        self.seeded(path)
+        self.assertEqual(self.events(out), ["ran"])
+
+    def test_the_command_must_be_a_safe_absolute_path(self):
+        path, out = self.script()
+        def bump():  # a new review event each time
+            self.force("i1", "plan"); self.cgp("list")
+            self.force("i1", "pr_review"); self.cgp("list")
+        self.seeded(f"sh {path}")  # not an absolute program
+        self.assertEqual(self.events(out), [])
+        self.cgp("config", "notifyCommand", path)
+        os.chmod(path, 0o770)  # group writable
+        bump()
+        self.assertEqual(self.events(out), [])
+        os.chmod(path, 0o700)
+        bump()
+        self.assertEqual(len(self.events(out)), 1)
+
+    def test_doctor_warns_about_a_command_that_will_not_run(self):
+        self.setup_board()
+        self.cgp("config", "notifyCommand", "echo hi")
+        self.assertIn("⚠️  Test Board 1: notifyCommand  it will not run: the program must be an absolute path",
+                      self.cgp("doctor", ok=False).stdout)
 
     def test_the_command_can_be_unset(self):
         self.setup_board()

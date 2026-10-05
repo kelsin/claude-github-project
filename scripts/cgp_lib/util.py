@@ -89,3 +89,11 @@ class Poll:
             return False
         time.sleep(self.interval)
         return True
+
+
+_UNPRINTABLE = re.compile("[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def printable(text):
+    """Text from the board or a person with terminal control, C0/C1 and bidi override characters removed (ZWJ stays so emoji survive)."""
+    return _UNPRINTABLE.sub("", text or "")
