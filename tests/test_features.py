@@ -128,7 +128,7 @@ class TestNotify(Base):
         self.assertEqual(self.cgp("config", "notifyCommand", "")["notifyCommand"], "")
 
 
-class TestRepoConfig(test_cgp.TestSync):
+class TestRepoConfig(test_cgp.SyncBase):
     def commit_config(self, text):
         with open(os.path.join(self.clone, ".cgp.json"), "w") as f:
             f.write(text)

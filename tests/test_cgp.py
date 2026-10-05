@@ -521,7 +521,8 @@ class TestOverlap(Base):
         self.cgp("block", "i2", "i1")
 
 
-class TestSync(Base):
+class SyncBase(Base):
+    """Shared fixture (origin + clone + worktree); has no tests of its own so subclasses don't re-run them."""
     def git(self, path, *args):
         subprocess.run(["git", "-C", path, *args], check=True, capture_output=True, text=True,
                        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
@@ -547,6 +548,8 @@ class TestSync(Base):
         self.git(self.clone, "commit", "-qam", "main moves")
         self.git(self.clone, "push", "-q", "origin", "HEAD:main")
 
+
+class TestSync(SyncBase):
     def test_clean_then_rebased(self):
         self.assertEqual(self.cgp("sync", "i1")["state"], "clean")
         with open(os.path.join(self.wt, "g.txt"), "w") as f:
@@ -680,7 +683,7 @@ class TestMoreOverlap(Base):
         self.assertEqual(self.cgp("list")["blocked"], [])
 
 
-class TestMoreSync(TestSync):
+class TestMoreSync(SyncBase):
     def test_non_conflict_failure_is_an_error_not_a_conflict(self):
         with open(os.path.join(self.wt, "g.txt"), "w") as f:
             f.write("untracked, will collide\n")

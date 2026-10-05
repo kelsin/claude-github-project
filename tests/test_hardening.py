@@ -76,7 +76,7 @@ class TestReviewedMerge(PRBase):
         self.assertTrue(self.cgp("merge", "i1")["requested"])
 
 
-class TestSyncRecords(test_cgp.TestSync):
+class TestSyncRecords(test_cgp.SyncBase):
     def data(self):
         boards = os.path.join(self.env["CGP_HOME"], "boards")
         try:
@@ -540,7 +540,7 @@ class TestTerminalText(test_cgp.Base):
             self.assertNotIn(ch, text)
 
 
-class TestWorktreeCleanup(test_cgp.TestSync):
+class TestWorktreeCleanup(test_cgp.SyncBase):
     def finish(self):
         d = self.read_db(); d["items"][0]["content"]["state"] = "CLOSED"; self.write_db(d)
 
