@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.1](https://github.com/kelsin/claude-github-project/compare/v0.4.0...v0.4.1) (2026-10-05)
+
+
+### :broom: Chores
+
+* adopt release-please labels, PR title/header and changelog sections ([#44](https://github.com/kelsin/claude-github-project/issues/44)) ([fca7e0f](https://github.com/kelsin/claude-github-project/commit/fca7e0f9bd707cb6ddfdb46e7a75856ac9436537))
+* change release-please PR header emoji to a clipboard ([#47](https://github.com/kelsin/claude-github-project/issues/47)) ([c456d2c](https://github.com/kelsin/claude-github-project/commit/c456d2cdcac06181273fd2d47adb199871ee7c7a))
+
+
+### :traffic_light: Tests
+
+* serialize fakegh calls so daemon tests don't race on its db ([#48](https://github.com/kelsin/claude-github-project/issues/48)) ([b49ef4d](https://github.com/kelsin/claude-github-project/commit/b49ef4d053c759714613bfe015b78db952d37d63))
+
 ## [0.4.0](https://github.com/kelsin/claude-github-project/compare/v0.3.0...v0.4.0) (2026-10-05)
 
 
