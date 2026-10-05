@@ -97,7 +97,9 @@ class TestSetup(Base):
         self.assertEqual(colors["🙋 Plan Review"], "PURPLE")
         self.assertEqual(colors["🎉 Done"], "GREEN")
         fnames = {f["name"] for f in self.read_db()["fields"]}
-        self.assertTrue({"Waiting On", "Plan", "PR", "Preview"} <= fnames)
+        self.assertTrue({"Waiting On", "Plan", "PR", "Preview", "Auto Approve"} <= fnames)
+        auto = next(f for f in self.read_db()["fields"] if f["name"] == "Auto Approve")
+        self.assertEqual([o["name"] for o in auto["options"]], ["Plan", "PR", "Both"])
         # Todo/Done keep their option ids; "In Progress" and the unset draft fall to Todo
         self.assertEqual(res["itemsRemapped"], {"todo": 2, "done": 0})
         self.assertEqual(res["repos"], {"acme/app": None})
@@ -110,7 +112,7 @@ class TestSetup(Base):
         views = {v["name"]: v for v in self.read_db()["views"]}
         self.assertEqual(views["Tasks"]["layout"], "TABLE_LAYOUT")
         self.assertEqual(views["Approvals"]["filter"], 'status:"🙋 Plan Review","🚦 PR Review"')
-        self.assertEqual(len(views["Tasks"]["fieldIds"]), 7)
+        self.assertEqual(len(views["Tasks"]["fieldIds"]), 8)
         self.assertEqual(self.setup_board()["viewsCreated"], [])
         self.assertEqual(len(self.read_db()["views"]), 3)
 
@@ -194,6 +196,50 @@ class TestListAndMove(Base):
         self.cgp("set", "i1", "plan", "https://claude.ai/artifact/x")
         it = next(i for i in self.cgp("list")["items"] if i["item"] == "i1")
         self.assertEqual(it["plan"], "https://claude.ai/artifact/x")
+
+
+class TestSkipAndAutoApprove(Base):
+    def set_auto(self, item, option):
+        d = self.read_db()
+        next(i for i in d["items"] if i["id"] == item)["values"]["Auto Approve"] = {"optionId": f"o_{option}"}
+        self.write_db(d)
+
+    def item(self, item):
+        return next(i for i in self.cgp("list")["items"] if i["item"] == item)
+
+    def test_flags_are_parsed(self):
+        self.setup_board()
+        it = self.item("i1")
+        self.assertEqual((it["skipPlan"], it["autoApprove"]), (False, {"plan": False, "pr": False}))
+        self.cgp("set", "i1", "plan", " skip ")
+        self.assertTrue(self.item("i1")["skipPlan"])
+        for option, want in (("Plan", (True, False)), ("PR", (False, True)), ("Both", (True, True))):
+            self.set_auto("i1", option)
+            self.assertEqual(tuple(self.item("i1")["autoApprove"].values()), want, option)
+
+    def test_skip_is_written_to_the_description_without_a_review_phase(self):
+        self.setup_board()
+        d = self.read_db(); d["issue_bodies"] = {"acme/app#1": "Original"}; self.write_db(d)
+        self.cgp("worker", "start", "i1", "todo", "one")
+        self.cgp("set", "i1", "plan", "Skip")
+        self.assertIn("- Plan: Skip", self.read_db()["issue_bodies"]["acme/app#1"])
+        self.assertEqual(self.state()["workers"][0]["phase"], "planning")
+
+    def test_auto_approve_lets_agents_pass_a_human_gate_only_from_the_agent_column(self):
+        self.setup_board()
+        self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/1")
+        for col, option, to, wrong in (("plan", "Plan", "plan_approved", "PR"), ("implement", "PR", "pr_approved", "Plan")):
+            self.force("i1", col)
+            self.assertNotEqual(self.cgp("move", "i1", to, ok=False).returncode, 0)  # no field set
+            self.set_auto("i1", wrong)
+            self.assertNotEqual(self.cgp("move", "i1", to, ok=False).returncode, 0)  # the other gate's option
+            self.set_auto("i1", option)
+            self.assertEqual(self.cgp("move", "i1", to)["column"], to)
+        self.set_auto("i1", "Both")
+        self.force("i1", "todo")
+        self.assertNotEqual(self.cgp("move", "i1", "plan_approved", ok=False).returncode, 0)
+        self.force("i1", "plan_approval")
+        self.assertNotEqual(self.cgp("move", "i1", "plan_approved", ok=False).returncode, 0)  # leaving Plan Review stays human
 
 
 class TestQuestions(Base):
@@ -861,7 +907,7 @@ class TestGraphQL(Base):
     def test_item_fields_are_asked_for_by_name_not_position(self):
         m = load_cgp()
         self.assertNotIn("fieldValues(first", m.ITEMS_QUERY + m.ITEM_QUERY)
-        for name in ("Status", "Waiting On", "Plan", "PR", "Preview"):
+        for name in ("Status", "Waiting On", "Plan", "PR", "Preview", "Auto Approve"):
             self.assertIn(f'fieldValueByName(name:"{name}")', m.ITEMS_QUERY)
 
     def test_pagination_follows_every_page(self):
