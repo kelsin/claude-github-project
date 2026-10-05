@@ -12,7 +12,7 @@ from .store import board_file, cfg, load_json, save_board, update_board
 PROJECT_FRAGMENT = """
   id title url
   repositories(first: 50) { nodes { nameWithOwner } }
-  views(first: 50) { nodes { id name layout } }
+  views(first: 50) { nodes { id name layout visibleFields(first: 50) { nodes { ... on ProjectV2FieldCommon { id } } } } }
   fields(first: 50) { nodes {
     __typename
     ... on ProjectV2FieldCommon { id name dataType }
@@ -271,15 +271,38 @@ def apply_columns(proj, status, dry_run=False):
     return status, summary
 
 
-def ensure_views(proj, fields):
-    """Create the VIEWS missing from the board; views that exist by name are left as the user has them.
+def priority_first(view, fields, dry_run=False):
+    """Move Priority right after Title in an existing Tasks view; True when the view needed (or got) the change.
 
-    A fresh board's untouched default "View 1" table becomes Tasks. Returns the names created.
+    Only Priority moves: the user's other columns and their order stay as they are.
+    """
+    pid = fields[PRIORITY_FIELD]["id"]
+    ids = [f["id"] for f in view.get("visibleFields", {}).get("nodes", []) if f.get("id")]
+    title = fields.get("Title", {}).get("id")
+    rest = [i for i in ids if i != pid]
+    at = rest.index(title) + 1 if title in rest else 0
+    want = rest[:at] + [pid] + rest[at:]
+    if want == ids:
+        return False
+    if not dry_run:
+        gql("""mutation($v:ID!,$c:ProjectV2ViewConfigurationInput){
+          updateProjectV2View(input:{viewId:$v,configuration:$c}){ clientMutationId } }""",
+            v=view["id"], c={"visibleFieldIds": want})
+    return True
+
+
+def ensure_views(proj, fields):
+    """Create the VIEWS missing from the board; other views that exist by name are left as the user has them.
+
+    A fresh board's untouched default "View 1" table becomes Tasks. An existing Tasks view gets Priority moved right
+    after Title. Returns the names created and the names updated.
     """
     have = {v["name"]: v for v in proj["views"]["nodes"]}
-    done = []
+    done, updated = [], []
     for name, layout, shown, flt in VIEWS:
         if name in have:
+            if name == "Tasks" and PRIORITY_FIELD in fields and priority_first(have[name], fields):
+                updated.append(name)
             continue
         config = {"visibleFieldIds": [fields[f]["id"] for f in shown if f in fields]}
         default = have.get("View 1")
@@ -296,7 +319,7 @@ def ensure_views(proj, fields):
                 gql("""mutation($v:ID!,$f:String){ updateProjectV2View(input:{viewId:$v,filter:$f}){ clientMutationId } }""",
                     v=view["id"], f=flt)
         done.append(name)
-    return done
+    return done, updated
 
 
 def cmd_setup(a):
@@ -320,10 +343,13 @@ def cmd_setup(a):
                       o=owner_, n=name_)["repository"]["id"]
 
     if a.dry_run:
-        have_views = {v["name"] for v in proj["views"]["nodes"]}
+        have_views = {v["name"]: v for v in proj["views"]["nodes"]}
+        tasks = have_views.get("Tasks")
         out({"dryRun": True, "columns": apply_columns(proj, status, dry_run=True)[1],
              "fieldsToAdd": [n for n in (WAITING_FIELD, *TEXT_FIELDS.values(), AUTO_FIELD, PRIORITY_FIELD) if n not in fields],
-             "viewsToAdd": [v[0] for v in VIEWS if v[0] not in have_views], "repoToLink": a.repo})
+             "viewsToAdd": [v[0] for v in VIEWS if v[0] not in have_views],
+             "viewsToUpdate": ["Tasks"] if tasks and PRIORITY_FIELD in fields and priority_first(tasks, fields, True) else [],
+             "repoToLink": a.repo})
         return
     status, cols = apply_columns(proj, status)
     options = status_options(status)
@@ -345,7 +371,7 @@ def cmd_setup(a):
     priority = ensure(PRIORITY_FIELD, "SINGLE_SELECT", [{"name": n, "color": col, "description": ""} for n, col in PRIORITY_OPTIONS])
     priority_options = add_missing_options(priority, PRIORITY_OPTIONS)
     fields = fields_by_name(fetch_project(kind, owner, number))  # now with the fields added above
-    views = ensure_views(proj, fields)
+    views, views_updated = ensure_views(proj, fields)
 
     old = load_json(board_file(proj["id"]), {})
     paths = load_json(PATHS, {})
@@ -376,7 +402,7 @@ def cmd_setup(a):
             c["repos"][a.repo] = os.path.abspath(a.repo_path)
     save_board(c)
 
-    out({"board": c["board"], "repos": c["repos"], "itemsRemapped": cols.get("remapped", {"todo": 0, "done": 0}), "viewsCreated": views,
+    out({"board": c["board"], "repos": c["repos"], "itemsRemapped": cols.get("remapped", {"todo": 0, "done": 0}), "viewsCreated": views, "viewsUpdated": views_updated,
          "note": "items whose old status matched a new column name kept it; closed ones went to Done, all others to Todo"})
 
 

@@ -67,7 +67,7 @@ PR_URL = re.compile(r"^https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pul
 # visible fields and filter, but not its grouping or sort, so "Board" and "Approvals" are columns by Status (GitHub's default)
 # and group-by Repository is left for the user to turn on.
 VIEWS = [
-    ("Tasks", "TABLE_LAYOUT", ["Title", "Status", "Repository", WAITING_FIELD, "Plan", "PR", "Preview", AUTO_FIELD, PRIORITY_FIELD], ""),
+    ("Tasks", "TABLE_LAYOUT", ["Title", PRIORITY_FIELD, "Status", "Repository", WAITING_FIELD, "Plan", "PR", "Preview", AUTO_FIELD], ""),
     ("Board", "BOARD_LAYOUT", ["Title", "Assignees", "Status"], ""),
     ("Approvals", "BOARD_LAYOUT", ["Title", "Status"],
      "status:" + ",".join(f'"{e} {n}"' for k, n, e, _ in COLUMNS if k in ("plan_review", "pr_review"))),

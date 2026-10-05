@@ -18,6 +18,7 @@ Features
 - `notifyCommand` hook; `.cgp.json` per-repo settings (`cgp repo-config`); preview providers Netlify, Vercel, Cloudflare Pages and the Deployments API; `plannerModel` / `reviewerModel` / `implementerModel` with `cgp models`; `draftPRs`.
 
 New
+- `cgp setup` puts Priority first after Title in the Tasks view, also on an existing board (`viewsUpdated`, dry run `viewsToUpdate`); nothing else in the view changes.
 - `cgp status` (human-readable, read-only), `cgp doctor`, `cgp gc`, `cgp setup --dry-run`; skills `/cgp:status`, `/cgp:stop`, `/cgp:doctor`.
 - `docs/` (architecture, safety, settings, migration, troubleshooting, generated CLI reference); LICENSE.
 

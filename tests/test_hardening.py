@@ -158,6 +158,46 @@ class TestSetupDryRun(Base):
         self.assertFalse(os.path.exists(os.path.join(self.env["CGP_HOME"], "boards")))
 
 
+class TestPriorityFirst(Base):
+    def seed_fields(self):
+        d = self.read_db()
+        d["fields"] += [{"id": f"F_{n}", "name": n, "dataType": "x"} for n in ("Title", "Repository", "Assignees")]
+        self.write_db(d)
+
+    def tasks(self):
+        return next(v for v in self.read_db()["views"] if v["name"] == "Tasks")
+
+    def test_new_tasks_view_has_priority_after_title(self):
+        self.seed_fields()
+        self.setup_board()
+        ids = self.tasks()["fieldIds"]
+        self.assertEqual(ids[:2], ["F_Title", "F_Priority"])
+
+    def test_existing_tasks_view_is_reordered_once(self):
+        self.seed_fields()
+        self.setup_board()
+        d = self.read_db()
+        for v in d["views"]:
+            v["fieldIds"] = [i for i in v["fieldIds"] if i != "F_Priority"] + (["F_Priority"] if v["name"] == "Tasks" else [])
+        board_before = next(v for v in d["views"] if v["name"] == "Board")["fieldIds"]
+        tasks = next(v for v in d["views"] if v["name"] == "Tasks")
+        tasks["fieldIds"].remove("F_Repository")  # a column the user hid stays hidden
+        self.write_db(d)
+        dry = self.cgp("setup", "https://github.com/orgs/acme/projects/1", "--dry-run")
+        self.assertEqual(dry["viewsToUpdate"], ["Tasks"])
+        self.assertEqual(self.tasks()["fieldIds"][-1], "F_Priority")  # dry run wrote nothing
+        r = self.setup_board()
+        self.assertEqual(r["viewsUpdated"], ["Tasks"])
+        ids = self.tasks()["fieldIds"]
+        self.assertEqual(ids[:2], ["F_Title", "F_Priority"])
+        self.assertNotIn("F_Repository", ids)
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(next(v for v in self.read_db()["views"] if v["name"] == "Board")["fieldIds"], board_before)
+        self.assertEqual(self.setup_board()["viewsUpdated"], [])
+        dry = self.cgp("setup", "https://github.com/orgs/acme/projects/1", "--dry-run")
+        self.assertEqual(dry["viewsToUpdate"], [])
+
+
 class TestDoctorAndGc(Base):
     def test_doctor_reports_and_flags_problems(self):
         self.setup_board()
