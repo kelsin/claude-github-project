@@ -278,6 +278,8 @@ def priority_first(view, fields, dry_run=False):
     """
     pid = fields[PRIORITY_FIELD]["id"]
     ids = [f["id"] for f in view.get("visibleFields", {}).get("nodes", []) if f.get("id")]
+    if not ids:  # the view's columns were not readable: never replace them with just Priority
+        return False
     title = fields.get("Title", {}).get("id")
     rest = [i for i in ids if i != pid]
     at = rest.index(title) + 1 if title in rest else 0
