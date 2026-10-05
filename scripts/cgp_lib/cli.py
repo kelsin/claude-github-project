@@ -3,8 +3,11 @@ import argparse
 
 
 from .board import (cmd_adopt, cmd_config, cmd_discover, cmd_repo_path, cmd_repos, cmd_setup)
+from .epics import cmd_split
+from .daemon import cmd_daemon
 from .doctor import cmd_doctor, cmd_gc
-from .models import cmd_models
+from .models import RATINGS, cmd_models
+from .policy import cmd_rate
 from .repoconf import cmd_repo_config
 from .intake import cmd_add, cmd_import
 from .gitwt import cmd_guard, cmd_sync, cmd_worktree, cmd_worktree_remove
@@ -67,11 +70,18 @@ COMMANDS = [
         A("item"), A("--timeout", type=int, default=540), A("--interval", type=int, default=20)]),
     ("add", cmd_add, "Create an issue and put it on the board in Todo (body on stdin with --body -)", [
         A("title"), A("--repo"), A("--body"), A("--priority", help="High, Medium, Low or Hold")]),
+    ("split", cmd_split, "Sub-stories: declare a split in the plan (--declare, JSON on stdin), or create the approved ones", [
+        A("item"), A("--declare", action="store_true")]),
     ("import", cmd_import, "Put open issues with a label on the board in Todo", [A("label"), A("--repo")]),
     ("models", cmd_models, "The model for each sub-agent role at a risk rating (null: the session's model)", [
         A("rating", choices=["low", "medium", "high"])]),
+    ("rate", cmd_rate, "Record your risk rating of a story (the auto-approval policy reads it)", [A("item"), A("rating", choices=list(RATINGS))]),
     ("repo-config", cmd_repo_config, "The .cgp.json of a repo's default branch (test and lint commands, shared and guarded files, ...)", [
         A("target", help="owner/name or a story's item id")]),
+    ("daemon", cmd_daemon, "Experimental: run the loop headless, one `claude -p` worker per story (see docs/daemon.md)", [
+        A("--once", action="store_true", help="dispatch one cycle, wait for those workers, then exit"),
+        A("--dry-run", action="store_true", help="print what would be dispatched; start nothing"),
+        A("--verbose", action="store_true")]),
     ("doctor", cmd_doctor, "Check the installation: gh, token scopes, board, clones, stale files", [
         A("--board", help="board URL; default: the only or bound board")]),
     ("gc", cmd_gc, "Delete state of dead sessions and worktrees of finished stories", [

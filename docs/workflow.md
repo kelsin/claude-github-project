@@ -23,11 +23,17 @@ The loop dispatches one background worker per actionable story (no cap by defaul
 
 ## Story fields
 
+**Dependencies.** A story that GitHub shows as "blocked by" another issue on the board waits for it (set `nativeDependencies` to `off` to ignore GitHub's dependencies). `scripts/cgp status` lists each GitHub blocker with who opened it, and a dependency cycle that only you can break is asked about on the story.
+
 **Priority.** Set a story's `Priority` to High, Medium or Low and stories in the same column are dispatched in that order (unset after Low); `Hold` keeps a story from being dispatched at all. `scripts/cgp add "Fix login" --priority High` creates an issue and puts it on the board; `scripts/cgp import <label>` adds existing labelled issues.
 
 **Skip planning.** Type `Skip` in a Todo story's `Plan` field and no plan is made: the worker writes `- Plan: Skip` into the story description instead of a plan link and moves the story from Todo straight to Implement, working from the description and iterating there.
 
 **Auto approve.** Set a story's `Auto Approve` field to `Plan`, `PR` or `Both` and the agent passes that gate itself: a planned story goes to Plan Approved (instead of Plan Review) and a story with a PR goes to PR Approved (instead of PR Review), each noted in its status comment. `cgp move` allows it only from Plan / Implement and only for the gate the field names; only you can set the field. With `PR` the code is never seen by you before merge, so the "changed after approval, send back to PR Review" rule doesn't apply to that story. The field is re-read when the story reaches a review column: `cgp move` into Plan Review / PR Review lands in Plan Approved / PR Approved if you set the field while the agent was working. A story you sent back from PR Review to Implement with `Auto Approve` = `PR` still set is re-approved at its next move to PR Review. `Skip` plus `Both` makes a story fully hands-off.
+
+**Auto-approval policy.** Per board, instead of per story, `cgp config autoApprove plan:low,pr:low` (run by you in a terminal) lets the agent pass a gate for low-risk, docs-only stories (`autoApproveFiles`). The worker rates the story with `cgp rate` and then makes its usual move into Plan Review or PR Review; `cgp move` lands it in the approved column instead when the policy says yes, and posts a comment saying why. Otherwise nothing changes: the story waits for you, and the move's `policy.reason` says what stopped it. The rules are in [safety](safety.md). Unlike the field, the policy does not delegate the merge: a PR it approved is held to the commit it checked.
+
+**Sub-stories.** A plan for a large story may declare up to 10 sub-stories (`cgp split <story> --declare`). When you approve the plan, the worker runs `cgp split <story>`, which creates them in Todo with their plan skipped (the files each may change come from the approved declaration) and orders them as declared (as GitHub dependencies when possible, else in cgp). The parent waits (`Waiting On: Another story`) and is closed once every sub-story is Done by a merged PR. See [Safety](safety.md).
 
 ## Questions
 

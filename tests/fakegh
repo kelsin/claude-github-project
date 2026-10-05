@@ -32,6 +32,11 @@ def values(item, q):
     return {a: value(item, n) for a, n in re.findall(r'(\w+): fieldValueByName\(name:"([^"]+)"\)', q)}
 
 
+def issue_id(key):
+    """The issue's database id (REST `id`); db["issue_ids"] overrides the default 9000 + its number."""
+    return db.get("issue_ids", {}).get(key) or 9000 + int(key.split("#")[1])
+
+
 def seq(entry):
     """A list is a sequence of responses (consumed one per call, the last one repeats); anything else is constant."""
     if isinstance(entry, list):
@@ -85,7 +90,12 @@ elif args[:2] == ["api", "graphql"]:
     body = json.loads(sys.stdin.read())
     q, v = body["query"], body["variables"]
     errors = None
-    if "updateProjectV2Field(" in q:
+    if "blockedBy(" in q and db.get("no_blocked_by_field"):  # an older GitHub: the whole query is rejected
+        print(json.dumps({"errors": [{"type": "undefinedField", "message": "Field 'blockedBy' doesn't exist on type 'Issue'"}]}))
+        sys.exit(1)
+    if "__type(" in q:
+        r = {"__type": {"fields": [{"name": "number"}] + ([] if db.get("no_blocked_by_field") else [{"name": "blockedBy"}])}}
+    elif "updateProjectV2Field(" in q:
         f = next(x for x in db["fields"] if x["id"] == v["f"])
         f["options"] = [{"id": o.get("id", f"new{i}"), "name": o["name"], "color": o["color"]} for i, o in enumerate(v["o"])]
         r = {"updateProjectV2Field": {"projectV2Field": {"id": f["id"], "options": f["options"]}}}
@@ -130,8 +140,12 @@ elif args[:2] == ["api", "graphql"]:
         for i in page:
             if i["id"] in db.get("broken_items", []):  # content unreadable: GraphQL nulls it and reports an error
                 errors = [{"type": "FORBIDDEN", "message": f"cannot read content of {i['id']}"}]
-            nodes.append({"id": i["id"], "isArchived": False,
-                          "content": None if i["id"] in db.get("broken_items", []) else i["content"], **values(i, q)})
+            content = None if i["id"] in db.get("broken_items", []) else i["content"]
+            if content and "blockedBy(" in q and content["__typename"] == "Issue":  # db["blocked_by"]["acme/app#1"] = [issue nodes]
+                key = f"{content['repository']['nameWithOwner']}#{content['number']}"
+                found = db.get("blocked_by", {}).get(key, [])
+                content = dict(content, blockedBy={"totalCount": db.get("blocked_by_total", {}).get(key, len(found)), "nodes": found})
+            nodes.append({"id": i["id"], "isArchived": False, "content": content, **values(i, q)})
         r = {"node": {"items": {"pageInfo": {"hasNextPage": more, "endCursor": str(start + size) if more else None},
                                 "nodes": nodes}}}
     elif "projectV2(number" in q:
@@ -158,7 +172,10 @@ elif args[:2] == ["api", "graphql"]:
     sys.exit(1 if errors else 0)  # like gh: any GraphQL error, even next to usable data, is exit 1
 elif args[0] == "api" and any(re.match(r"repos/[^/]+/[^/]+/pulls/\d+/files", a) for a in args):
     m = re.match(r"repos/([^/]+/[^/]+)/pulls/(\d+)/files", next(a for a in args if a.startswith("repos/")))
-    print(json.dumps([{"filename": f} for f in db.get("pr_files", {}).get(f"{m.group(1)}#{m.group(2)}", [])]))
+    # db["pr_files"]["acme/app#1"]: names, or {"filename", "status", "previous_filename"}; served 100 to a page like `gh api --paginate`
+    entries = [f if isinstance(f, dict) else {"filename": f} for f in db.get("pr_files", {}).get(f"{m.group(1)}#{m.group(2)}", [])]
+    for i in range(0, max(len(entries), 1), 100):
+        print(json.dumps(entries[i:i + 100]))
 elif args[0] == "api" and any(re.match(r"repos/[^/]+/[^/]+/(pulls/\d+/(comments|reviews)|collaborators/)", a) for a in args):
     path = next(a for a in args if a.startswith("repos/"))
     if "/collaborators/" in path:
@@ -188,16 +205,35 @@ elif args[0] == "api" and re.match(r"repos/[^/]+/[^/]+/issues(\?|$)", next((a fo
         want = re.search(r"labels=([^&]+)", path)
         print(json.dumps([{"user": {"login": "kelsin"}, "author_association": "OWNER", **i}
                           for i in lst if not want or want.group(1) in [l["name"] for l in i["labels"]]]))
+elif args[0] == "api" and any(re.fullmatch(r"repos/[^/]+/[^/]+/issues/\d+/dependencies/blocked_by", a) for a in args):
+    path = next(a for a in args if a.startswith("repos/"))
+    m = re.match(r"repos/([^/]+/[^/]+)/issues/(\d+)/", path)
+    blocker_id = int(args[args.index("-F") + 1].split("=", 1)[1])
+    db.setdefault("dependency_posts", []).append(args)
+    if db.get("dependencies_rc"):
+        save()
+        sys.exit("fakegh: HTTP 403")
+    ref = next(c for it in db["items"] for c in [it["content"]] if c.get("number") and issue_id(f"{c['repository']['nameWithOwner']}#{c['number']}") == blocker_id)
+    db.setdefault("blocked_by", {}).setdefault(f"{m.group(1)}#{m.group(2)}", []).append(
+        {"number": ref["number"], "state": ref["state"], "repository": ref["repository"], "author": {"login": "kelsin"}})
+    save()
+    print("{}")
 elif args[0] == "api":
     path = next(a for a in args[1:] if a.startswith("repos/"))
     mi = re.fullmatch(r"repos/([^/]+/[^/]+)/issues/(\d+)", path)
     if mi:
         key = f"{mi.group(1)}#{mi.group(2)}"
-        if "-f" in args:
+        if "state=closed" in args:  # closing an issue: db["issue_closes"] records it, and the board item shows it closed
+            db.setdefault("issue_closes", []).append(key)
+            for it in db["items"]:
+                if it["content"].get("number") == int(mi.group(2)) and it["content"].get("repository", {}).get("nameWithOwner") == mi.group(1):
+                    it["content"]["state"] = "CLOSED"
+            save()
+        elif "-f" in args:
             db.setdefault("issue_bodies", {})[key] = args[args.index("-f") + 1][len("body="):]
             save()
         who = db.get("issue_authors", {}).get(key, {"login": "kelsin", "author_association": "OWNER"})
-        print(json.dumps({"body": db.get("issue_bodies", {}).get(key, ""), "user": {"login": who["login"]},
+        print(json.dumps({"id": issue_id(key), "body": db.get("issue_bodies", {}).get(key, ""), "user": {"login": who["login"]},
                           "author_association": who["author_association"]}))
         sys.exit(0)
     m = re.match(r"repos/([^/]+/[^/]+)/issues/(\d+)/comments", path)

@@ -1,16 +1,20 @@
 """Scheduling: which stories are actionable, file overlap and blocking, the board snapshot and the wait loop."""
 import fnmatch
+import json
 import os
+import sys
 import time
 from .consts import ACTIONABLE, ALL_KEYS, COLUMNS, HOME, STORY_OPTION, WAITING_FIELD
 from .util import Poll, age_seconds, printable, strip_id, covers, die, norm_path, now_iso, out
-from .gh import rest
+from .gh import gh, rest
 from .store import cfg, load_data, load_json, lock_file, lock_holder, state_path, stop_requested, update_board, update_data, update_state
 from .board import board_keys, clear_field, ensure_story_option, fetch_items, fetch_project, fields_by_name, get_item, parse_item, parse_pr_ref, rank, set_single
 from .gitwt import cleanup_worktree
 from .notify import check
+from .epics import close_finished, parent_edges
 from .repoconf import merged_globs
-from .story import process_replies
+from .policy import current_rating
+from .story import ask_user, process_replies
 
 
 def sync_story_field(c, live):
@@ -30,10 +34,96 @@ def sync_story_field(c, live):
             i["waitingOn"] = None
 
 
+NATIVE_OVERFLOW = "native:overflow"  # stands in for GitHub dependencies that were not read (see board.NATIVE_LIMIT)
+
+
+def local_blocks(by_id, raw):
+    """cgp's own overlap blocks: one holds only while the blocker is live and still ahead of the blocked story."""
+    return {k: [b for b in v if b in by_id and rank(by_id[b]) > rank(by_id[k])] for k, v in (raw or {}).items() if k in by_id}
+
+
+def ordered_blocks(by_id, raw):
+    """Epic ordering (data["epicOrder"], written by native_order when GitHub would not take the edge): holds while the blocker is
+    live, whatever the ranks."""
+    return {k: [b for b in v if b in by_id] for k, v in (raw or {}).items() if k in by_id}
+
+
+def native_edges(live):
+    """GitHub's own `blockedBy` edges between live stories on this board: story -> blockers that are still open. Rank does not
+    matter, and a blocker that is not on the board is ignored. A story with more dependencies than were read fails closed."""
+    by_ref = {(i["issueRepo"].lower(), i["number"]): i for i in live if i["kind"] == "issue" and i["issueRepo"]}
+    edges = {}
+    for i in live:
+        ids = []
+        for b in i.get("nativeBlockedBy", []):
+            o = by_ref.get(((b["repo"] or "").lower(), b["number"]))
+            if b["state"] == "OPEN" and o and not o["closed"] and o["item"] != i["item"]:
+                ids.append(o["item"])
+        if i.get("nativeOverflow"):
+            ids.append(NATIVE_OVERFLOW)
+        if ids:
+            edges[i["item"]] = ids
+    return edges
+
+
+def merge_edges(*graphs):
+    merged = {}
+    for g in graphs:
+        for k, v in g.items():
+            merged[k] = merged.get(k, []) + [b for b in v if b not in merged.get(k, [])]
+    return merged
+
+
+def effective_blocks(live, data, native=None):
+    """Story -> the live stories that hold it back: cgp's overlap blocks, epic ordering and GitHub's dependencies together.
+    A local overlap block that closes a cycle is dropped (it is only a scheduling hint); what cannot be dropped stays, see native_cycles."""
+    by_id = {i["item"]: i for i in live}
+    fixed = merge_edges(ordered_blocks(by_id, data.get("epicOrder")), parent_edges(by_id, data),
+                        native_edges(live) if native is None else native)
+    local = local_blocks(by_id, data.get("blocks"))
+    merged = merge_edges(fixed, local)
+    for k, v in local.items():
+        for b in v:
+            if b not in fixed.get(k, []):
+                merged[k].remove(b)
+                if would_cycle(merged, k, b):  # the other edges already lead from b back to k: this one only closes a cycle
+                    continue
+                merged[k].append(b)
+    return merged
+
+
+def native_cycles(live, data, native=None):
+    """Live stories on a dependency cycle made only of edges cgp cannot drop (GitHub's and epic ordering): they wait on each other forever."""
+    by_id = {i["item"]: i for i in live}
+    g = merge_edges(ordered_blocks(by_id, data.get("epicOrder")), parent_edges(by_id, data), native_edges(live) if native is None else native)
+    return [k for k in g if any(would_cycle(g, k, b) for b in g[k])]
+
+
+def block_rows(by_id, ids):
+    return [by_id[b] if b in by_id else {"title": "more GitHub dependencies than cgp reads", "column": None, "waiting": False} for b in ids]
+
+
+def ask_about_cycle(c, live, members):
+    """One question for a dependency cycle that only a person can break; asked on its first story and not again while that story waits."""
+    by_id = {i["item"]: i for i in live}
+    first = min((by_id[m] for m in members), key=rank)
+    if first["waiting"] or first["kind"] != "issue":
+        return
+    names = ", ".join(f"{by_id[m]['title']} ({by_id[m]['issueRepo']}#{by_id[m]['number']})" for m in sorted(members, key=lambda m: rank(by_id[m])))
+    ask_user(c, first["item"], f"These stories wait on each other through GitHub dependencies (blocked by), so none can start: {names}. "
+                               "Remove one of the dependencies on GitHub, then reply here.")
+    first["waiting"], first["waitingOn"] = True, "You"
+
+
 def hard_conflict(a, b, patterns):
     """True when two stories' declared touches share a file that would block (shared-file globs and directory overlaps never do)."""
     dirs = {f for f in a | b if f.endswith("/")}
     return any(not any(fnmatch.fnmatchcase(f, g) for g in patterns) for f in (a & b) - dirs)
+
+
+def starting(i):
+    """A story about to start work (blocks hold only these): Plan Approved, Implement with no PR yet, or a Todo story that skips planning."""
+    return i["column"] == "plan_approved" or (i["column"] == "implement" and not i["pr"]) or (i["column"] == "todo" and i["skipPlan"])
 
 
 def pick_compatible(c, actionable, live, in_flight, slots=None):
@@ -86,35 +176,43 @@ def snapshot(c):
     holder = lock_holder(c["board"]["id"])
     if holder:
         die("this board is now being run by another session (cgp use <url> --takeover to take it back)", code=5)
-    items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
+    items = [parse_item(r, c) for r in fetch_items(c["board"]["id"], bool(c["settings"]["nativeDependencies"]))]
     items = [i for i in items if not i["archived"] and i["kind"] in ("issue", "draft")]
     process_replies(c, items)
     answered = set(load_data().get("answered", []))
     for i in items:
         if i["item"] in answered:
             i["answered"] = True
-    for i in items:  # closed issues (merged PR, or closed by hand) are finished: file them under Done
-        if i["closed"] and i["column"] != "done" and i["kind"] == "issue":
-            set_single(c, i["item"], c["fields"]["status"]["id"], c["fields"]["status"]["options"]["done"])
-            i["column"] = "done"
-            cleanup_worktree(c, i)
+    def file_closed():  # closed issues (merged PR, or closed by hand) are finished: file them under Done
+        for i in items:
+            if i["closed"] and i["column"] != "done" and i["kind"] == "issue":
+                set_single(c, i["item"], c["fields"]["status"]["id"], c["fields"]["status"]["options"]["done"])
+                i["column"] = "done"
+                cleanup_worktree(c, i)
+    file_closed()
+    close_finished(c, items)  # a story split into sub-stories is closed once they are all done (see epics.py)
+    file_closed()
     live = [i for i in items if i["column"] != "done"]
     counts = {k: sum(1 for i in items if i["column"] == k) for k in board_keys(c)}
     by_id = {i["item"]: i for i in live}
 
-    def live_blocks(raw):  # a block holds only while the blocker is live and still ahead of the blocked story
-        return {k: [b for b in v if b in by_id and rank(by_id[b]) > rank(by_id[k])]
-                for k, v in (raw or {}).items() if k in by_id}
-    blocks = live_blocks(load_data().get("blocks"))
+    data = load_data()
+    for i in items:
+        i["rating"] = current_rating(data, i)
+    native = native_edges(live) if c["settings"]["nativeDependencies"] else {}
+    members = native_cycles(live, data, native)
+    if members:
+        ask_about_cycle(c, live, members)
+    blocks = effective_blocks(live, data, native)
     live_ids = set(by_id)
     for i in live:
-        i["blockedBy"] = [by_id[b]["title"] for b in blocks.get(i["item"], [])]
-        i["blockers"] = [{"title": by_id[b]["title"], "column": by_id[b]["column"], "waiting": by_id[b]["waiting"]}
-                         for b in blocks.get(i["item"], [])]
+        rows = block_rows(by_id, blocks.get(i["item"], []))
+        i["blockedBy"] = [r["title"] for r in rows]
+        i["blockers"] = [{"title": r["title"], "column": r["column"], "waiting": r["waiting"]} for r in rows]
     sync_story_field(c, live)
-    # a block gates a story that is about to start work: plan approved, or implementing with no PR yet
-    blocked = [i for i in live if i["blockedBy"] and (i["column"] == "plan_approved"
-                                                      or (i["column"] == "implement" and not i["pr"]))]
+    # a block gates a story that is about to start work (see starting)
+    parents = parent_edges(by_id, data)  # a story waiting for its sub-stories is never dispatched, whatever its column
+    blocked = [i for i in live if i["blockedBy"] and (starting(i) or i["item"] in parents)]
     in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and not i["held"] and i not in blocked
                   and i["item"] not in in_flight]
@@ -153,16 +251,29 @@ def snapshot(c):
 
     def prune(d):
         d["deferred"] = [i["item"] for i in deferred]
-        d["blocks"] = {k: v for k, v in live_blocks(d.get("blocks")).items() if v}  # re-read under the lock: keeps blocks written meanwhile
+        d["blocks"] = {k: v for k, v in local_blocks(by_id, d.get("blocks")).items() if v}  # re-read under the lock: keeps blocks written meanwhile
+        d["epicOrder"] = {k: v for k, v in ordered_blocks(by_id, d.get("epicOrder")).items() if v}
         d["touches"] = {k: v for k, v in d.get("touches", {}).items() if k in live_ids}
         snaps = {k: v for k, v in d.get("approvedTouches", {}).items() if k in live_ids}
         for i in live:  # the files a story declared when it was approved (see story.snapshot_touches); replanning forgets them
             if i["column"] in ("plan_approved", "implement") and i["item"] not in snaps:
                 snaps[i["item"]] = list(d.get("touches", {}).get(i["item"], []))
-            elif i["column"] in ("todo", "plan", "plan_review"):
+            elif i["column"] in ("todo", "plan", "plan_review") and i["item"] not in d.get("parents", {}):  # a sub-story keeps what its parent's plan gave it
                 snaps.pop(i["item"], None)
         d["approvedTouches"] = snaps
-        for k in ("reviewed", "cleanRebase", "asked"):
+        d["splits"] = {k: v for k, v in d.get("splits", {}).items() if k in live_ids}
+        splits = {k: v for k, v in d.get("approvedSplits", {}).items() if k in live_ids}
+        for i in live:  # the split declared when the plan was approved: all `cgp split` creates
+            if i["column"] in ("plan_approved", "implement") and i["item"] not in splits and d["splits"].get(i["item"]):
+                splits[i["item"]] = list(d["splits"][i["item"]])
+            elif i["column"] in ("todo", "plan", "plan_review"):
+                splits.pop(i["item"], None)
+        d["approvedSplits"] = splits
+        d["children"] = {k: v for k, v in d.get("children", {}).items() if k in live_ids}
+        d["parents"] = {k: v for k, v in d.get("parents", {}).items() if k in live_ids}
+        d["epicAsked"] = {k: v for k, v in d.get("epicAsked", {}).items() if k in live_ids}
+        d["policyPlans"] = [i for i in d.get("policyPlans", []) if i in live_ids and by_id[i]["column"] not in ("todo", "plan", "plan_review")]
+        for k in ("reviewed", "cleanRebase", "asked", "ratings", "policy", "daemonSpend"):
             d[k] = {i: v for i, v in d.get(k, {}).items() if i in live_ids}
         d["tainted"] = [i for i in d.get("tainted", []) if i in live_ids]
     update_data(prune)
@@ -179,21 +290,24 @@ def cmd_list(a):
 def cmd_status(a):
     """What a person wants to know, without the snapshot's side effects (it moves nothing, clears nothing, needs no lock)."""
     c = cfg()
-    items = [parse_item(r, c) for r in fetch_items(c["board"]["id"])]
+    items = [parse_item(r, c) for r in fetch_items(c["board"]["id"], bool(c["settings"]["nativeDependencies"]))]
     live = [i for i in items if not i["archived"] and i["kind"] in ("issue", "draft") and i["column"] != "done"]
     by_col = {k: [i for i in live if i["column"] == k] for k in board_keys(c)}
     done = sum(1 for i in items if not i["archived"] and i["column"] == "done")
-    blocks = load_data().get("blocks", {})
-    titles = {i["item"]: i["title"] for i in live}
-    blocked = [{"title": i["title"], "blockedBy": [titles[b] for b in blocks.get(i["item"], []) if b in titles]} for i in live]
+    by_id = {i["item"]: i for i in live}
+    blocks = effective_blocks(live, load_data(), native_edges(live) if c["settings"]["nativeDependencies"] else {})
+    blocked = [{"title": i["title"], "blockedBy": [r["title"] for r in block_rows(by_id, blocks.get(i["item"], []))]} for i in live]
+    github = [{"title": i["title"], "blockedBy": [{"story": f"{b['repo']}#{b['number']}", "author": b["author"], "onBoard": any(
+        o["issueRepo"] == b["repo"] and o["number"] == b["number"] for o in live)} for b in i["nativeBlockedBy"] if b["state"] == "OPEN"]}
+              for i in live if c["settings"]["nativeDependencies"] and any(b["state"] == "OPEN" for b in i["nativeBlockedBy"])]
     lock = load_json(lock_file(c["board"]["id"]), None)
     session = (lock or {}).get("session")
     state = load_json(os.path.join(HOME, f"state-{strip_id(session)}.json"), {}) if session else {}
     workers = [{**w, "minutes": round(age_seconds(w.get("startedAt")) / 60)} for w in state.get("workers", [])]
     res = {"board": c["board"], "counts": {k: len(v) for k, v in by_col.items()}, "done": done,
            "waitingOnYou": [{"title": i["title"], "url": i["url"]} for i in live if i["waiting"]],
-           "blocked": [b for b in blocked if b["blockedBy"]], "workers": workers,
-           "held": [i["title"] for i in live if i["held"]],
+           "blocked": [b for b in blocked if b["blockedBy"]], "githubBlockedBy": github, "workers": workers,
+           "held": [i["title"] for i in live if i["held"]], "autoApprove": c["settings"]["autoApprove"],
            "loop": {"session": session, "heartbeatMinutes": round((time.time() - lock["at"]) / 60, 1)} if lock else None,
            "review": {k: [{"title": i["title"], "url": i["url"]} for i in by_col.get(k, [])] for k in ("plan_review", "pr_review")}}
     if a.json:
@@ -216,8 +330,13 @@ def cmd_status(a):
         show(f"{emoji.get(w['column'], '•')} {w['title']} · {w.get('phase', '?')}{' (' + w['detail'] + ')' if w.get('detail') else ''} · {w['minutes']} min")
     if res["held"]:
         show(f"⏸ On hold ({len(res['held'])}): {', '.join(res['held'])}")
+    if res["autoApprove"] != "plan:never,pr:never":
+        show(f"🤖 auto-approval policy: {res['autoApprove']} (autoApproveFiles: {', '.join(c['settings']['autoApproveFiles']) or 'none'})")
     for b in res["blocked"]:
         show(f"⛓ {b['title']} waits for {', '.join(b['blockedBy'])}")
+    for g in res["githubBlockedBy"]:
+        shown = ", ".join(f"{b['story']} (opened by {b['author'] or '?'}{'' if b['onBoard'] else '; not on this board, ignored'})" for b in g["blockedBy"])
+        show(f"🔗 {g['title']} is blocked by {shown} on GitHub")
 
 
 def cmd_wait(a):
@@ -248,7 +367,8 @@ def story_files(c, st, it):
     return files
 
 
-def would_cycle(blocks, item, other):
+def would_cycle(blocks, item, other, native=None):
+    """True when making `item` wait for `other` would close a cycle in `blocks` plus the `native` (GitHub / epic) edges."""
     seen, todo = set(), [other]
     while todo:
         n = todo.pop()
@@ -256,7 +376,7 @@ def would_cycle(blocks, item, other):
             return True
         if n not in seen:
             seen.add(n)
-            todo += blocks.get(n, [])
+            todo += blocks.get(n, []) + (native or {}).get(n, [])
     return False
 
 
@@ -311,11 +431,38 @@ def cmd_block(a):
         return
     if not a.other:
         die("usage: cgp block <item> <other-item> | cgp block <item> --unblock")
+    c = cfg()
+    live = [i for i in (parse_item(r, c) for r in fetch_items(c["board"]["id"], bool(c["settings"]["nativeDependencies"])))
+            if not i["archived"] and i["kind"] in ("issue", "draft") and i["column"] != "done"]
+    by_id, data = {i["item"]: i for i in live}, load_data()
+    native = merge_edges(ordered_blocks(by_id, data.get("epicOrder")), parent_edges(by_id, data),
+                         native_edges(live) if c["settings"]["nativeDependencies"] else {})  # edges cgp reads but never writes
+
     def add(st):
-        if would_cycle(st.get("blocks", {}), a.item, a.other):
+        if would_cycle(st.get("blocks", {}), a.item, a.other, native):
             die("refusing: that would create a dependency cycle (if the other story now ranks behind this one, run `cgp block <this> --unblock` and proceed)")
         lst = st.setdefault("blocks", {}).setdefault(a.item, [])
         if a.other not in lst:
             lst.append(a.other)
     update_data(add)
     out({"item": a.item, "blockedBy": load_data()["blocks"][a.item]})
+
+
+def native_order(c, item, blocker):
+    """Make `item` (a parsed story) wait for `blocker` because a plan declared that order (epics). Overlap blocks are never written
+    to GitHub: a native edge does not go away when ranks flip, so a mirrored one could deadlock. GitHub takes the edge when it can
+    (setting on, both are issues); a draft, a refusal (old GHES, no permission, another org) or the setting off orders them in
+    cgp's own data["epicOrder"] instead. Returns "github" or "local"."""
+    if c["settings"]["nativeDependencies"] and item["kind"] == "issue" and blocker["kind"] == "issue":
+        try:
+            blocker_id = json.loads(gh("api", f"repos/{blocker['issueRepo']}/issues/{blocker['number']}").stdout)["id"]
+            gh("api", "-X", "POST", f"repos/{item['issueRepo']}/issues/{item['number']}/dependencies/blocked_by", "-F", f"issue_id={blocker_id}")
+            return "github"
+        except (SystemExit, ValueError, KeyError):
+            print("cgp: GitHub would not take the dependency; ordering these stories in cgp instead", file=sys.stderr)
+    def add(d):
+        waits = d.setdefault("epicOrder", {}).setdefault(item["item"], [])
+        if blocker["item"] not in waits:
+            waits.append(blocker["item"])
+    update_data(add)
+    return "local"
