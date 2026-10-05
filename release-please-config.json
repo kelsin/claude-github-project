@@ -4,7 +4,7 @@
   "release-label": "release: tagged",
   "include-v-in-tag": true,
   "pull-request-title-pattern": "chore(release): v${version}",
-  "pull-request-header": ":steam_locomotive: The next claude-github-project release",
+  "pull-request-header": ":clipboard: The next claude-github-project release",
   "changelog-sections": [
     {
       "type": "feat",
