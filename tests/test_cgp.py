@@ -1,4 +1,4 @@
-import importlib.machinery, importlib.util
+import importlib
 import json
 import os, subprocess, sys, tempfile, time, types, unittest
 from unittest import mock
@@ -8,11 +8,18 @@ CGP = os.path.join(ROOT, "scripts", "cgp")
 
 
 def load_cgp():
-    """scripts/cgp as a module (it has no .py suffix); HOME and friends are read from os.environ at import."""
-    loader = importlib.machinery.SourceFileLoader("cgp_mod", CGP)
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("cgp_mod", loader))
-    loader.exec_module(mod)
-    return mod
+    """The cgp_lib modules, freshly imported (HOME and friends are read from os.environ at import), as one namespace."""
+    for name in [n for n in sys.modules if n == "cgp_lib" or n.startswith("cgp_lib.")]:
+        del sys.modules[name]
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    try:
+        ns = types.SimpleNamespace(mods={})  # mods: the modules themselves, for patching a function where it is used
+        for sub in ("gh", "store", "board", "sched"):
+            ns.mods[sub] = importlib.import_module(f"cgp_lib.{sub}")
+            vars(ns).update({k: v for k, v in vars(ns.mods[sub]).items() if not k.startswith("__")})
+        return ns
+    finally:
+        sys.path.remove(os.path.join(ROOT, "scripts"))
 
 
 def issue(n, title):
@@ -331,7 +338,7 @@ class TestRobustness(Base):
         m = load_cgp()
         page1 = json.dumps([{"body": "see [a][b] ok"}])
         page2 = json.dumps([{"body": "x"}])
-        m.gh = lambda *a, **k: types.SimpleNamespace(stdout=page1 + page2)
+        m.mods["gh"].gh = lambda *a, **k: types.SimpleNamespace(stdout=page1 + page2)
         self.assertEqual([c["body"] for c in m.rest("repos/x/y/issues/1/comments")], ["see [a][b] ok", "x"])
 
 
@@ -898,10 +905,10 @@ class TestGraphQL(Base):
         m = load_cgp()
         reply = lambda data, errors: (lambda *a, **k: types.SimpleNamespace(
             returncode=1, stdout=json.dumps({"data": data, "errors": errors}), stderr=""))
-        m.gh = reply({"updateProjectV2Field": None}, [{"message": "no"}])
+        m.mods["gh"].gh = reply({"updateProjectV2Field": None}, [{"message": "no"}])
         with self.assertRaises(SystemExit):
             m.gql("mutation{ updateProjectV2Field }")
-        m.gh = reply({"node": {"items": []}}, [{"message": "one item unreadable"}])
+        m.mods["gh"].gh = reply({"node": {"items": []}}, [{"message": "one item unreadable"}])
         self.assertEqual(m.gql("query{ node }"), {"node": {"items": []}})
 
     def test_item_fields_are_asked_for_by_name_not_position(self):
@@ -929,7 +936,7 @@ class TestSnapshotBlocks(Base):
                 if fn.__name__ == "prune":  # another session records a block just before the prune
                     real(lambda d: d.setdefault("blocks", {}).__setitem__("i1", ["i2"]))
                 real(fn)
-            m.update_data = racing
+            m.mods["sched"].update_data = racing
             m.snapshot(m.cfg())
             self.assertEqual(m.load_data()["blocks"], {"i1": ["i2"]})
 
@@ -975,7 +982,7 @@ class PRBase(Base):
 
     def view(self, **kw):
         return {"state": "OPEN", "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED", "reviewDecision": "APPROVED",
-                "autoMergeRequest": None, **kw}
+                "autoMergeRequest": None, "isDraft": False, "headRefOid": "aaa111", "headRefName": "cgp/1", **kw}
 
     def db_set(self, **kw):
         d = self.read_db(); d.update(kw); self.write_db(d)

@@ -39,7 +39,9 @@ def seq(entry):
     return entry
 
 
-if args[:2] == ["auth", "status"]:
+if args[:1] == ["--version"]:
+    print("gh version 2.0.0")
+elif args[:2] == ["auth", "status"]:
     print(f"Token scopes: {db['scopes']}")
 elif args[:2] == ["api", "user"]:
     print("kelsin")
@@ -51,7 +53,7 @@ elif args[0] == "pr" and args[1] in ("view", "merge", "checks", "update-branch")
         prs = db.get("prs")
         if prs is not None and key not in prs:
             sys.exit(f"fakegh: no pull request {key}")
-        v = seq(prs[key]) if prs is not None else seq(db.get("pr_view", {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"}))
+        v = seq(prs[key]) if prs is not None else seq(db.get("pr_view", {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "isDraft": False, "headRefOid": "aaa111", "headRefName": f"cgp/{num}"}))
         save()
         print(json.dumps(v))
     elif args[1] == "checks":

@@ -1,0 +1,5 @@
+# Upgrading a board from the ten-column layout
+
+Boards from the ten-column layout (it had agent-side Plan Review and PR Review columns, and the human ones were called Plan Approval and PR Approval): nothing to do. `/cgp:run` brings the board up to date when it starts, under the board's lock: stories in the old agent-side columns move to Plan / Implement (where the worker now reviews them), Plan Approval / PR Approval are renamed Plan Review / PR Review with their stories where they were, and the old columns are removed. It reports what it changed. `scripts/cgp migrate --dry-run` shows the effect first, `scripts/cgp migrate` does it by hand, and `scripts/cgp config autoMigrate 0` stops `/cgp:run` from doing it (the board then keeps working in its old layout). A failed migration never blocks the run and is retried next time.
+
+The legacy handling (the old config layout, the agent-side `plan_review` / `pr_review` columns and their prompt shims) exists only for this upgrade. It is planned for removal in 0.4: boards that have run `/cgp:run` once on any version from 0.2 on are already migrated; `cgp doctor` reports a board that is not.
