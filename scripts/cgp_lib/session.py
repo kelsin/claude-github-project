@@ -76,9 +76,15 @@ def cmd_release(a):
     out({"released": key})
 
 
+def this_session_holds_lock():
+    key = load_json(state_path(), {}).get("boardKey")
+    lk = load_json(lock_file(key), None) if key else None
+    return bool(lk and lk.get("session") == sid())
+
+
 def stop_target(arg):
     """Stop-file path for the session to stop: this one by default (CGP_SESSION), else the holder of a board's lock."""
-    if not arg and os.environ.get("CGP_SESSION"):
+    if not arg and os.environ.get("CGP_SESSION") and this_session_holds_lock():
         return stop_path()
     if arg:
         boards = {k: load_board(k) for k in list_boards()}
@@ -137,6 +143,8 @@ def worker_pr(item, ref):
 def cmd_worker(a):
     """start / stop / clear / phase. `start` takes the title (and, unless given, the column) from the board: an issue title is
     text anyone can write, so it must never travel through a shell command line."""
+    if a.action == "phase" and a.column not in PHASES:
+        die(f"phase must be one of {list(PHASES)}")
     if a.action == "start":
         it = get_item(cfg(), a.item)
         a.column, a.title = a.column or it["column"], it["title"]
@@ -157,8 +165,6 @@ def cmd_worker(a):
             if a.column in DEFAULT_PHASE:
                 w.update(phase=DEFAULT_PHASE[a.column], phaseAt=now_iso())
             st["workers"].append(w)
-    if a.action == "phase" and a.column not in PHASES:
-        die(f"phase must be one of {list(PHASES)}")
     if a.action == "clear":
         update_state(lambda st: st.__setitem__("workers", []))
     else:

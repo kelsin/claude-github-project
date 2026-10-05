@@ -13,6 +13,8 @@ def load_json(path, default):
             return json.load(f)
     except FileNotFoundError:
         return default
+    except ValueError:
+        die(f"{path} is corrupt (not valid JSON); fix or delete it")
 
 
 def ensure_home():
@@ -24,9 +26,16 @@ def ensure_home():
 def save_json(path, obj):
     ensure_home()
     tmp = f"{path}.{os.getpid()}.tmp"
-    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
 
 class locked:
@@ -97,6 +106,15 @@ def save_board(c):
         paths.update({r: p for r, p in c["repos"].items() if p})
         save_json(PATHS, paths)
         save_json(board_file(c["board"]["id"]), {**c, "repos": {r: None for r in c["repos"]}})
+
+
+def update_board(fn):
+    """Change this board's config under the lock, on the file's current contents, so concurrent edits do not overwrite each other."""
+    with locked():
+        c = cfg()
+        fn(c)
+        save_board(c)
+        return c
 
 
 def board_key():

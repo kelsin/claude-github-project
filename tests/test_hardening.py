@@ -18,9 +18,10 @@ class TestWorkerStart(Base):
         w = self.state()["workers"][0]
         self.assertEqual((w["title"], w["column"]), ("one", "todo"))
         self.cgp("worker", "stop", "i1")
+        self.force("i2", "implement")
         self.cgp("worker", "start", "i2")  # the column is looked up too
         w = self.state()["workers"][0]
-        self.assertEqual((w["title"], w["column"]), ("two", "todo" if w["column"] == "todo" else w["column"]))
+        self.assertEqual((w["title"], w["column"]), ("two", "implement"))
         self.assertFalse(os.path.exists("pwned"))
 
 
@@ -38,7 +39,8 @@ class TestReviewedMerge(PRBase):
             p = self.cgp(*cmd, ok=False)
             self.assertEqual(p.returncode, 7, p.stderr)
             self.assertIn("reviewed aaa111", p.stderr)
-        self.assertEqual(self.calls("merge"), [])
+        # nothing was requested, and each refusal disarmed any auto-merge already armed on the unreviewed push
+        self.assertEqual(self.calls("merge"), [["pr", "merge", "1", "-R", "acme/app", "--disable-auto"]] * 2)
         self.prs(self.view(headRefOid="aaa111"))
         self.assertEqual(self.cgp("merge", "i1"), {"requested": True})
 

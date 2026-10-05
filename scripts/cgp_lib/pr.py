@@ -141,6 +141,7 @@ def merge_target(a):
     a.delegated = it["autoApprove"]["pr"]  # the user let the agent approve this PR: there was no review to hold it to
     msg = changed_since_review(a.item, ref, v) if v["state"] == "OPEN" and not a.delegated else None
     if msg:
+        cancel_auto_merge(*ref)  # an armed auto-merge would otherwise merge the unreviewed push once CI is green
         die("refusing to merge: " + msg, code=7)
     set_phase("merging", item=a.item)
     return a
@@ -197,6 +198,7 @@ def cmd_merge_wait(a):
             return
         changed = v["state"] == "OPEN" and not a.delegated and changed_since_review(a.item, (a.repo, a.pr), v)
         if changed:
+            cancel_auto_merge(a.repo, a.pr)
             out({"state": "changed", "note": changed, "pr": v})
             return
         if v["mergeStateStatus"] == "BEHIND":

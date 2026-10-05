@@ -1,6 +1,7 @@
 """Putting stories on the board from the terminal: `cgp add` creates an issue, `cgp import` adopts existing ones by label."""
 import json
 import sys
+from urllib.parse import quote
 from .consts import PRIORITY_OPTIONS
 from .util import die, out
 from .gh import gh, gql, rest
@@ -60,7 +61,7 @@ def cmd_import(a):
             on_board.add((it["issueRepo"], it["number"]))
     added = []
     for repo in repos:
-        for issue in rest(f"repos/{repo}/issues?state=open&labels={a.label}"):
+        for issue in rest(f"repos/{repo}/issues?state=open&labels={quote(a.label, safe='')}"):
             if "pull_request" in issue or (repo, issue["number"]) in on_board:
                 continue
             added.append({"repo": repo, "number": issue["number"], "title": issue["title"],

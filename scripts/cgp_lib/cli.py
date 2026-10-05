@@ -28,7 +28,7 @@ COMMANDS = [
     ("session-title", cmd_session_title, "UserPromptSubmit hook: name the session after the board", []),
     ("repo-path", cmd_repo_path, "Show or set the local clone of a linked repo", [A("repo", nargs="?"), A("path", nargs="?")]),
     ("discover", cmd_discover, "Find local clones of the board's repos under ~/src, ~/code, ...", [A("roots", nargs="*")]),
-    ("config", cmd_config, "Show or set a board setting (concurrency, pollSeconds, autoMigrate, remoteControl, sharedFiles, ...)", [
+    ("config", cmd_config, "Show or set a board setting (concurrency, pollSeconds, remoteControl, sharedFiles, ...)", [
         A("key", nargs="?"), A("value", nargs="?")]),
     ("repos", cmd_repos, "Repos linked to the board and their local clones", []),
     ("status", cmd_status, "Human-readable board overview: counts, what waits on you, workers, blocked stories", [

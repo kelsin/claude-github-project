@@ -44,7 +44,7 @@ If `list` or `wait` exits 5, another session took this board over: stop and tell
 
 - The user decides the Plan Review and PR Review columns (keys `plan_review`, `pr_review`). Never move a story out of them or work on them.
 - `batch` already holds the biggest group of Plan Approved / Implement stories whose declared files don't collide with each other or with running workers; the rest are `deferred` and come back as soon as the story they collide with finishes. Report them like `blocked`.
-- Stories in Plan Approved that wait on another story (`blocked` in the list output) are skipped until their blockers are Done; they do not count toward the no-progress rule.
+- Stories in Plan Approved (or Implement with no PR yet) that wait on another story (`blocked` in the list output) are skipped until their blockers are Done; they do not count toward the no-progress rule.
 - `stalled` lists workers that have run longer than the `maxWorkerMinutes` setting (default 240; 0 = never). Treat each like a crash: `CGP worker stop <item>`, note it in one line, count it as a run without progress for the 3-strikes rule below. (The hung agent may still be running; its story is released regardless.)
 - A worker failure (agent error, crash) must not end the loop: `CGP worker stop <item>` (the crashed worker never did), note it in one line, leave the story where it is, and continue.
 - Track `(item, column)` each time a worker finishes. If a story is still in the same column after 3 consecutive worker runs (crashes or no progress; runs whose reply starts `waiting:` or `blocked:` do not count), run `CGP ask <item>` with a short summary so it waits on the user instead of spinning. Keep the per-cycle output short; the loop may run for days.

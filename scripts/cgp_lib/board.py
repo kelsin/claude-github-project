@@ -6,7 +6,7 @@ from .consts import ALL_KEYS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS,
 from .util import die, norm, out, split_repo
 from .gh import gh, gql
 from .models import parse as parse_models
-from .store import board_file, cfg, load_json, save_board
+from .store import board_file, cfg, load_json, save_board, update_board
 
 
 PROJECT_FRAGMENT = """
@@ -198,18 +198,23 @@ def waiting_you(field):
     return you
 
 
-def ensure_story_option(field):
-    """Add the 'Another story' option to the Waiting On field (existing options keep their ids); returns its option id."""
-    have = next((o["id"] for o in field["options"] if o["name"] == STORY_OPTION), None)
-    if have:
+def add_missing_options(field, wanted):
+    """Add the (name, color) options a single-select field lacks, keeping existing option ids; returns its options as {name: id}."""
+    have = {o["name"]: o["id"] for o in field["options"]}
+    if all(n in have for n, _ in wanted):
         return have
     opts = [{"id": o["id"], "name": o["name"], "color": o.get("color") or "GRAY", "description": o.get("description") or ""}
             for o in field["options"]]
-    opts.append({"name": STORY_OPTION, "color": "YELLOW", "description": ""})
+    opts += [{"name": n, "color": col, "description": ""} for n, col in wanted if n not in have]
     data = gql("""mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){
       updateProjectV2Field(input:{fieldId:$f,singleSelectOptions:$o}){ projectV2Field{
         ... on ProjectV2SingleSelectField{ id options{id name} } } } }""", f=field["id"], o=opts)
-    return next(o["id"] for o in data["updateProjectV2Field"]["projectV2Field"]["options"] if o["name"] == STORY_OPTION)
+    return {o["name"]: o["id"] for o in data["updateProjectV2Field"]["projectV2Field"]["options"]}
+
+
+def ensure_story_option(field):
+    """Add the 'Another story' option to the Waiting On field (existing options keep their ids); returns its option id."""
+    return add_missing_options(field, [(STORY_OPTION, "YELLOW")])[STORY_OPTION]
 
 
 def board_keys(c):
@@ -304,6 +309,9 @@ def cmd_setup(a):
         die("project has no single-select Status field")
     if WAITING_FIELD in fields:
         waiting_you(fields[WAITING_FIELD])  # fail before the board is touched
+    for name in (AUTO_FIELD, PRIORITY_FIELD):
+        if name in fields and "options" not in fields[name]:
+            die(f"the '{name}' field exists but is not a single-select field; rename or delete it in the board settings, then run setup again")
 
     repo_id = None
     if a.repo:  # validate before touching the board
@@ -332,8 +340,10 @@ def cmd_setup(a):
     waiting = ensure(WAITING_FIELD, "SINGLE_SELECT", [{"name": "You", "color": "RED", "description": ""},
                                                       {"name": STORY_OPTION, "color": "YELLOW", "description": ""}])
     text_ids = {k: ensure(n, "TEXT")["id"] for k, n in TEXT_FIELDS.items()}
-    ensure(AUTO_FIELD, "SINGLE_SELECT", [{"name": n, "color": "GREEN", "description": ""} for n in AUTO_OPTIONS])
+    auto = ensure(AUTO_FIELD, "SINGLE_SELECT", [{"name": n, "color": "GREEN", "description": ""} for n in AUTO_OPTIONS])
+    add_missing_options(auto, [(n, "GREEN") for n in AUTO_OPTIONS])  # a field that was already there may lack some
     priority = ensure(PRIORITY_FIELD, "SINGLE_SELECT", [{"name": n, "color": col, "description": ""} for n, col in PRIORITY_OPTIONS])
+    priority_options = add_missing_options(priority, PRIORITY_OPTIONS)
     fields = fields_by_name(fetch_project(kind, owner, number))  # now with the fields added above
     views = ensure_views(proj, fields)
 
@@ -347,7 +357,7 @@ def cmd_setup(a):
         "fields": {"status": {"id": status["id"], "options": options},
                    "waiting": {"id": waiting["id"], "you": waiting_you(waiting),
                                "story": ensure_story_option(waiting)},
-                   "priority": {"id": priority["id"], "options": {o["name"]: o["id"] for o in priority.get("options", [])}},
+                   "priority": {"id": priority["id"], "options": priority_options},
                    **text_ids},
         "repos": repos,
         "settings": {**DEFAULTS, **old.get("settings", {})},
@@ -357,6 +367,7 @@ def cmd_setup(a):
         c["repos"].setdefault(r["nameWithOwner"], None)
     if a.repo:
         rid = repo_id
+        a.repo = known_repo(c, a.repo) or a.repo  # keep the spelling already stored
         if a.repo not in c["repos"]:
             gql("""mutation($p:ID!,$r:ID!){ linkProjectV2ToRepository(input:{projectId:$p,repositoryId:$r}){
               clientMutationId } }""", p=proj["id"], r=rid)
@@ -374,8 +385,7 @@ def cmd_repo_path(a):
     if a.repo:
         a.repo = require_repo(c, a.repo)
     if a.path:
-        c["repos"][a.repo] = os.path.abspath(a.path)
-        save_board(c)
+        c = update_board(lambda c: c["repos"].__setitem__(a.repo, os.path.abspath(a.path)))
     out(c["repos"] if not a.repo else {a.repo: c["repos"].get(a.repo)})
 
 
@@ -383,6 +393,7 @@ def cmd_discover(a):
     c = cfg()
     roots = a.roots or [os.path.expanduser(p) for p in ("~/src", "~/code", "~/projects", "~/dev")]
     wanted = {r.lower(): r for r in c["repos"] if not c["repos"][r]}
+    found = {}
     for root in roots:
         if not os.path.isdir(root):
             continue
@@ -395,8 +406,8 @@ def cmd_discover(a):
                                      capture_output=True, text=True).stdout.strip()
                 m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", url)
                 if m and m.group(1).lower() in wanted:
-                    c["repos"][wanted.pop(m.group(1).lower())] = cand
-    save_board(c)
+                    found[wanted.pop(m.group(1).lower())] = cand
+    c = update_board(lambda c: c["repos"].update({r: p for r, p in found.items() if r in c["repos"]}))
     out({"found": {r: p for r, p in c["repos"].items() if p}, "missing": [r for r, p in c["repos"].items() if not p]})
 
 
@@ -408,18 +419,18 @@ def cmd_config(a):
         if a.key in ("sharedFiles", "guardFiles"):
             if a.value is None:
                 die(f"usage: cgp config {a.key} <comma-separated globs, or empty for none>")
-            c["settings"][a.key] = [g.strip() for g in a.value.split(",") if g.strip()]
+            val = [g.strip() for g in a.value.split(",") if g.strip()]
         elif a.key in STRING_SETTINGS:
             if a.value is None:
                 die(f"usage: cgp config {a.key} <text, or empty to unset>")
             if a.key.endswith("Model"):
                 parse_models(a.value)  # dies on a bad value
-            c["settings"][a.key] = a.value.strip()
+            val = a.value.strip()
         else:
             if a.value is None or not re.fullmatch(r"\d+", a.value):
                 die(f"usage: cgp config {a.key} <non-negative integer>")
-            c["settings"][a.key] = int(a.value)
-        save_board(c)
+            val = int(a.value)
+        c = update_board(lambda c: c["settings"].__setitem__(a.key, val))
     out(c["settings"])
 
 
