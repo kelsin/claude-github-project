@@ -192,6 +192,8 @@ class TestMandatorySubagents(unittest.TestCase):
         self.assertIn("at least one", s)
         self.assertNotIn("do the same passes yourself", s)
         self.assertNotIn("ran inline", s)
+        with open(os.path.join(test_cgp.ROOT, "skills", "run", "SKILL.md")) as f:
+            self.assertIn("Agent tool", f.read())
 
     def test_column_files_spawn_at_least_one(self):
         for name in ("implement.md", "plan.md"):
