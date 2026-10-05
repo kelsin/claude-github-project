@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/kelsin/claude-github-project/compare/v0.2.0...v0.3.0) (2026-10-05)
+
+
+### Features
+
+* update GitHub Actions to their latest major versions ([#34](https://github.com/kelsin/claude-github-project/issues/34)) ([f3b0bea](https://github.com/kelsin/claude-github-project/commit/f3b0beae794e5856bd52f69c02eb88d011151c5e))
+
 ## 0.2.0
 
 Security
