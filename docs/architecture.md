@@ -20,7 +20,6 @@ The plugin has three parts: skills (prompts), the `scripts/cgp` CLI that does ev
 | `sched` | which stories are actionable, file overlap and blocking, `list` / `status` / `wait` |
 | `doctor` | `doctor` and `gc` |
 | `intake` | `add` and `import` (stories onto the board) |
-| `history` | the per-story event log, `replay` and `report` |
 | `notify` | the `notifyCommand` hook |
 | `repoconf` | a repo's `.cgp.json` (read from its default branch) |
 | `models` | the model per sub-agent role |

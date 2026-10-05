@@ -41,8 +41,6 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `merge-wait` | `item` `--timeout` `--interval` | Wait for the story's PR to merge, keeping it up to date |
 | `add` | `title` `--repo` `--body` `--priority` | Create an issue and put it on the board in Todo (body on stdin with --body -) |
 | `import` | `label` `--repo` | Put open issues with a label on the board in Todo |
-| `replay` | `item` `--json` | The ordered history of one story: moves, worker runs, questions, merges |
-| `report` | `--days` `--json` | Throughput and cycle time of the stories finished in the last days |
 | `models` | `rating` | The model for each sub-agent role at a risk rating (null: the session's model) |
 | `repo-config` | `target` | The .cgp.json of a repo's default branch (test and lint commands, shared and guarded files, ...) |
 | `doctor` | `--board` | Check the installation: gh, token scopes, board, clones, stale files |

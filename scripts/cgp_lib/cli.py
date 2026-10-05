@@ -6,7 +6,6 @@ from .board import (cmd_adopt, cmd_config, cmd_discover, cmd_repo_path, cmd_repo
 from .doctor import cmd_doctor, cmd_gc
 from .models import cmd_models
 from .repoconf import cmd_repo_config
-from .history import cmd_replay, cmd_report
 from .intake import cmd_add, cmd_import
 from .gitwt import cmd_guard, cmd_sync, cmd_worktree, cmd_worktree_remove
 from .pr import cmd_ci_wait, cmd_merge, cmd_merge_wait, cmd_pr_state
@@ -69,9 +68,6 @@ COMMANDS = [
     ("add", cmd_add, "Create an issue and put it on the board in Todo (body on stdin with --body -)", [
         A("title"), A("--repo"), A("--body"), A("--priority", help="High, Medium, Low or Hold")]),
     ("import", cmd_import, "Put open issues with a label on the board in Todo", [A("label"), A("--repo")]),
-    ("replay", cmd_replay, "The ordered history of one story: moves, worker runs, questions, merges", [A("item"), A("--json", action="store_true")]),
-    ("report", cmd_report, "Throughput and cycle time of the stories finished in the last days", [
-        A("--days", type=int, default=7), A("--json", action="store_true")]),
     ("models", cmd_models, "The model for each sub-agent role at a risk rating (null: the session's model)", [
         A("rating", choices=["low", "medium", "high"])]),
     ("repo-config", cmd_repo_config, "The .cgp.json of a repo's default branch (test and lint commands, shared and guarded files, ...)", [

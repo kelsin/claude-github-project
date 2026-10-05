@@ -8,7 +8,6 @@ from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
 from .store import cfg, load_data, update_data, update_state
 from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, set_single, set_text
 from .session import set_phase, worker_pr
-from .history import record
 from .repoconf import repo_config, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
 from .pr import cancel_auto_merge, cmd_pr_state, pr_view, record_reviewed
@@ -64,7 +63,6 @@ def cmd_move(a):
     if a.column != "done" and it["column"] == "pr_approved" and ref:
         cancel_auto_merge(*ref)  # leaving PR Approved must not leave a merge armed
     set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
-    record(a.item, "move", it["title"], was=it["column"], to=a.column)
     if a.column == "pr_review" and ref:
         if (pr := pr_view(*ref, check=False)) and pr["isDraft"]:  # draftPRs opens PRs as drafts: ready for review now
             gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
@@ -216,7 +214,6 @@ def cmd_ask(a):
     set_single(c, a.item, c["fields"]["waiting"]["id"], c["fields"]["waiting"]["you"])
 
     advance_cursor(a.item, asked=cm.get("created_at"))
-    record(a.item, "ask", round=rounds + 1)
     out({"url": cm["html_url"], "round": rounds + 1})
 
 

@@ -7,7 +7,6 @@ import time
 from .consts import DEFAULT_PHASE, HOME, LOCKS, LOCK_STALE_SECONDS, PHASES
 from .util import die, now_iso, out, safe, strip_id
 from .store import cfg, ensure_home, list_boards, load_board, load_json, lock_file, lock_holder, locked, save_json, sid, state_path, stop_path, update_state
-from .history import record
 from .board import get_item, parse_board_url
 
 
@@ -148,10 +147,6 @@ def cmd_worker(a):
     if a.action == "start":
         it = get_item(cfg(), a.item)
         a.column, a.title = a.column or it["column"], it["title"]
-        record(a.item, "worker-start", it["title"], column=a.column)
-    elif a.action in ("stop", "phase") and a.item:
-        record(a.item, "worker-stop" if a.action == "stop" else "phase", phase=a.column if a.action == "phase" else None,
-               detail=(a.title or None) if a.action == "phase" else None)
 
     def upd(st):
         if a.action == "phase":

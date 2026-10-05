@@ -14,7 +14,7 @@ def load_cgp():
     sys.path.insert(0, os.path.join(ROOT, "scripts"))
     try:
         ns = types.SimpleNamespace(mods={})  # mods: the modules themselves, for patching a function where it is used
-        for sub in ("gh", "store", "board", "sched", "history", "models"):
+        for sub in ("gh", "store", "board", "sched", "models"):
             ns.mods[sub] = importlib.import_module(f"cgp_lib.{sub}")
             vars(ns).update({k: v for k, v in vars(ns.mods[sub]).items() if not k.startswith("__")})
         return ns
