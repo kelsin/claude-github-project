@@ -937,3 +937,17 @@ class TestMandatorySubagents(unittest.TestCase):
     def test_column_files_spawn_at_least_one(self):
         for name in ("implement.md", "plan.md"):
             self.assertIn("at least one", self.read(name))
+
+
+class TestConventionalPRTitles(unittest.TestCase):
+    def read(self, name):
+        with open(os.path.join(test_cgp.ROOT, "skills", "run", "columns", name)) as f:
+            return f.read()
+
+    def test_shared_requires_conventional_titles(self):
+        s = self.read("shared.md")
+        for phrase in ("conventional", "type(scope)", "never the raw story title", "gh pr edit"):
+            self.assertIn(phrase, s)
+
+    def test_implement_mentions_conventional_title(self):
+        self.assertIn("conventional", self.read("implement.md"))
