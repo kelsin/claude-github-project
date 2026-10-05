@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/kelsin/claude-github-project/compare/v0.3.0...v0.4.0) (2026-10-05)
+
+
+### Features
+
+* check Auto Approve live when moving into a review column ([#38](https://github.com/kelsin/claude-github-project/issues/38)) ([5c4f71c](https://github.com/kelsin/claude-github-project/commit/5c4f71c13e752dd46885cfaf9337f847b552cebd))
+* native dependencies, policy auto-approval, sub-stories and daemon ([#41](https://github.com/kelsin/claude-github-project/issues/41)) ([06e1252](https://github.com/kelsin/claude-github-project/commit/06e1252fdaa5cc131f126ef8e31d956bccb8db18))
+
 ## [0.3.0](https://github.com/kelsin/claude-github-project/compare/v0.2.0...v0.3.0) (2026-10-05)
 
 
