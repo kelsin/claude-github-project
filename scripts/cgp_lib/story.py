@@ -385,6 +385,10 @@ def cmd_prepare(a):
         out(res)
         return
     res["authorTrusted"] = author_trusted(it)
+    from .epics import state  # epics imports this module
+    split = state(load_data(), a.item)
+    if split:
+        res["split"] = split  # declared / approved / created sub-stories (cgp split)
     res["feedback"] = call(cmd_feedback, item=a.item)
     if a.item in load_data().get("answered", []):
         res["answers"] = call(cmd_answers, item=a.item)

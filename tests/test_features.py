@@ -719,6 +719,169 @@ class TestPolicySettings(PolicyBase):
             self.assertIn("policy", text)
 
 
+class TestSubStories(PolicyBase):
+    SPECS = [{"title": "Part one", "scope": "Do the first half.", "files": ["docs/a.md"]},
+             {"title": "Part two", "scope": "Do the second half.", "files": ["src/b.py"], "after": ["Part one"]}]
+
+    def declare(self, specs=None, ok=True):
+        return self.cgp("split", "i1", "--declare", input=json.dumps(self.SPECS if specs is None else specs), ok=ok)
+
+    def approved(self, specs=None):
+        """The parent has declared a split and a person approved the plan (the loop snapshots the declaration)."""
+        self.force("i1", "plan")
+        self.declare(specs)
+        self.force("i1", "plan_approved")
+        self.cgp("list")
+
+    def split(self):
+        self.approved()
+        return self.cgp("split", "i1")["children"]
+
+    def issues(self):
+        return self.read_db().get("repo_issues", {}).get("acme/app", [])
+
+    def finish(self, kids, merged=True):
+        d = self.read_db()
+        d["prs"] = {}
+        for k in kids:
+            item = next(i for i in d["items"] if i["id"] == k["item"])
+            item["values"]["Status"] = {"optionId": next(o["id"] for o in next(f for f in d["fields"] if f["name"] == "Status")["options"] if "Done" in o["name"])}
+            if merged:
+                item["values"]["PR"] = {"text": f"https://github.com/acme/app/pull/{k['number'] + 100}"}
+                d["prs"][f"acme/app#{k['number'] + 100}"] = {"state": "MERGED", "isDraft": False, "headRefOid": "bbb", "headRefName": "x"}
+        self.write_db(d)
+
+    def test_split_creates_only_the_approved_declaration(self):
+        kids = self.split()
+        self.assertEqual([k["title"] for k in kids], ["Part one", "Part two"])
+        first = self.issues()[0]
+        self.assertTrue(first["body"].endswith("Part of acme/app#1"))
+        d = self.read_db()
+        for k in kids:  # in Todo with the plan skipped, and their files recorded for the guard
+            item = next(i for i in d["items"] if i["id"] == k["item"])
+            self.assertEqual(item["values"]["Plan"], {"text": "Skip"})
+            self.assertEqual(self.data()["approvedTouches"][k["item"]], ["docs/a.md"] if k["title"] == "Part one" else ["src/b.py"])
+            self.assertEqual(self.data()["parents"][k["item"]], "i1")
+        self.cgp("list")  # a sub-story in Todo keeps its approved files
+        self.assertIn(kids[0]["item"], self.data()["approvedTouches"])
+        self.assertTrue(any("Split into 2 sub-stories" in c for c in self.comments()))
+
+    def test_order_is_written_to_github_or_kept_locally(self):
+        kids = self.split()
+        self.assertEqual(len(self.read_db()["dependency_posts"]), 1)
+        self.assertEqual(self.data()["epicOrder"], {})
+        self.assertNotIn(kids[1]["item"], [i["item"] for i in self.cgp("list")["batch"]])  # Part two waits for Part one
+        self.assertIn(kids[0]["item"], [i["item"] for i in self.cgp("list")["batch"]])
+
+    def test_order_stays_local_when_native_dependencies_are_off(self):
+        self.setting(nativeDependencies=0)
+        kids = self.split()
+        self.assertEqual(self.data()["epicOrder"], {kids[1]["item"]: [kids[0]["item"]]})
+        self.assertNotIn("dependency_posts", self.read_db())
+
+    def test_an_invalid_declaration_is_stored_and_creates_nothing(self):
+        self.force("i1", "plan")
+        for bad in ([], [{"title": "x"}], [{**self.SPECS[0], "after": ["nope"]}], [{**self.SPECS[0], "repo": "other/repo"}],
+                    [{**self.SPECS[0], "title": "a\nb"}], [dict(self.SPECS[0], after=["Part one"])],
+                    [dict(self.SPECS[0], after=["Part two"]), dict(self.SPECS[1], after=["Part one"])], self.SPECS + [self.SPECS[0]]):
+            self.assertNotEqual(self.declare(bad, ok=False).returncode, 0, bad)
+        self.assertEqual(self.data().get("splits", {}), {})
+
+    def test_one_bad_spec_in_the_snapshot_creates_nothing(self):
+        self.approved()
+        bad = self.data()["approvedSplits"]["i1"] + [{"title": "Elsewhere", "scope": "x", "files": [], "repo": "other/repo", "after": []}]
+        self.set_data(approvedSplits={"i1": bad})
+        self.assertIn("not a repo linked", self.cgp("split", "i1", ok=False).stderr)
+        self.assertEqual(self.issues(), [])
+
+    def test_at_most_ten_sub_stories(self):
+        self.force("i1", "plan")
+        many = [{"title": f"s{n}", "scope": "x", "files": []} for n in range(11)]
+        self.assertIn("at most 10", self.declare(many, ok=False).stderr)
+        self.declare(many[:10])
+        self.assertEqual(len(self.data()["splits"]["i1"]), 10)
+
+    def test_refusals(self):
+        self.force("i1", "plan")
+        self.declare()
+        self.assertIn("works only in", self.cgp("split", "i1", ok=False).stderr)  # before the plan is approved
+        self.force("i1", "plan_approved")
+        self.assertIn("works only in", self.declare(ok=False).stderr)  # no new declaration after approval
+        self.set_data(policyPlans=["i1"])
+        self.assertIn("auto-approval policy", self.cgp("split", "i1", ok=False).stderr)
+        self.assertEqual(self.issues(), [])
+        self.set_data(policyPlans=[], approvedSplits={}, splits={})
+        self.assertIn("declare", self.cgp("split", "i1", ok=False).stderr.lower())  # nothing approved to create
+
+    def test_a_policy_approved_plan_is_marked(self):
+        self.force("i1", "plan")
+        self.cgp("touches", "i1", "docs/guide.md")
+        self.cgp("rate", "i1", "low")
+        self.declare()
+        self.assertEqual(self.cgp("move", "i1", "plan_review")["column"], "plan_approved")
+        self.assertEqual(self.data()["policyPlans"], ["i1"])
+        self.assertIn("auto-approval policy", self.cgp("split", "i1", ok=False).stderr)
+        self.force("i1", "plan")
+        self.cgp("list")
+        self.assertEqual(self.data()["policyPlans"], [])  # re-planned: a person approves the next one
+
+    def test_a_sub_story_cannot_be_split_or_declare(self):
+        kids = self.split()
+        self.force(kids[0]["item"], "plan")
+        for extra in ((), ("--declare",)):
+            p = self.cgp("split", kids[0]["item"], *extra, input=json.dumps(self.SPECS), ok=False)
+            self.assertIn("one nesting level", p.stderr)
+
+    def test_the_parent_waits_for_its_sub_stories_and_is_not_dispatched(self):
+        kids = self.split()
+        snap = self.cgp("list")
+        self.assertNotIn("i1", [i["item"] for i in snap["batch"]])
+        row = next(b for b in snap["blocked"] if b["title"] == "one")
+        self.assertEqual(sorted(row["blockedBy"]), ["Part one", "Part two"])
+        self.assertEqual(next(i for i in snap["items"] if i["item"] == "i1")["waitingOn"], "Another story")
+        self.assertEqual(self.cgp("prepare", "i1")["split"]["created"], ["Part one", "Part two"])
+        self.assertIn("cycle", self.cgp("block", kids[0]["item"], "i1", ok=False).stderr)  # the parent already waits for it
+
+    def test_the_parent_closes_when_every_sub_story_merged(self):
+        kids = self.split()
+        self.finish(kids[:1])
+        self.assertNotIn("i1", [i["item"] for i in self.cgp("list")["items"] if i["column"] == "done"])
+        self.finish(kids)
+        snap = self.cgp("list")
+        self.assertEqual(next(i for i in snap["items"] if i["item"] == "i1")["column"], "done")
+        self.assertEqual(self.read_db()["issue_closes"], ["acme/app#1"])
+        done = [c for c in self.comments() if "All sub-stories are done" in c][0]
+        self.assertIn("pull/201", done)
+        self.assertIn("pull/202", done)
+
+    def test_a_sub_story_closed_any_other_way_goes_to_a_person_once(self):
+        kids = self.split()
+        self.finish(kids, merged=False)
+        snap = self.cgp("list")
+        self.assertEqual([i["item"] for i in snap["waitingOnYou"]], ["i1"])
+        self.assertNotIn("issue_closes", self.read_db())
+        self.assertEqual(len([c for c in self.comments() if "not by a merged PR" in c]), 1)
+        self.cgp("list")
+        self.assertEqual(len([c for c in self.comments() if "not by a merged PR" in c]), 1)
+
+    def test_a_sub_story_written_by_someone_else_does_not_count(self):
+        kids = self.split()
+        self.finish(kids)
+        d = self.read_db()
+        d["issue_authors"] = {"acme/app#101": {"login": "mallory", "author_association": "NONE"}}
+        self.write_db(d)
+        self.cgp("list")
+        self.assertNotIn("issue_closes", self.read_db())
+
+    def test_the_prompts_split_and_stop(self):
+        read = TestMandatorySubagents.read
+        approved = read(self, "plan_approved.md")
+        self.assertIn("CGP split <item>", approved)
+        self.assertIn("stop WITHOUT moving", approved.split("CGP split <item>")[1].split("\n")[0])
+        self.assertIn("CGP split <item> --declare", read(self, "plan.md"))
+        self.assertIn("Sub-stories", read(self, "plan_artifact.md"))
+
+
 class TestMandatorySubagents(unittest.TestCase):
     def read(self, name):
         with open(os.path.join(test_cgp.ROOT, "skills", "run", "columns", name)) as f:

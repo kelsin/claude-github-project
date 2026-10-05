@@ -41,14 +41,19 @@ def put_on_board(c, node_id, priority=None):
     return item
 
 
+def create_story(c, repo, title, body, priority=None):
+    """Create an issue and put it on the board in Todo (the repo and priority must be validated already)."""
+    issue = json.loads(gh("api", f"repos/{repo}/issues", "-f", f"title={title}", "-f", f"body={body}").stdout)
+    item = put_on_board(c, issue["node_id"], priority)
+    return {"item": item, "number": issue["number"], "url": issue["html_url"], "repo": repo}
+
+
 def cmd_add(a):
     c = cfg()
     repo = default_repo(c, a.repo)
     priority = priority_option(c, a.priority)  # validated before anything is created
     body = sys.stdin.read().strip() if a.body == "-" else (a.body or "")
-    issue = json.loads(gh("api", f"repos/{repo}/issues", "-f", f"title={a.title}", "-f", f"body={body}").stdout)
-    item = put_on_board(c, issue["node_id"], priority)
-    out({"item": item, "number": issue["number"], "url": issue["html_url"], "repo": repo})
+    out(create_story(c, repo, a.title, body, priority))
 
 
 def cmd_import(a):

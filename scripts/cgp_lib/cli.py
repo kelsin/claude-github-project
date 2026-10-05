@@ -3,6 +3,7 @@ import argparse
 
 
 from .board import (cmd_adopt, cmd_config, cmd_discover, cmd_repo_path, cmd_repos, cmd_setup)
+from .epics import cmd_split
 from .doctor import cmd_doctor, cmd_gc
 from .models import RATINGS, cmd_models
 from .policy import cmd_rate
@@ -68,6 +69,8 @@ COMMANDS = [
         A("item"), A("--timeout", type=int, default=540), A("--interval", type=int, default=20)]),
     ("add", cmd_add, "Create an issue and put it on the board in Todo (body on stdin with --body -)", [
         A("title"), A("--repo"), A("--body"), A("--priority", help="High, Medium, Low or Hold")]),
+    ("split", cmd_split, "Sub-stories: declare a split in the plan (--declare, JSON on stdin), or create the approved ones", [
+        A("item"), A("--declare", action="store_true")]),
     ("import", cmd_import, "Put open issues with a label on the board in Todo", [A("label"), A("--repo")]),
     ("models", cmd_models, "The model for each sub-agent role at a risk rating (null: the session's model)", [
         A("rating", choices=["low", "medium", "high"])]),

@@ -136,8 +136,8 @@ def cmd_guard(a):
     d = load_data()
     snap = d.get("approvedTouches", {}).get(a.item)  # what was declared when the story was approved; a story from before that
     allowed = [norm_path(t) for t in (snap if snap is not None else d.get("touches", {}).get(a.item, []))]  # existed uses its touches
-    if it["skipPlan"]:
-        allowed = []  # no plan was approved, so nothing guarded was
+    if it["skipPlan"] and a.item not in d.get("parents", {}):
+        allowed = []  # no plan was approved, so nothing guarded was (a sub-story's files were: they are in its parent's approved split)
     guarded = [g.lower() for g in merged_globs(c, "guardFiles", [it["issueRepo"]])]
     bad = [n for n in names if any(fnmatch.fnmatchcase(x.lower(), g) for g in guarded for x in (n, os.path.basename(n)))
            and not any(covers(t, n) for t in allowed)]

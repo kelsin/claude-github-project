@@ -223,7 +223,13 @@ elif args[0] == "api":
     mi = re.fullmatch(r"repos/([^/]+/[^/]+)/issues/(\d+)", path)
     if mi:
         key = f"{mi.group(1)}#{mi.group(2)}"
-        if "-f" in args:
+        if "state=closed" in args:  # closing an issue: db["issue_closes"] records it, and the board item shows it closed
+            db.setdefault("issue_closes", []).append(key)
+            for it in db["items"]:
+                if it["content"].get("number") == int(mi.group(2)) and it["content"].get("repository", {}).get("nameWithOwner") == mi.group(1):
+                    it["content"]["state"] = "CLOSED"
+            save()
+        elif "-f" in args:
             db.setdefault("issue_bodies", {})[key] = args[args.index("-f") + 1][len("body="):]
             save()
         who = db.get("issue_authors", {}).get(key, {"login": "kelsin", "author_association": "OWNER"})

@@ -11,6 +11,7 @@ from .store import cfg, load_data, load_json, lock_file, lock_holder, state_path
 from .board import board_keys, clear_field, ensure_story_option, fetch_items, fetch_project, fields_by_name, get_item, parse_item, parse_pr_ref, rank, set_single
 from .gitwt import cleanup_worktree
 from .notify import check
+from .epics import close_finished, parent_edges
 from .repoconf import merged_globs
 from .policy import current_rating
 from .story import ask_user, process_replies
@@ -77,7 +78,8 @@ def effective_blocks(live, data, native=None):
     """Story -> the live stories that hold it back: cgp's overlap blocks, epic ordering and GitHub's dependencies together.
     A local overlap block that closes a cycle is dropped (it is only a scheduling hint); what cannot be dropped stays, see native_cycles."""
     by_id = {i["item"]: i for i in live}
-    fixed = merge_edges(ordered_blocks(by_id, data.get("epicOrder")), native_edges(live) if native is None else native)
+    fixed = merge_edges(ordered_blocks(by_id, data.get("epicOrder")), parent_edges(by_id, data),
+                        native_edges(live) if native is None else native)
     local = local_blocks(by_id, data.get("blocks"))
     merged = merge_edges(fixed, local)
     for k, v in local.items():
@@ -93,7 +95,7 @@ def effective_blocks(live, data, native=None):
 def native_cycles(live, data, native=None):
     """Live stories on a dependency cycle made only of edges cgp cannot drop (GitHub's and epic ordering): they wait on each other forever."""
     by_id = {i["item"]: i for i in live}
-    g = merge_edges(ordered_blocks(by_id, data.get("epicOrder")), native_edges(live) if native is None else native)
+    g = merge_edges(ordered_blocks(by_id, data.get("epicOrder")), parent_edges(by_id, data), native_edges(live) if native is None else native)
     return [k for k in g if any(would_cycle(g, k, b) for b in g[k])]
 
 
@@ -181,11 +183,15 @@ def snapshot(c):
     for i in items:
         if i["item"] in answered:
             i["answered"] = True
-    for i in items:  # closed issues (merged PR, or closed by hand) are finished: file them under Done
-        if i["closed"] and i["column"] != "done" and i["kind"] == "issue":
-            set_single(c, i["item"], c["fields"]["status"]["id"], c["fields"]["status"]["options"]["done"])
-            i["column"] = "done"
-            cleanup_worktree(c, i)
+    def file_closed():  # closed issues (merged PR, or closed by hand) are finished: file them under Done
+        for i in items:
+            if i["closed"] and i["column"] != "done" and i["kind"] == "issue":
+                set_single(c, i["item"], c["fields"]["status"]["id"], c["fields"]["status"]["options"]["done"])
+                i["column"] = "done"
+                cleanup_worktree(c, i)
+    file_closed()
+    close_finished(c, items)  # a story split into sub-stories is closed once they are all done (see epics.py)
+    file_closed()
     live = [i for i in items if i["column"] != "done"]
     counts = {k: sum(1 for i in items if i["column"] == k) for k in board_keys(c)}
     by_id = {i["item"]: i for i in live}
@@ -205,7 +211,8 @@ def snapshot(c):
         i["blockers"] = [{"title": r["title"], "column": r["column"], "waiting": r["waiting"]} for r in rows]
     sync_story_field(c, live)
     # a block gates a story that is about to start work (see starting)
-    blocked = [i for i in live if i["blockedBy"] and starting(i)]
+    parents = parent_edges(by_id, data)  # a story waiting for its sub-stories is never dispatched, whatever its column
+    blocked = [i for i in live if i["blockedBy"] and (starting(i) or i["item"] in parents)]
     in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and not i["held"] and i not in blocked
                   and i["item"] not in in_flight]
@@ -251,9 +258,21 @@ def snapshot(c):
         for i in live:  # the files a story declared when it was approved (see story.snapshot_touches); replanning forgets them
             if i["column"] in ("plan_approved", "implement") and i["item"] not in snaps:
                 snaps[i["item"]] = list(d.get("touches", {}).get(i["item"], []))
-            elif i["column"] in ("todo", "plan", "plan_review"):
+            elif i["column"] in ("todo", "plan", "plan_review") and i["item"] not in d.get("parents", {}):  # a sub-story keeps what its parent's plan gave it
                 snaps.pop(i["item"], None)
         d["approvedTouches"] = snaps
+        d["splits"] = {k: v for k, v in d.get("splits", {}).items() if k in live_ids}
+        splits = {k: v for k, v in d.get("approvedSplits", {}).items() if k in live_ids}
+        for i in live:  # the split declared when the plan was approved: all `cgp split` creates
+            if i["column"] in ("plan_approved", "implement") and i["item"] not in splits and d["splits"].get(i["item"]):
+                splits[i["item"]] = list(d["splits"][i["item"]])
+            elif i["column"] in ("todo", "plan", "plan_review"):
+                splits.pop(i["item"], None)
+        d["approvedSplits"] = splits
+        d["children"] = {k: v for k, v in d.get("children", {}).items() if k in live_ids}
+        d["parents"] = {k: v for k, v in d.get("parents", {}).items() if k in live_ids}
+        d["epicAsked"] = {k: v for k, v in d.get("epicAsked", {}).items() if k in live_ids}
+        d["policyPlans"] = [i for i in d.get("policyPlans", []) if i in live_ids and by_id[i]["column"] not in ("todo", "plan", "plan_review")]
         for k in ("reviewed", "cleanRebase", "asked", "ratings", "policy"):
             d[k] = {i: v for i, v in d.get(k, {}).items() if i in live_ids}
         d["tainted"] = [i for i in d.get("tainted", []) if i in live_ids]
@@ -415,7 +434,8 @@ def cmd_block(a):
     c = cfg()
     live = [i for i in (parse_item(r, c) for r in fetch_items(c["board"]["id"], bool(c["settings"]["nativeDependencies"])))
             if not i["archived"] and i["kind"] in ("issue", "draft") and i["column"] != "done"]
-    native = merge_edges(ordered_blocks({i["item"]: i for i in live}, load_data().get("epicOrder")),
+    by_id, data = {i["item"]: i for i in live}, load_data()
+    native = merge_edges(ordered_blocks(by_id, data.get("epicOrder")), parent_edges(by_id, data),
                          native_edges(live) if c["settings"]["nativeDependencies"] else {})  # edges cgp reads but never writes
 
     def add(st):

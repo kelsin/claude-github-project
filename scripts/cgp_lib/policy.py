@@ -177,6 +177,8 @@ def record_decision(it, gate, verdict):
         d.setdefault("policy", {})[it["item"]] = {"gate": gate, "at": now_iso(), **public(verdict)}
         if verdict["approved"] and "touches" in verdict:
             d.setdefault("approvedTouches", {})[it["item"]] = list(verdict["touches"])
+            if it["item"] not in d.setdefault("policyPlans", []):  # sub-stories are only created from a plan a person approved (epics.cmd_split)
+                d["policyPlans"].append(it["item"])
     update_data(upd)
 
 
