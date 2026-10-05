@@ -5,11 +5,12 @@ import os
 import re
 import subprocess
 import sys
-from .consts import ALL_KEYS, BOOL_SETTINGS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
+from .consts import ALL_KEYS, BOOL_SETTINGS, LIST_SETTINGS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
 from .util import die, norm, out, safe, split_repo
 from .gh import gh, gql
 from .gitutil import origin_ok
 from .models import parse as parse_models
+from .notify import fire
 from .store import board_file, cfg, list_boards, load_json, save_board, update_board
 
 
@@ -494,10 +495,22 @@ def cmd_config(a):
     if a.key:
         if a.key not in DEFAULTS:
             die(f"unknown setting; one of {list(DEFAULTS)}")
-        if a.key in ("sharedFiles", "guardFiles"):
+        from . import policy  # policy imports this module
+        if a.value is not None and a.key.startswith(policy.HUMAN_ONLY) and policy.agent_context():
+            die(f"{a.key} can only be changed by you, in a terminal outside a Claude session (it widens what agents may approve or run)")
+        if a.key in LIST_SETTINGS:
             if a.value is None:
                 die(f"usage: cgp config {a.key} <comma-separated globs, or empty for none>")
             val = [g.strip() for g in a.value.split(",") if g.strip()]
+            if a.key == "autoApproveFiles":
+                policy.check_globs(val)
+        elif a.key == "autoApprove":
+            if a.value is None:
+                die("usage: cgp config autoApprove plan:low,pr:never (levels never, low, medium, high)")
+            try:
+                val = policy.render(policy.parse(a.value))
+            except ValueError as e:
+                die(str(e))
         elif a.key in BOOL_SETTINGS:
             if a.value is None or a.value.strip().lower() not in ("on", "off", "1", "0"):
                 die(f"usage: cgp config {a.key} on|off")
@@ -513,6 +526,8 @@ def cmd_config(a):
                 die(f"usage: cgp config {a.key} <non-negative integer>")
             val = int(a.value)
         c = update_board(lambda c: c["settings"].__setitem__(a.key, val))
+        if a.key.startswith(policy.HUMAN_ONLY):
+            fire(c, "policy", f"{a.key} set to {val}", c["board"]["url"])
     out(c["settings"])
 
 

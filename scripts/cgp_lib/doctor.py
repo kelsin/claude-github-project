@@ -156,6 +156,7 @@ def cmd_doctor(a):
                 have = False
             check(f"{title}: GitHub issue dependencies", have,
                   "this GitHub has no blockedBy on issues, so only cgp's own blocks order stories: cgp config nativeDependencies off", warn=True)
+        check(f"{title}: auto-approval policy", True, f"autoApprove {c['settings']['autoApprove']}; files {', '.join(c['settings']['autoApproveFiles']) or 'none'}", info=True)
         cmd = (c["settings"].get("notifyCommand") or "").strip()
         problem = command_problem(cmd) if cmd else None
         check(f"{title}: notifyCommand", not problem, f"it will not run: {problem}", warn=True)

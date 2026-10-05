@@ -1,7 +1,11 @@
 """Priority, intake, notifications, repo config, preview providers, models, draft PRs."""
+import importlib
 import json
 import os
+import pty
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -392,6 +396,327 @@ class TestNativeDependencies(Base):
         self.cgp("config", "nativeDependencies", "off")
         self.assertEqual(self.order("i2", "i1"), "local")
         self.assertNotIn("dependency_posts", self.read_db())
+
+
+class TestPolicyGlobs(unittest.TestCase):
+    def match(self, glob, path):
+        test_cgp.load_cgp()
+        return importlib.import_module("cgp_lib.policy").glob_match(glob, path)
+
+    def test_stars_stay_inside_a_segment_and_double_star_spans_segments(self):
+        for glob, path, want in (("*.md", "README.md", True), ("*.md", "docs/a.md", False), ("docs/**/*.md", "docs/a.md", True),
+                                 ("docs/**/*.md", "docs/a/b/c.md", True), ("docs/**/*.md", "docs/a/b.txt", False),
+                                 ("docs/**/*.md", "src/docs/a.md", False), ("docs/*.md", "docs/a/b.md", False),
+                                 ("**/SKILL.md", "SKILL.md", True), ("**/SKILL.md", "x/y/skill.md", True), ("skills/**", "skills/a/b", True),
+                                 ("docs/*.md", "docs/a.mdx", False), ("a?.md", "ab.md", True), ("a?.md", "a/.md", False), ("**", "x/y", True)):
+            self.assertEqual(self.match(glob, path), want, (glob, path))
+
+
+class PolicyBase(test_cgp.PRBase):
+    def setUp(self):
+        super().setUp()
+        self.setting(autoApprove="plan:low,pr:low")
+
+    def setting(self, **kw):
+        boards = os.path.join(self.env["CGP_HOME"], "boards")
+        path = os.path.join(boards, next(n for n in os.listdir(boards) if not n.endswith((".data.json", ".history.json"))))
+        with open(path) as f:
+            board = json.load(f)
+        board["settings"].update(kw)
+        with open(path, "w") as f:
+            json.dump(board, f)
+
+    def data(self):
+        boards = os.path.join(self.env["CGP_HOME"], "boards")
+        with open(os.path.join(boards, next(n for n in os.listdir(boards) if n.endswith(".data.json")))) as f:
+            return json.load(f)
+
+    def set_data(self, **kw):
+        boards = os.path.join(self.env["CGP_HOME"], "boards")
+        path = os.path.join(boards, next(n for n in os.listdir(boards) if n.endswith(".data.json")))
+        d = self.data()
+        d.update(kw)
+        with open(path, "w") as f:
+            json.dump(d, f)
+
+    def comments(self):
+        return [c["body"] for c in self.read_db()["comments"].get("acme/app#1", [])]
+
+    def verdict(self, to):
+        r = self.cgp("move", "i1", to)
+        return r["column"], r.get("policy")
+
+
+class TestPlanPolicy(PolicyBase):
+    def setUp(self):
+        super().setUp()
+        self.force("i1", "plan")
+        self.cgp("touches", "i1", "docs/guide.md", "README.md")
+        self.cgp("rate", "i1", "low")
+
+    def test_off_by_default(self):
+        self.setting(autoApprove="plan:never,pr:never")
+        self.assertEqual(self.verdict("plan_review"), ("plan_review", None))
+        self.assertIn("human approval", self.cgp("move", "i1", "plan_approved", ok=False).stderr)
+
+    def test_a_low_risk_docs_plan_is_approved_and_its_files_snapshotted(self):
+        r = self.cgp("move", "i1", "plan_review")
+        self.assertEqual((r["column"], r["autoApproved"], r["requested"], r["policy"]["approved"]), ("plan_approved", True, "plan_review", True))
+        self.assertEqual(self.data()["approvedTouches"]["i1"], ["docs/guide.md", "README.md"])
+        self.assertEqual(self.data()["policy"]["i1"]["gate"], "plan_approved")
+        self.assertTrue(any("Auto-approved by the policy (plan)" in c and "<!-- cgp -->" in c for c in self.comments()))
+
+    def test_the_gate_can_be_asked_for_directly(self):
+        self.assertEqual(self.verdict("plan_approved")[0], "plan_approved")
+
+    def refused(self, why):
+        self.assertIn(why, self.cgp("move", "i1", "plan_approved", ok=False).stderr)
+        column, policy = self.verdict("plan_review")
+        self.assertEqual(column, "plan_review")
+        self.assertFalse(policy["approved"])
+        self.assertIn(why, policy["reason"])
+        self.force("i1", "plan")  # back where the worker was, for the next case
+
+    def test_the_rating_must_exist_and_not_exceed_the_threshold(self):
+        self.cgp("rate", "i1", "medium")
+        self.refused("rated medium")
+        self.setting(autoApprove="plan:medium,pr:never")
+        self.assertEqual(self.verdict("plan_review")[0], "plan_approved")
+        self.force("i1", "plan")
+        self.set_data(ratings={})
+        self.setting(autoApprove="plan:high,pr:never")
+        self.refused("no risk rating")
+
+    def test_a_rating_from_another_column_is_stale(self):
+        self.force("i1", "todo")
+        self.cgp("rate", "i1", "low")
+        self.force("i1", "plan")
+        self.refused("no risk rating")
+
+    def test_files_outside_the_globs_are_refused(self):
+        self.cgp("touches", "i1", "docs/guide.md", "src/app.py")
+        self.refused("src/app.py is outside autoApproveFiles")
+        self.assertNotIn("approvedTouches", self.data())  # a refusal snapshots nothing
+
+    def test_the_built_in_always_deny_set_cannot_be_opened_up(self):
+        self.setting(autoApproveFiles=["**"])
+        for path in ("CLAUDE.md", "docs/AGENTS.md", "x/SKILL.md", "skills/a/b.txt", "skills/run/columns/plan.md", "mkdocs.yml"):
+            self.cgp("touches", "i1", path)
+            self.refused("never auto-approved")
+
+    def test_a_guard_hit_is_an_absolute_refusal_even_when_the_plan_lists_it(self):
+        self.setting(autoApproveFiles=["**"])
+        for path in (".github/workflows/ci.yml", "Makefile", "sub/Dockerfile"):
+            self.cgp("touches", "i1", path)
+            self.set_data(approvedTouches={"i1": [path]})  # approvedTouches does not matter here
+            self.refused("guarded file")
+
+    def test_empty_touches_directories_and_odd_paths_fail_closed(self):
+        self.setting(autoApproveFiles=["**"])
+        self.cgp("touches", "i1", "")
+        self.refused("declares no files")
+        for path in ("docs/", "docs/../x.md", "/etc/x.md"):
+            self.cgp("touches", "i1", path)
+            self.refused("not a plain file path")
+
+    def test_hold_an_untrusted_author_and_the_wrong_column_veto_it(self):
+        d = self.read_db(); d["items"][0]["values"]["Priority"] = {"optionId": "o_Hold"}; self.write_db(d)
+        self.refused("Hold")
+        d["items"][0]["values"].pop("Priority"); d["issue_authors"] = {"acme/app#1": {"login": "mallory", "author_association": "NONE"}}; self.write_db(d)
+        self.refused("not written by someone you trust")
+        d["issue_authors"] = {}; self.write_db(d)
+        self.force("i1", "todo")
+        self.assertEqual(self.cgp("move", "i1", "plan_review")["column"], "plan_review")
+        self.assertIn("human approval", self.cgp("move", "i1", "plan_approved", ok=False).stderr)
+
+    def test_a_tainted_story_is_refused(self):
+        self.set_data(tainted=["i1"])
+        self.refused("by hand")
+
+
+class TestPRPolicy(PolicyBase):
+    FILE = "docs/guide.md"
+
+    def setUp(self):
+        super().setUp()
+        self.force("i1", "implement")
+        self.set_data(approvedTouches={"i1": [self.FILE, "docs/"]})
+        self.cgp("rate", "i1", "low")
+        self.db_set(pr_files={"acme/app#1": [self.FILE]})
+        self.prs(self.view())
+
+    def refused(self, why, **kw):
+        self.assertIn(why, self.cgp("move", "i1", "pr_approved", ok=False).stderr)
+        column, policy = self.verdict("pr_review")
+        self.assertEqual(column, "pr_review")
+        self.assertFalse(policy["approved"])
+        self.assertIn(why, policy["reason"])
+        self.force("i1", "implement")
+
+    def test_a_low_risk_docs_change_goes_straight_to_pr_approved_and_merge_stays_pinned(self):
+        r = self.cgp("move", "i1", "pr_review")
+        self.assertEqual((r["column"], r["autoApproved"], r["policy"]["approved"]), ("pr_approved", True, True))
+        self.assertEqual(self.data()["reviewed"]["i1"]["sha"], "aaa111")
+        self.assertTrue(any("Auto-approved by the policy (PR)" in c for c in self.comments()))
+        self.assertEqual(self.cgp("merge", "i1"), {"requested": True})
+        self.prs(self.view(headRefOid="bbb222"))  # a push after the policy's check: it is not delegated, so merge refuses
+        self.assertEqual(self.cgp("merge", "i1", ok=False).returncode, 7)
+
+    def test_off_by_default(self):
+        self.setting(autoApprove="plan:low,pr:never")
+        self.assertEqual(self.verdict("pr_review"), ("pr_review", None))
+
+    def test_the_rating_threshold_and_a_missing_rating_veto_it(self):
+        self.cgp("rate", "i1", "medium")
+        self.refused("rated medium")
+        self.set_data(ratings={})
+        self.refused("no risk rating")
+
+    def test_a_tainted_story_is_refused(self):
+        self.set_data(tainted=["i1"])
+        self.refused("by hand")
+
+    def test_an_empty_file_list_is_refused(self):
+        self.db_set(pr_files={"acme/app#1": []})
+        self.refused("empty or may be truncated")
+
+    def test_a_possibly_truncated_file_list_is_refused(self):
+        self.db_set(pr_files={"acme/app#1": [self.FILE] * 3000})
+        self.refused("empty or may be truncated")
+
+    def test_a_long_paginated_file_list_is_read_in_full(self):
+        self.db_set(pr_files={"acme/app#1": [self.FILE] * 150 + ["src/late.py"]})
+        self.refused("src/late.py is outside autoApproveFiles")  # the file on the second page was seen
+        self.db_set(pr_files={"acme/app#1": [self.FILE] * 150})
+        self.assertEqual(self.verdict("pr_review")[0], "pr_approved")
+
+    def test_a_fork_is_refused(self):
+        self.prs(self.view(isCrossRepository=True))
+        self.refused("fork")
+
+    def test_a_draft_is_refused_unless_draftprs_opened_it_and_is_then_made_ready(self):
+        self.prs(self.view(isDraft=True))
+        self.refused("draft")
+        self.setting(draftPRs=1)
+        self.db_set(calls=[])  # the refused move above readied the draft for its reviewer
+        self.assertEqual(self.verdict("pr_review")[0], "pr_approved")
+        self.assertEqual([c[2] for c in self.calls("ready")], ["1"])
+        self.assertEqual(self.data()["reviewed"]["i1"]["sha"], "aaa111")
+
+    def test_renames_and_deletions_outside_the_globs_are_refused(self):
+        self.db_set(pr_files={"acme/app#1": [{"filename": self.FILE, "status": "renamed", "previous_filename": "src/old.py"}]})
+        self.refused("src/old.py is outside autoApproveFiles")
+        self.db_set(pr_files={"acme/app#1": [{"filename": "src/gone.py", "status": "removed"}]})
+        self.refused("src/gone.py is outside autoApproveFiles")
+        self.db_set(pr_files={"acme/app#1": [{"filename": self.FILE, "status": "renamed", "previous_filename": "docs/old.md"}]})
+        self.assertEqual(self.verdict("pr_review")[0], "pr_approved")  # a rename inside the globs and the plan's files is fine
+
+    def test_a_diff_beyond_the_approved_plan_files_is_refused(self):
+        self.db_set(pr_files={"acme/app#1": [self.FILE, "README.md"]})
+        self.refused("README.md is not in the approved plan")
+        self.set_data(approvedTouches={})
+        self.refused("no approved plan files")
+
+    def test_always_deny_guard_and_skip_plan_veto_it(self):
+        self.setting(autoApproveFiles=["**"])
+        self.set_data(approvedTouches={"i1": ["CLAUDE.md", ".github/ci.yml"]})
+        for name, why in (("CLAUDE.md", "never auto-approved"), (".github/ci.yml", "guarded file")):
+            self.db_set(pr_files={"acme/app#1": [name]})
+            self.refused(why)
+        self.set_data(approvedTouches={"i1": [self.FILE]})
+        self.db_set(pr_files={"acme/app#1": [self.FILE]})
+        d = self.read_db(); d["items"][0]["values"]["Plan"] = {"text": "Skip"}; self.write_db(d)
+        self.refused("Plan: Skip")
+
+    def test_an_untrusted_author_is_refused(self):
+        d = self.read_db(); d["issue_authors"] = {"acme/app#1": {"login": "mallory", "author_association": "NONE"}}; self.write_db(d)
+        self.refused("not written by someone you trust")
+
+    def test_a_push_while_the_policy_checks_hands_the_story_to_a_person(self):
+        self.prs(self.view(), self.view(), self.view(headRefOid="bbb222"))  # read, read after the files, read after recording
+        column, policy = self.verdict("pr_review")
+        self.assertEqual(column, "pr_review")
+        self.assertIn("moved", policy["reason"])
+        self.assertEqual(self.data()["reviewed"]["i1"]["sha"], "bbb222")  # the commit the person is shown
+
+        self.prs(self.view(), self.view(headRefOid="bbb222"))
+        self.force("i1", "implement")
+        self.assertIn("moved", self.verdict("pr_review")[1]["reason"])
+
+
+class TestPolicySettings(PolicyBase):
+    def tty(self, *args, env=None):
+        """`cgp` with a terminal as stdin, outside any Claude session."""
+        e = {**self.env, **(env or {})}
+        for k in ("CGP_SESSION", "CLAUDECODE"):
+            e.pop(k, None)
+        e.update(env or {})
+        master, slave = pty.openpty()
+        try:
+            return subprocess.run([sys.executable, test_cgp.CGP, *args], stdin=slave, capture_output=True, text=True, cwd=self.tmp, env=e)
+        finally:
+            os.close(slave)
+            os.close(master)
+
+    def test_a_person_at_a_terminal_can_set_the_policy_and_it_is_normalised(self):
+        p = self.tty("config", "autoApprove", "pr:medium, plan:low")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(json.loads(p.stdout)["autoApprove"], "plan:low,pr:medium")
+        p = self.tty("config", "autoApproveFiles", "docs/**/*.md, *.txt")
+        self.assertEqual(json.loads(p.stdout)["autoApproveFiles"], ["docs/**/*.md", "*.txt"])
+
+    def test_agents_and_scripts_cannot_change_it(self):
+        for env, kw in (({"CGP_SESSION": "abc"}, {}), ({"CLAUDECODE": "1"}, {}), ({}, {"input": ""})):  # a session, Claude Code, no terminal
+            p = self.cgp("config", "autoApprove", "plan:high,pr:high", ok=False, env=env, **kw)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("only be changed by you", p.stderr)
+            p = self.cgp("config", "autoApproveFiles", "**", ok=False, env=env, **kw)
+            self.assertIn("only be changed by you", p.stderr)
+        p = self.tty("config", "autoApprove", "plan:high", env={"CGP_SESSION": "abc"})
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(self.cgp("config")["autoApprove"], "plan:low,pr:low")  # unchanged, and readable by anyone
+
+    def test_ordinary_settings_stay_open_to_workers(self):
+        self.assertEqual(self.cgp("config", "concurrency", "2", env={"CGP_SESSION": "abc"})["concurrency"], 2)
+
+    def test_bad_values_are_rejected(self):
+        for args in (("autoApprove", "plan:urgent"), ("autoApprove", "merge:low"), ("autoApprove", "low"), ("autoApproveFiles", "/etc/*"),
+                     ("autoApproveFiles", "docs/../*.md")):
+            p = self.tty("config", *args)
+            self.assertNotEqual(p.returncode, 0, args)
+        self.assertEqual(self.cgp("config")["autoApprove"], "plan:low,pr:low")
+
+    def test_a_change_notifies_and_status_and_doctor_show_the_policy(self):
+        here = tempfile.mkdtemp(dir=os.path.dirname(os.path.abspath(__file__)))
+        self.addCleanup(shutil.rmtree, here, True)
+        out = os.path.join(self.tmp, "events.txt")
+        path = os.path.join(here, "notify.sh")
+        with open(path, "w") as f:
+            f.write(f'#!/bin/sh\necho "$CGP_EVENT|$CGP_TITLE" >> "{out}"\n')
+        os.chmod(path, 0o700)
+        self.setting(notifyCommand=path)
+        self.tty("config", "autoApprove", "plan:high")
+        with open(out) as f:
+            self.assertEqual(f.read().strip(), "policy|autoApprove set to plan:high,pr:never")
+        self.assertIn("auto-approval policy: plan:high,pr:never", self.cgp("status", ok=False).stdout)
+        self.assertIn("auto-approval policy  autoApprove plan:high,pr:never", self.cgp("doctor", ok=False).stdout)
+
+    def test_ratings_are_per_column_and_shown_in_list(self):
+        self.force("i1", "plan")
+        self.assertIsNone(next(i for i in self.cgp("list")["items"] if i["item"] == "i1")["rating"])
+        self.assertEqual(self.cgp("rate", "i1", "high"), {"item": "i1", "rating": "high", "column": "plan"})
+        self.assertEqual(next(i for i in self.cgp("list")["items"] if i["item"] == "i1")["rating"], "high")
+        self.force("i1", "implement")
+        self.assertIsNone(next(i for i in self.cgp("list")["items"] if i["item"] == "i1")["rating"])
+        self.assertNotEqual(self.cgp("rate", "i1", "urgent", ok=False).returncode, 0)
+        self.assertNotEqual(self.cgp("rate", "i4", "low", ok=False).returncode, 0)  # a draft
+
+    def test_the_column_prompts_tell_workers_to_rate_and_fall_back(self):
+        for name in ("plan.md", "implement.md"):
+            with open(os.path.join(test_cgp.ROOT, "skills", "run", "columns", name)) as f:
+                text = f.read()
+            self.assertIn("`CGP rate <item>", text)
+            self.assertIn("policy", text)
 
 
 class TestMandatorySubagents(unittest.TestCase):

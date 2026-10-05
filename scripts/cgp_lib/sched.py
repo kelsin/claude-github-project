@@ -12,6 +12,7 @@ from .board import board_keys, clear_field, ensure_story_option, fetch_items, fe
 from .gitwt import cleanup_worktree
 from .notify import check
 from .repoconf import merged_globs
+from .policy import current_rating
 from .story import ask_user, process_replies
 
 
@@ -190,6 +191,8 @@ def snapshot(c):
     by_id = {i["item"]: i for i in live}
 
     data = load_data()
+    for i in items:
+        i["rating"] = current_rating(data, i)
     native = native_edges(live) if c["settings"]["nativeDependencies"] else {}
     members = native_cycles(live, data, native)
     if members:
@@ -251,7 +254,7 @@ def snapshot(c):
             elif i["column"] in ("todo", "plan", "plan_review"):
                 snaps.pop(i["item"], None)
         d["approvedTouches"] = snaps
-        for k in ("reviewed", "cleanRebase", "asked"):
+        for k in ("reviewed", "cleanRebase", "asked", "ratings", "policy"):
             d[k] = {i: v for i, v in d.get(k, {}).items() if i in live_ids}
         d["tainted"] = [i for i in d.get("tainted", []) if i in live_ids]
     update_data(prune)
@@ -285,7 +288,7 @@ def cmd_status(a):
     res = {"board": c["board"], "counts": {k: len(v) for k, v in by_col.items()}, "done": done,
            "waitingOnYou": [{"title": i["title"], "url": i["url"]} for i in live if i["waiting"]],
            "blocked": [b for b in blocked if b["blockedBy"]], "githubBlockedBy": github, "workers": workers,
-           "held": [i["title"] for i in live if i["held"]],
+           "held": [i["title"] for i in live if i["held"]], "autoApprove": c["settings"]["autoApprove"],
            "loop": {"session": session, "heartbeatMinutes": round((time.time() - lock["at"]) / 60, 1)} if lock else None,
            "review": {k: [{"title": i["title"], "url": i["url"]} for i in by_col.get(k, [])] for k in ("plan_review", "pr_review")}}
     if a.json:
@@ -308,6 +311,8 @@ def cmd_status(a):
         show(f"{emoji.get(w['column'], '•')} {w['title']} · {w.get('phase', '?')}{' (' + w['detail'] + ')' if w.get('detail') else ''} · {w['minutes']} min")
     if res["held"]:
         show(f"⏸ On hold ({len(res['held'])}): {', '.join(res['held'])}")
+    if res["autoApprove"] != "plan:never,pr:never":
+        show(f"🤖 auto-approval policy: {res['autoApprove']} (autoApproveFiles: {', '.join(c['settings']['autoApproveFiles']) or 'none'})")
     for b in res["blocked"]:
         show(f"⛓ {b['title']} waits for {', '.join(b['blockedBy'])}")
     for g in res["githubBlockedBy"]:

@@ -172,7 +172,10 @@ elif args[:2] == ["api", "graphql"]:
     sys.exit(1 if errors else 0)  # like gh: any GraphQL error, even next to usable data, is exit 1
 elif args[0] == "api" and any(re.match(r"repos/[^/]+/[^/]+/pulls/\d+/files", a) for a in args):
     m = re.match(r"repos/([^/]+/[^/]+)/pulls/(\d+)/files", next(a for a in args if a.startswith("repos/")))
-    print(json.dumps([{"filename": f} for f in db.get("pr_files", {}).get(f"{m.group(1)}#{m.group(2)}", [])]))
+    # db["pr_files"]["acme/app#1"]: names, or {"filename", "status", "previous_filename"}; served 100 to a page like `gh api --paginate`
+    entries = [f if isinstance(f, dict) else {"filename": f} for f in db.get("pr_files", {}).get(f"{m.group(1)}#{m.group(2)}", [])]
+    for i in range(0, max(len(entries), 1), 100):
+        print(json.dumps(entries[i:i + 100]))
 elif args[0] == "api" and any(re.match(r"repos/[^/]+/[^/]+/(pulls/\d+/(comments|reviews)|collaborators/)", a) for a in args):
     path = next(a for a in args if a.startswith("repos/"))
     if "/collaborators/" in path:

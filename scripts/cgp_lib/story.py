@@ -12,6 +12,7 @@ from .session import set_phase, worker_pr
 from .repoconf import repo_config, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
 from .pr import cancel_auto_merge, cmd_pr_state, pr_view, record_reviewed
+from .policy import GATE_KEYS, current_rating, evaluate, public, record_decision
 
 
 def list_replies_since(repo, number, marker_ids, since=None):
@@ -41,11 +42,21 @@ def process_replies(c, items):
             update_data(lambda d, i=it["item"]: d.setdefault("answered", []).append(i))
 
 
+def gate_open(c, it, target):
+    """True when the story is where a human gate can be passed on the agent's behalf: only from the agent column just before it, and a PR
+    needs its link."""
+    src = {"plan_approved": "plan", "pr_approved": "implement"}.get(target)
+    return bool(src and it["column"] == src and (target == "plan_approved" or parse_pr_ref(c, it["pr"])))
+
+
 def auto_allows(c, it, target):
-    """True when the user's Auto Approve field lets the agent pass the human gate `target` for this item: only from the agent column
-    just before it, and a PR needs its link."""
-    auto = {"plan_approved": ("plan", "plan"), "pr_approved": ("pr", "implement")}.get(target)
-    return bool(auto and it["autoApprove"][auto[0]] and it["column"] == auto[1] and (auto[0] == "plan" or parse_pr_ref(c, it["pr"])))
+    """True when the user's Auto Approve field lets the agent pass the human gate `target` for this item."""
+    return gate_open(c, it, target) and it["autoApprove"][GATE_KEYS[target]]
+
+
+def policy_verdict(c, it, target):
+    """The auto-approval policy's verdict for the gate (None when the policy is off for it), see policy.evaluate."""
+    return evaluate(c, it, target, lambda: author_trusted(it))
 
 
 def cmd_move(a):
@@ -58,12 +69,16 @@ def cmd_move(a):
         out({"item": a.item, "column": a.column, "unchanged": True, "note": f"already in {a.column}"})
         return
     requested = None
-    gate = {"plan_review": "plan_approved", "pr_review": "pr_approved"}.get(a.column)
-    if gate and auto_allows(c, it, gate):  # the field is read live: the user may have set it after the worker started
-        requested, a.column = a.column, gate
-    # the user's Auto Approve field delegates a gate to the agent
-    if a.column in ("plan_approved", "pr_approved") and not auto_allows(c, it, a.column):
-        die(f"only the user moves stories into {a.column}; it is a human approval (unless Auto Approve covers it)")
+    target = {"plan_review": "plan_approved", "pr_review": "pr_approved"}.get(a.column, a.column)
+    # the user's Auto Approve field (read live: they may have set it after the worker started) or, failing that, the policy delegates a gate
+    field_ok = target in GATE_KEYS and auto_allows(c, it, target)
+    verdict = policy_verdict(c, it, target) if target in GATE_KEYS and not field_ok and gate_open(c, it, target) else None
+    policy_ok = bool(verdict and verdict["approved"])
+    if target != a.column and (field_ok or policy_ok):
+        requested, a.column = a.column, target
+    if a.column in GATE_KEYS and not (field_ok or policy_ok):
+        die(f"only the user moves stories into {a.column}; it is a human approval (unless Auto Approve or the auto-approval policy covers it)"
+            + (f": the policy refused: {verdict['reason']}" if verdict else ""))
     if it["column"] in ("plan_review", "pr_review"):
         die(f"story is in {it['column']}: only the user moves it out")
     ref = parse_pr_ref(c, it["pr"])
@@ -72,13 +87,21 @@ def cmd_move(a):
             die("a story reaches Done only from pr_approved, after its PR merged")
     if a.column != "done" and it["column"] == "pr_approved" and ref:
         cancel_auto_merge(*ref)  # leaving PR Approved must not leave a merge armed
+    if policy_ok and a.column == "pr_approved":  # a policy approval stands in for the review: ready the PR and record the commit it checked
+        if verdict["draft"]:
+            gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
+        record_reviewed(a.item, ref, verdict["sha"])  # (`merge` stays pinned to it: a later push is refused, exit 7)
+        if (pr_view(*ref, check=False) or {}).get("headRefOid") != verdict["sha"]:  # pushed meanwhile: a person reviews it instead
+            verdict, policy_ok, requested, a.column = {"approved": False, "reason": "the PR head moved while it was being approved"}, False, None, "pr_review"
     shown = None
     if a.column == "pr_review" and ref:  # read the commit the user will be shown first: a failed read must abort the move,
         shown = pr_view(*ref)  # not leave the story in PR Review with no record of what was reviewed
         if not shown or not shown.get("headRefOid"):
             die("could not read the PR head; not moving the story to pr_review")
+    if policy_ok:
+        record_decision(it, a.column, verdict)  # before the move: the files that were checked are the files approved
     set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
-    if requested == "pr_review":  # redirected to pr_approved: no review to record, but a merge refuses a draft
+    if requested == "pr_review" and not policy_ok:  # redirected to pr_approved: no review to record, but a merge refuses a draft
         if (pr_view(*ref, check=False) or {}).get("isDraft"):
             gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
     if shown:
@@ -98,7 +121,11 @@ def cmd_move(a):
                     w.update(phase=DEFAULT_PHASE[a.column], phaseAt=now_iso())
     update_state(upd)
     update_data(lambda d: d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]))
-    out({"item": a.item, "column": a.column, **({"autoApproved": True, "requested": requested} if requested else {})})
+    if policy_ok:
+        post_comment(it["issueRepo"], it["number"], f"{MARK}\nAuto-approved by the policy ({'plan' if a.column == 'plan_approved' else 'PR'}): {verdict['reason']}.")
+        advance_cursor(a.item)  # like `cgp comment`: posting counts as having read the feedback so far
+    out({"item": a.item, "column": a.column, **({"autoApproved": True} if requested or policy_ok else {}), **({"requested": requested} if requested else {}),
+         **({"policy": public(verdict)} if verdict else {})})
 
 
 def snapshot_touches(item):
@@ -351,6 +378,7 @@ def cmd_prepare(a):
     c = cfg()
     it = get_item(c, a.item)
 
+    it["rating"] = current_rating(load_data(), it)  # what the worker rated it in this column (cgp rate)
     res = {"story": it}
     if it["kind"] != "issue":
         res["note"] = "a draft: convert it first (cgp adopt <item> <owner/repo>); drafts have no comments or worktree"

@@ -4,7 +4,8 @@ import argparse
 
 from .board import (cmd_adopt, cmd_config, cmd_discover, cmd_repo_path, cmd_repos, cmd_setup)
 from .doctor import cmd_doctor, cmd_gc
-from .models import cmd_models
+from .models import RATINGS, cmd_models
+from .policy import cmd_rate
 from .repoconf import cmd_repo_config
 from .intake import cmd_add, cmd_import
 from .gitwt import cmd_guard, cmd_sync, cmd_worktree, cmd_worktree_remove
@@ -70,6 +71,7 @@ COMMANDS = [
     ("import", cmd_import, "Put open issues with a label on the board in Todo", [A("label"), A("--repo")]),
     ("models", cmd_models, "The model for each sub-agent role at a risk rating (null: the session's model)", [
         A("rating", choices=["low", "medium", "high"])]),
+    ("rate", cmd_rate, "Record your risk rating of a story (the auto-approval policy reads it)", [A("item"), A("rating", choices=list(RATINGS))]),
     ("repo-config", cmd_repo_config, "The .cgp.json of a repo's default branch (test and lint commands, shared and guarded files, ...)", [
         A("target", help="owner/name or a story's item id")]),
     ("doctor", cmd_doctor, "Check the installation: gh, token scopes, board, clones, stale files", [
