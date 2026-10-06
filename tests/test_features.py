@@ -398,6 +398,72 @@ class TestNativeDependencies(Base):
         self.assertNotIn("dependency_posts", self.read_db())
 
 
+class TestUnlockOrder(Base):
+    """Within a column and priority, the story that unlocks the most live stories is dispatched first."""
+    native = TestNativeDependencies.native
+    order = TestNativeDependencies.order
+
+    def batch(self):
+        return [i["item"] for i in self.cgp("list")["batch"]]
+
+    def approved(self, *items):
+        self.setup_board()
+        for i in items:
+            self.force(i, "plan_approved")
+
+    def test_a_blocker_goes_before_an_earlier_story_on_the_board(self):
+        self.approved("i1", "i2", "i3")
+        self.native("acme/app#2", node(3))  # two waits for three
+        self.assertEqual(self.batch()[:2], ["i3", "i1"])
+
+    def test_a_chain_counts_transitively(self):
+        self.approved("i1", "i2", "i3")
+        self.native("acme/app#2", node(1))  # i1 unlocks two (1) ...
+        self.order("i3", "i4")  # ... i3 unlocks four and, through it, two (2)
+        self.order("i4", "i2")
+        self.assertEqual(self.batch()[:2], ["i3", "i1"])
+
+    def test_priority_beats_unlocks(self):
+        self.approved("i1", "i2", "i3")
+        self.native("acme/app#2", node(3))
+        d = self.read_db(); d["items"][0]["values"]["Priority"] = {"optionId": "o_High"}; self.write_db(d)
+        self.assertEqual(self.batch()[:2], ["i1", "i3"])
+
+    def test_column_stage_beats_unlocks(self):
+        self.approved("i1", "i2")
+        self.force("i3", "implement")
+        self.native("acme/app#2", node(3))
+        self.assertEqual(self.batch()[:2], ["i1", "i3"])
+
+    def test_the_capped_slot_goes_to_the_story_that_unlocks_most(self):
+        self.approved("i1", "i2", "i3")
+        self.native("acme/app#2", node(3))
+        self.cgp("config", "concurrency", "1")
+        snap = self.cgp("list")
+        self.assertEqual([i["item"] for i in snap["batch"]], ["i3"])
+        self.assertEqual([q["title"] for q in snap["queued"]], ["one"])
+
+    def test_an_epic_order_edge_counts(self):
+        self.approved("i1", "i2", "i3")
+        self.order("i3", "i2")  # two waits for three
+        self.assertEqual(self.batch()[:2], ["i3", "i1"])
+
+    def test_a_cycle_and_an_unread_dependency_do_not_break_the_count(self):
+        self.approved("i1", "i2", "i3")
+        self.native("acme/app#1", node(2))
+        self.native("acme/app#2", node(1))
+        self.native("acme/app#3", total=11)
+        self.assertEqual(self.batch(), ["i4"])
+
+    def test_unlock_counts(self):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            m = test_cgp.load_cgp()
+        blocks = {"b": ["a"], "c": ["b"], "d": ["b", "c"], "a": ["d"], "e": [m.NATIVE_OVERFLOW]}
+        counts = m.unlock_counts(blocks, {"a", "b", "c", "d", "e"})
+        self.assertEqual(counts, {"a": 3, "b": 3, "c": 3, "d": 3, "e": 0})
+        self.assertEqual(m.unlock_counts({"b": ["a"], "c": ["b"]}, {"a", "b", "c"}), {"a": 2, "b": 1, "c": 0})
+
+
 class TestPolicyGlobs(unittest.TestCase):
     def match(self, glob, path):
         test_cgp.load_cgp()
