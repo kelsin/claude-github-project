@@ -102,6 +102,25 @@ def native_cycles(live, data, native=None):
     return [k for k in g if any(would_cycle(g, k, b) for b in g[k])]
 
 
+def unlock_counts(blocks, live_ids):
+    """Story -> how many distinct live stories wait on it, directly or through a chain (a story never counts itself, a cycle is safe)."""
+    deps = {}
+    for k, bs in blocks.items():
+        for b in bs:
+            if b in live_ids and k in live_ids:
+                deps.setdefault(b, []).append(k)
+    counts = {}
+    for i in live_ids:
+        seen, todo = set(), list(deps.get(i, []))
+        while todo:
+            n = todo.pop()
+            if n not in seen and n != i:
+                seen.add(n)
+                todo.extend(deps.get(n, []))
+        counts[i] = len(seen)
+    return counts
+
+
 def block_rows(by_id, ids):
     return [by_id[b] if b in by_id else {"title": "more GitHub dependencies than cgp reads", "column": None, "waiting": False} for b in ids]
 
@@ -133,7 +152,7 @@ def pick_compatible(c, actionable, live, in_flight, slots=None):
     """Of the stories about to start work (Plan Approved, or Implement with no PR), keep the largest group whose declared files
     don't collide with each other or with a worker already running; the rest wait (deferred) so no worker is spent on a story
     that would only block. Greedy by fewest conflicts, board order breaking ties; with a limit of `slots` free workers, plainly in
-    priority order so a low-priority story never takes the slot of a high-priority one."""
+    dispatch order (column, priority, most stories unlocked) so a low-priority story never takes the slot of a high-priority one."""
     touches = load_data().get("touches", {})
     patterns = merged_globs(c, "sharedFiles", {i["issueRepo"] for i in actionable})
     files = lambda i: {norm_path(f) for f in touches.get(i["item"], [])}
@@ -208,7 +227,9 @@ def snapshot(c):
         ask_about_cycle(c, live, members)
     blocks = effective_blocks(live, data, native)
     live_ids = set(by_id)
+    unlocks = unlock_counts(blocks, live_ids)
     for i in live:
+        i["unlocks"] = unlocks[i["item"]]
         rows = block_rows(by_id, blocks.get(i["item"], []))
         i["blockedBy"] = [r["title"] for r in rows]
         i["blockers"] = [{"title": r["title"], "column": r["column"], "waiting": r["waiting"]} for r in rows]
@@ -218,7 +239,7 @@ def snapshot(c):
     in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and not i["held"] and i not in blocked
                   and i["item"] not in in_flight]
-    actionable.sort(key=lambda i: (ACTIONABLE.index(i["column"]), i["priorityRank"]))  # stable: board order breaks ties
+    actionable.sort(key=lambda i: (ACTIONABLE.index(i["column"]), i["priorityRank"], -i["unlocks"]))  # stable: board order breaks remaining ties
     cap = c["settings"]["concurrency"]
     free = max(cap - len(in_flight), 0)
     actionable, deferred = pick_compatible(c, actionable, live, in_flight, free if cap > 0 else None)
