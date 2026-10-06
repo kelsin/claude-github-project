@@ -2,7 +2,6 @@
 import glob
 import json
 import os
-import pty
 import signal
 import subprocess
 import sys
@@ -29,11 +28,6 @@ class DaemonBase(test_cgp.Base):
         for item in ("i2", "i4"):
             self.force(item, "plan_review")  # only i1 is actionable
 
-    @staticmethod
-    def load(path):
-        with open(path) as f:
-            return json.load(f)
-
     def fake(self, **kw):
         with open(self.conf, "w") as f:
             json.dump({"dir": self.claude_dir, "script": self.script_path, **kw}, f)
@@ -49,19 +43,6 @@ class DaemonBase(test_cgp.Base):
     def daemon(self, *args, env=None):
         p = self.cgp("daemon", *args, ok=False, env=env)
         return p, (json.loads(p.stdout) if p.stdout.strip() else None)
-
-    def board_path(self, suffix=".json"):
-        boards = os.path.join(self.env["CGP_HOME"], "boards")
-        return os.path.join(boards, next(n for n in sorted(os.listdir(boards)) if n.endswith(suffix) and (suffix != ".json" or n.count(".") == 1)))
-
-    def setting(self, **kw):
-        board = self.load(self.board_path())
-        board["settings"].update(kw)
-        with open(self.board_path(), "w") as f:
-            json.dump(board, f)
-
-    def data(self):
-        return self.load(self.board_path(".data.json"))
 
 
 class TestDispatch(DaemonBase):
@@ -265,17 +246,6 @@ class TestBoardResolution(DaemonBase):
 
 
 class TestSettings(DaemonBase):
-    def tty(self, *args, env=None):
-        e = {**self.env, **(env or {})}
-        for k in ("CGP_SESSION", "CLAUDECODE"):
-            e.pop(k, None)
-        master, slave = pty.openpty()
-        try:
-            return subprocess.run([sys.executable, test_cgp.CGP, *args], stdin=slave, capture_output=True, text=True, cwd=self.tmp, env=e)
-        finally:
-            os.close(slave)
-            os.close(master)
-
     def test_daemon_settings_are_human_only(self):
         for env in ({"CGP_SESSION": "s1"}, {"CLAUDECODE": "1"}):
             p = self.cgp("config", "daemonMaxTurns", "500", ok=False, env=env)

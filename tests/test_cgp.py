@@ -1,6 +1,6 @@
 import importlib
 import json
-import os, subprocess, sys, tempfile, time, types, unittest
+import os, pty, subprocess, sys, tempfile, time, types, unittest
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +20,12 @@ def load_cgp():
         return ns
     finally:
         sys.path.remove(os.path.join(ROOT, "scripts"))
+
+
+def read_text(*parts):
+    """A file under the repo root, e.g. read_text("skills", "run", "SKILL.md")."""
+    with open(os.path.join(ROOT, *parts)) as f:
+        return f.read()
 
 
 def issue(n, title):
@@ -88,6 +94,44 @@ class Base(unittest.TestCase):
     def state(self):
         with open(os.path.join(self.env["CGP_HOME"], "state-default.json")) as f:
             return json.load(f)
+
+    @staticmethod
+    def load(path):
+        with open(path) as f:
+            return json.load(f)
+
+    def board_path(self, suffix=".json"):
+        boards = os.path.join(self.env["CGP_HOME"], "boards")
+        return os.path.join(boards, next(n for n in sorted(os.listdir(boards)) if n.endswith(suffix) and (suffix != ".json" or n.count(".") == 1)))
+
+    def setting(self, **kw):
+        board = self.load(self.board_path())
+        board["settings"].update(kw)
+        with open(self.board_path(), "w") as f:
+            json.dump(board, f)
+
+    def data(self):
+        return self.load(self.board_path(".data.json"))
+
+    def save_data(self, **kw):
+        merged = {**self.data(), **kw}
+        with open(self.board_path(".data.json"), "w") as f:
+            json.dump(merged, f)
+
+    set_data = save_data
+
+    def tty(self, *args, env=None):
+        """`cgp` with a terminal as stdin, outside any Claude session (unless `env` puts it back)."""
+        e = {**self.env, **(env or {})}
+        for k in ("CGP_SESSION", "CLAUDECODE"):
+            e.pop(k, None)
+        e.update(env or {})
+        master, slave = pty.openpty()
+        try:
+            return subprocess.run([sys.executable, CGP, *args], stdin=slave, capture_output=True, text=True, cwd=self.tmp, env=e)
+        finally:
+            os.close(slave)
+            os.close(master)
 
 
 class TestSetup(Base):

@@ -202,6 +202,12 @@ def item_issue(item):
     return content["repository"]["nameWithOwner"], content["number"], content["title"]
 
 
+def repo_node_id(repo):
+    """GraphQL node id of an 'owner/name' repository."""
+    owner, name = split_repo(repo)
+    return gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }", o=owner, n=name)["repository"]["id"]
+
+
 def known_repo(c, repo):
     return next((r for r in c["repos"] if r.lower() == (repo or "").lower()), None)
 
@@ -230,6 +236,14 @@ def waiting_you(field):
     return you
 
 
+def _update_options(field_id, options):
+    """Replace a single-select field's options; returns the updated field ({id, options: [{id, name}]})."""
+    data = gql("""mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){
+      updateProjectV2Field(input:{fieldId:$f,singleSelectOptions:$o}){ projectV2Field{
+        ... on ProjectV2SingleSelectField{ id options{id name} } } } }""", f=field_id, o=options)
+    return data["updateProjectV2Field"]["projectV2Field"]
+
+
 def add_missing_options(field, wanted):
     """Add the (name, color) options a single-select field lacks, keeping existing option ids; returns its options as {name: id}."""
     have = {o["name"]: o["id"] for o in field["options"]}
@@ -238,10 +252,7 @@ def add_missing_options(field, wanted):
     opts = [{"id": o["id"], "name": o["name"], "color": o.get("color") or "GRAY", "description": o.get("description") or ""}
             for o in field["options"]]
     opts += [{"name": n, "color": col, "description": ""} for n, col in wanted if n not in have]
-    data = gql("""mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){
-      updateProjectV2Field(input:{fieldId:$f,singleSelectOptions:$o}){ projectV2Field{
-        ... on ProjectV2SingleSelectField{ id options{id name} } } } }""", f=field["id"], o=opts)
-    return {o["name"]: o["id"] for o in data["updateProjectV2Field"]["projectV2Field"]["options"]}
+    return {o["name"]: o["id"] for o in _update_options(field["id"], opts)["options"]}
 
 
 def ensure_story_option(field):
@@ -290,13 +301,8 @@ def apply_columns(proj, status, dry_run=False):
                                              "done": sum(1 for t in remap.values() if t == "Done")}}
     if dry_run:
         return status, {**summary, "dryRun": True}
-    data = gql("""mutation($f:ID!,$o:[ProjectV2SingleSelectFieldOptionInput!]!){
-      updateProjectV2Field(input:{fieldId:$f,singleSelectOptions:$o}){ projectV2Field{
-        ... on ProjectV2SingleSelectField{ id options{id name} } } } }""",
-               f=status["id"],
-               o=[{"name": f"{e} {n}", "color": col, "description": "",
-                   **({"id": keep[norm(n)]} if norm(n) in keep else {})} for _, n, e, col in COLUMNS])
-    status = data["updateProjectV2Field"]["projectV2Field"]
+    status = _update_options(status["id"], [{"name": f"{e} {n}", "color": col, "description": "",
+                                             **({"id": keep[norm(n)]} if norm(n) in keep else {})} for _, n, e, col in COLUMNS])
     new_opts = {norm(o["name"]): o["id"] for o in status["options"]}
     for item, tag in remap.items():
         set_single({"board": {"id": proj["id"]}}, item, status["id"], new_opts["done" if tag == "Done" else "todo"])
@@ -381,9 +387,7 @@ def cmd_setup(a):
 
     repo_id = None
     if a.repo:  # validate before touching the board
-        owner_, name_ = split_repo(a.repo)
-        repo_id = gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }",
-                      o=owner_, n=name_)["repository"]["id"]
+        repo_id = repo_node_id(a.repo)
 
     here = safe(proj["id"])
     taken = {}  # repo (lower case) -> title of another board that already has it: a repo belongs to one board
@@ -450,11 +454,10 @@ def cmd_setup(a):
         else:
             c["repos"].setdefault(r["nameWithOwner"], None)
     if a.repo:
-        rid = repo_id
         a.repo = known_repo(c, a.repo) or a.repo  # keep the spelling already stored
         if a.repo not in c["repos"]:
             gql("""mutation($p:ID!,$r:ID!){ linkProjectV2ToRepository(input:{projectId:$p,repositoryId:$r}){
-              clientMutationId } }""", p=proj["id"], r=rid)
+              clientMutationId } }""", p=proj["id"], r=repo_id)
         c["repos"].setdefault(a.repo, None)
         if a.repo_path:
             c["repos"][a.repo] = os.path.abspath(a.repo_path)
@@ -553,12 +556,9 @@ def cmd_config(a):
 
 def cmd_adopt(a):
     cfg()  # dies unless a board is configured
-    owner, name = split_repo(a.repo)
-    rid = gql("query($o:String!,$n:String!){ repository(owner:$o,name:$n){ id } }", o=owner, n=name)["repository"]["id"]
     d = gql("""mutation($i:ID!,$r:ID!){ convertProjectV2DraftIssueItemToIssue(input:{itemId:$i,repositoryId:$r}){
-      item{ content{ ... on Issue{ number url } } } } }""", i=a.item, r=rid)
-    issue = d["convertProjectV2DraftIssueItemToIssue"]["item"]["content"]
-    out(issue)
+      item{ content{ ... on Issue{ number url } } } } }""", i=a.item, r=repo_node_id(a.repo))
+    out(d["convertProjectV2DraftIssueItemToIssue"]["item"]["content"])
 
 
 def cmd_repos(a):

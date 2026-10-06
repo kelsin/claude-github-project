@@ -11,6 +11,11 @@ from .gitutil import default_ref
 from .session import set_phase
 
 
+def checks_green(checks):
+    """Every check passed or was skipped (pr_checks' None, a transient gh failure, is never green)."""
+    return checks is not None and all(x["bucket"] in ("pass", "skipping") for x in checks)
+
+
 def pr_checks(repo, pr):
     """Checks list; [] when none are reported; None on a transient gh failure."""
     p = gh("pr", "checks", str(pr), "-R", repo, "--json", "name,bucket,link,workflow", check=False)
@@ -201,7 +206,7 @@ def cmd_merge(a):
     p = gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--auto", "--delete-branch", *pin(a.view), check=False)
     if p.returncode:
         checks = pr_checks(a.repo, a.pr)  # no auto-merge: this merges at once, so never over red or pending checks
-        if checks is None or any(x["bucket"] != "pass" and x["bucket"] != "skipping" for x in checks):
+        if not checks_green(checks):
             out({"requested": False, "error": "auto-merge is unavailable and the checks are not all green yet; run ci-wait, then merge-wait merges when the PR is clean"})
             return
         p2 = gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--delete-branch", *pin(a.view), check=False)
@@ -279,8 +284,7 @@ def cmd_merge_wait(a):
         elif v["reviewDecision"] in ("CHANGES_REQUESTED", "REVIEW_REQUIRED") and v["mergeStateStatus"] == "BLOCKED":
             out({"state": "blocked", "pr": v})
             return
-        elif (v["mergeStateStatus"] == "CLEAN" and not v.get("autoMergeRequest") and checks is not None
-              and all(x["bucket"] in ("pass", "skipping") for x in checks)):
+        elif v["mergeStateStatus"] == "CLEAN" and not v.get("autoMergeRequest") and checks_green(checks):
             gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--delete-branch", *pin(v), check=False)
         if not poll.wait():
             out({"state": "pending", "pr": v})
