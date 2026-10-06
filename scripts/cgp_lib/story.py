@@ -9,7 +9,7 @@ from .util import call, die, now_iso, out
 from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
 from .store import cfg, load_data, update_data, update_state
 from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, set_single, set_text
-from .session import set_phase, worker_pr
+from .session import clear_phase, set_phase, worker_pr
 from .repoconf import repo_config, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
 from .pr import cancel_auto_merge, cmd_pr_state, pr_view, record_reviewed
@@ -60,6 +60,10 @@ def policy_verdict(c, it, target):
     return evaluate(c, it, target, lambda: author_trusted(it))
 
 
+def ready_pr(ref):
+    gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
+
+
 def cmd_move(a):
     c = cfg()
     a.column = KEY_RENAMES.get(a.column, a.column)  # the user's columns were called plan_approval / pr_approval before schema 3
@@ -90,7 +94,7 @@ def cmd_move(a):
         cancel_auto_merge(*ref)  # leaving PR Approved must not leave a merge armed
     if policy_ok and a.column == "pr_approved":  # a policy approval stands in for the review: ready the PR and record the commit it checked
         if verdict["draft"]:
-            gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
+            ready_pr(ref)
         record_reviewed(a.item, ref, verdict["sha"])  # (`merge` stays pinned to it: a later push is refused, exit 7)
         if (pr_view(*ref, check=False) or {}).get("headRefOid") != verdict["sha"]:  # pushed meanwhile: a person reviews it instead
             verdict, policy_ok, requested, a.column = {"approved": False, "reason": "the PR head moved while it was being approved"}, False, None, "pr_review"
@@ -104,10 +108,10 @@ def cmd_move(a):
     set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
     if requested == "pr_review" and not policy_ok:  # redirected to pr_approved: no review to record, but a merge refuses a draft
         if (pr_view(*ref, check=False) or {}).get("isDraft"):
-            gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
+            ready_pr(ref)
     if shown:
         if shown["isDraft"]:  # draftPRs opens PRs as drafts: ready for review now
-            gh("pr", "ready", str(ref[1]), "-R", ref[0], check=False)
+            ready_pr(ref)
         record_reviewed(a.item, ref, shown["headRefOid"])  # the commit the user is about to review: merge accepts only this one
     if a.column == "implement" and it["column"] == "plan_approved":
         snapshot_touches(a.item)  # fills a missing snapshot only: what the user approved is what the guard allows
@@ -116,8 +120,7 @@ def cmd_move(a):
         for w in st["workers"]:
             if w["item"] == a.item:
                 w["column"] = a.column
-                for k in ("phase", "detail", "phaseAt"):
-                    w.pop(k, None)  # a phase belongs to the column it was set in
+                clear_phase(w)  # a phase belongs to the column it was set in
                 if a.column in DEFAULT_PHASE:
                     w.update(phase=DEFAULT_PHASE[a.column], phaseAt=now_iso())
     update_state(upd)

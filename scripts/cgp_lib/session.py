@@ -119,6 +119,11 @@ def cmd_stop(a):
     out({"stopRequested": not a.cancel, "session": os.path.basename(path)[len("stop-"):]})
 
 
+def clear_phase(w):
+    for k in ("phase", "detail", "phaseAt"):
+        w.pop(k, None)
+
+
 def set_phase(phase, detail="", item=None, pr=None):
     """Set (or with None, clear) the phase of the worker owning an item, or the PR 'owner/repo#n' it recorded.
     Returns its previous (phase, detail), or False when no such worker is registered, so a temporary phase can be put back."""
@@ -128,8 +133,7 @@ def set_phase(phase, detail="", item=None, pr=None):
         for w in st["workers"]:
             if w["item"] == item or (pr and w.get("pr") == pr):
                 prev.append((w.get("phase"), w.get("detail", "")))
-                for k in ("phase", "detail", "phaseAt"):
-                    w.pop(k, None)
+                clear_phase(w)
                 if phase:
                     w.update(phase=phase, detail=detail, phaseAt=now_iso())
     update_state(upd)
