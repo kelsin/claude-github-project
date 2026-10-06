@@ -81,7 +81,7 @@ class Base(unittest.TestCase):
     def force(self, item, column):
         """Put a story in any column, bypassing the CLI's human-gate rules (test setup only)."""
         boards = os.path.join(self.env["CGP_HOME"], "boards")
-        name = next(n for n in os.listdir(boards) if not n.endswith((".data.json", ".history.json")))
+        name = next(n for n in os.listdir(boards) if n.endswith(".json") and not n.endswith((".data.json", ".history.json")))
         with open(os.path.join(boards, name)) as f:
             opt = json.load(f)["fields"]["status"]["options"][column]
         d = self.read_db()
@@ -693,7 +693,7 @@ class TestOverlap(Base):
     def test_config_saved_without_shared_files_uses_defaults(self):
         self.setup_board()
         boards = os.path.join(self.env["CGP_HOME"], "boards")
-        path = os.path.join(boards, next(n for n in os.listdir(boards) if not n.endswith((".data.json", ".history.json"))))
+        path = os.path.join(boards, next(n for n in os.listdir(boards) if n.endswith(".json") and not n.endswith((".data.json", ".history.json"))))
         with open(path) as f:
             c = json.load(f)
         del c["settings"]["sharedFiles"]
@@ -1656,7 +1656,7 @@ LEGACY = [("todo", "🆕 Todo"), ("plan", "🧠 Plan"), ("plan_review", "🔍 Pl
 class TestOldLayouts(Base):
     def board_json(self):
         boards = os.path.join(self.env["CGP_HOME"], "boards")
-        path = os.path.join(boards, next(n for n in os.listdir(boards) if not n.endswith((".data.json", ".history.json"))))
+        path = os.path.join(boards, next(n for n in os.listdir(boards) if n.endswith(".json") and not n.endswith((".data.json", ".history.json"))))
         with open(path) as f:
             return path, json.load(f)
 
