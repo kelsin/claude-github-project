@@ -1,4 +1,5 @@
 """Per-story commands: comments, questions, feedback, field updates, moves, prepare."""
+import hashlib
 import json
 import os
 import re
@@ -301,10 +302,17 @@ def cmd_comment(a):
 def ask_user(c, item, body):
     """Post a question on the story's issue and set Waiting On to You; returns the question's comment and its round number."""
     repo, number, _ = item_issue(item)
-    rounds = sum(1 for cm in rest(f"repos/{repo}/issues/{number}/comments") if QMARK in (cm.get("body") or "") and is_agent(cm))
-    if rounds >= 3:
-        body += "\n\n_This story has needed several rounds of questions; consider rescoping or splitting it._"
-    cm = post_comment(repo, number, f"{QMARK}\n{MARK}\n❓ **Question for you** (reply here; work resumes automatically)\n\n{body}")
+    comments = rest(f"repos/{repo}/issues/{number}/comments")
+    questions = [cm for cm in comments if QMARK in (cm.get("body") or "") and is_agent(cm)]
+    rounds = len(questions)
+    marker = f"<!-- cgp:q:{hashlib.sha1(body.encode()).hexdigest()[:12]} -->"  # a retry after a half-done ask finds its own question
+    last = questions[-1] if questions else None
+    if last and marker in last["body"] and not any(not is_agent(cm) for cm in comments[comments.index(last) + 1:]):
+        cm, rounds = last, rounds - 1  # still unanswered: reuse it instead of posting it again
+    else:
+        if rounds >= 3:
+            body += "\n\n_This story has needed several rounds of questions; consider rescoping or splitting it._"
+        cm = post_comment(repo, number, f"{QMARK}\n{marker}\n{MARK}\n❓ **Question for you** (reply here; work resumes automatically)\n\n{body}")
     set_single(c, item, c["fields"]["waiting"]["id"], c["fields"]["waiting"]["you"])
 
     advance_cursor(item, asked=cm.get("created_at"))

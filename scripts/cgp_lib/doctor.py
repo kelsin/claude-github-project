@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 import time
-from .consts import AUTO_FIELD, PRIORITY_FIELD, HOME, LOCKS, STORY_OPTION, TEXT_FIELDS, WAITING_FIELD
+from .consts import AUTO_FIELD, BOARDS, PRIORITY_FIELD, HOME, LOCKS, STORY_OPTION, TEXT_FIELDS, WAITING_FIELD
 from .util import die, out, printable, strip_id
 from .gh import gh, gql
 from .store import list_boards, load_board, load_json, lock_alive, locked, same_board, save_board
@@ -86,6 +86,16 @@ def cmd_gc(a):
 def list_stale_locks():
     return [f for f in glob.glob(os.path.join(LOCKS, "*.json"))
             if not lock_alive(load_json(f, None))]
+
+
+def quarantined_data():
+    """Per-board data files read_data set aside as corrupt, each with what replaced it (the backup's age, or an empty start)."""
+    found = []
+    for f in sorted(glob.glob(os.path.join(BOARDS, "*.data.json.corrupt-*"))):
+        bak = f.split(".corrupt-")[0] + ".bak"
+        how = f"backup restored, {round((time.time() - os.path.getmtime(bak)) / 60)} min old" if os.path.exists(bak) else "no backup, started empty"
+        found.append(f"{os.path.basename(f)} ({how})")
+    return found
 
 
 def settings_denies():
@@ -182,6 +192,8 @@ def cmd_doctor(a):
     check("claude for cgp daemon", claude is not None and not unknown,
           "cgp daemon needs the claude CLI on PATH" if claude is None else f"this claude does not list {', '.join(unknown)}: update it before running cgp daemon",
           warn=True)
+    bad = quarantined_data()
+    check("no corrupt data files", not bad, "set aside (delete them once looked at): " + "; ".join(bad), warn=True)
     lock = list_stale_locks()
     check("no stale locks", not lock, f"{len(lock)} abandoned lock(s): cgp gc", warn=True)
     old = session_files(7)

@@ -558,9 +558,9 @@ class TestQuestions(Base):
 
     def test_rescope_hint_after_three_rounds(self):
         self.setup_board()
-        for _ in range(3):
-            self.cgp("ask", "i1", input="q")
-        self.cgp("ask", "i1", input="q")
+        for n in range(3):
+            self.cgp("ask", "i1", input=f"q{n}")  # an unanswered repeat of the same question is not posted again
+        self.cgp("ask", "i1", input="q3")
         last = self.read_db()["comments"]["acme/app#1"][-1]["body"]
         self.assertIn("rescoping", last)
 

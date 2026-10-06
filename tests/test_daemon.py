@@ -336,6 +336,19 @@ class TestLifecycle(DaemonBase):
         self.assertEqual((p.returncode, res["stopped"], res["dispatched"]), (0, "all stories are Done", 0))
 
 
+class TestRateLimit(DaemonBase):
+    def test_a_rate_limit_doubles_the_nap_and_a_good_read_resets_it(self):
+        for item in ("i1", "i2", "i4"):
+            self.force(item, "done")  # the daemon ends once it can read the board
+        d = self.read_db()
+        d["failures"] = [{"match": "items(first:100", "times": 3, "stderr": "gh: HTTP 429: API rate limit exceeded"}]
+        self.write_db(d)
+        p, res = self.daemon("--verbose")
+        self.assertEqual((p.returncode, res["stopped"]), (0, "all stories are Done"), p.stderr)
+        waits = [line.split("waiting ")[1] for line in p.stderr.splitlines() if "rate limiting" in line]
+        self.assertEqual(waits, ["0.2s", "0.4s", "0.8s"])
+
+
 class TestSpend(DaemonBase):
     def test_a_story_cap_shrinks_the_budget_and_then_asks(self):
         self.setting(daemonMaxBudgetUsd=4.0, daemonStoryBudgetUsd=5.0)

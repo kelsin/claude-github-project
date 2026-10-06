@@ -6,3 +6,5 @@ description: Use when cgp misbehaves, after installing it, or when the user asks
 # cgp doctor
 
 The CLI is `scripts/cgp` at the plugin root, two directories above this skill's base directory. Run `<absolute path>/scripts/cgp doctor` and report every ❌ and ⚠️ with the fix it prints (❌ fails the run, ⚠️ is advice). If it reports leftover session files, stale locks or worktrees of finished stories, offer `cgp gc --dry-run`, show what it would delete, and run `cgp gc` only after the user agrees.
+
+If it reports a corrupt data file, cgp already set it aside as `<board>.data.json.corrupt-<time>` under `boards/` and restored the last good copy (or started empty): tell the user what it said, and leave the set-aside file for them to look at and delete.

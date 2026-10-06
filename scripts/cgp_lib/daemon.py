@@ -13,6 +13,7 @@ import sys
 import time
 from .consts import ALL_KEYS, HOME
 from .util import call, out, ps_field
+from .gh import RateLimited
 from .store import cfg, load_data, load_json, state_path, stop_path, touch_lock, update_data, update_state
 from .session import cmd_release, cmd_use, cmd_worker
 from .sched import snapshot
@@ -115,7 +116,7 @@ class Daemon:
         s = c["settings"]
         self.poll = seconds("CGP_DAEMON_POLL_SECONDS", s["pollSeconds"])
         self.deadline = seconds("CGP_DAEMON_DEADLINE_SECONDS", s["maxWorkerMinutes"] * 60)  # 0 = never
-        self.signals = 0
+        self.signals, self.rate_wait = 0, 0.0
 
     def say(self, msg):
         if self.a.verbose:
@@ -283,8 +284,8 @@ class Daemon:
                 self.spawn(it, self.budget(it["item"]))
 
     def nap(self):
-        """Sleep until a worker exits or a poll interval has passed, enforcing deadlines meanwhile."""
-        end = time.time() + self.poll
+        """Sleep until a worker exits or a poll interval (longer while GitHub rate-limits us) has passed, enforcing deadlines meanwhile."""
+        end = time.time() + max(self.poll, self.rate_wait)
         while time.time() < end and self.signals < 1 and all(w["proc"].poll() is None for w in self.workers):
             self.reap()
             time.sleep(min(0.05, max(end - time.time(), 0)))
@@ -304,10 +305,15 @@ class Daemon:
                     raise
                 if self.a.once:
                     raise
-                log("the board could not be read; retrying")
+                if isinstance(e, RateLimited):  # wait twice as long each time, up to ten minutes; the next good read resets it
+                    self.rate_wait = min(max(self.rate_wait * 2, self.poll * 2), 600)
+                    log(f"GitHub is rate limiting us; waiting {self.rate_wait:g}s")
+                else:
+                    log("the board could not be read; retrying")
                 touch_lock(self.key)
                 self.nap()
                 continue
+            self.rate_wait = 0.0
             asked = self.judge(snap)
             self.say(f"cycle {cycles}: {snap['status']}, batch {len(snap['batch'])}, running {len(self.workers)}")
             if snap["stopRequested"] and not self.workers:

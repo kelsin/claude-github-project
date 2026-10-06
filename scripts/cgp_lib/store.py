@@ -3,6 +3,8 @@ import fcntl
 import json
 import os
 import re
+import shutil
+import sys
 import time
 from .consts import BOARDS, DEFAULTS, HOME, KEY_RENAMES, LOCKS, META, LOCK_STALE_SECONDS, PATHS, SCHEMA
 from .gitutil import cwd_repo
@@ -183,17 +185,52 @@ def data_path():
     return os.path.join(BOARDS, f"{safe(board_key())}.data.json")
 
 
+def read_data(path):
+    """A per-board data file. One that is not valid JSON (a half write, a bad edit) is set aside as <file>.corrupt-<time> and the copy
+    update_data kept of the last good contents (<file>.bak) is restored, or {} when there is none: the data is cursors, strikes and
+    blocks that are re-derivable, so one bad file must not stop the loop. Config files stay fatal (load_json)."""
+    def read():
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+    try:
+        return read()
+    except ValueError:
+        pass
+    with locked():
+        try:
+            return read()  # another process may have repaired it meanwhile
+        except ValueError:
+            pass
+        os.replace(path, f"{path}.corrupt-{time.strftime('%Y%m%dT%H%M%S')}")
+        try:
+            with open(path + ".bak") as f:
+                d = json.load(f)
+            save_json(path, d)
+            how = "restored the last good copy"
+        except (OSError, ValueError):
+            d, how = {}, "no usable backup, so it starts empty"
+        print(f"cgp: WARNING: {path} was corrupt; set it aside as {os.path.basename(path)}.corrupt-*, {how} (cgp doctor shows it)", file=sys.stderr)
+        return d
+
+
 def load_data():
-    return load_json(data_path(), {})
+    return read_data(data_path())
 
 
 def update_data(fn):
     """Per-board data that outlives sessions: blocks, touches, feedback cursors, answered flags."""
     with locked():
         os.makedirs(BOARDS, mode=0o700, exist_ok=True)
-        d = load_json(data_path(), {})
+        path = data_path()
+        d = read_data(path)
+        if os.path.exists(path):
+            shutil.copyfile(path, path + ".bak")  # the last good contents, for read_data
+            os.chmod(path + ".bak", 0o600)
         fn(d)
-        save_json(data_path(), d)
+        save_json(path, d)
 
 
 def same_board(meta, owner, number):

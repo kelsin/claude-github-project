@@ -1,12 +1,16 @@
 """Tests for the safety gates and tools added after the first review: worker start, review-bound merging, guard,
 stalled workers, status, doctor, gc, setup --dry-run."""
+import contextlib
 import importlib.machinery
+import io
 import importlib.util
+import glob
 import json
 import os
 import re
 import subprocess
 import time
+from unittest import mock
 
 import test_cgp
 
@@ -547,6 +551,154 @@ class TestWorktreeCleanup(test_cgp.SyncBase):
         self.finish()
         self.cgp("list", "--brief")
         self.assertFalse(os.path.isdir(self.wt))
+
+
+class TestQuarantine(Base):
+    """A corrupt per-board data file is set aside (and its last good copy restored) instead of stopping the loop."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_board()
+        self.path = os.path.join(boards_dir(self.env), "P1.data.json")
+
+    def corrupt(self):
+        with open(self.path, "w") as f:
+            f.write('{"blocks": {"i1": ["i')  # a truncated write
+
+    def test_a_truncated_data_file_is_set_aside_and_the_backup_restored(self):
+        self.cgp("block", "i1", "i2")
+        self.cgp("block", "i1", "i4")  # the backup is the contents before this update
+        good = self.load(self.path + ".bak")
+        self.corrupt()
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"CGP_HOME": self.env["CGP_HOME"]}), contextlib.redirect_stderr(err):
+            self.assertEqual(test_cgp.load_cgp().mods["store"].read_data(self.path), good)
+        self.assertIn("WARNING", err.getvalue())
+        (bad,) = glob.glob(self.path + ".corrupt-*")
+        with open(bad) as f:
+            self.assertTrue(f.read().startswith('{"blocks"'))  # kept for a look
+        self.assertEqual(self.load(self.path), good)
+        self.assertEqual(self.cgp("list")["board"]["number"], 1)  # the set-aside file is not mistaken for a board
+        out = self.cgp("doctor", ok=False).stdout
+        self.assertIn("⚠️  no corrupt data files", out)
+        self.assertIn("backup restored", out)
+
+    def test_without_a_backup_the_data_starts_empty(self):
+        self.cgp("block", "i1", "i2")
+        os.remove(self.path + ".bak") if os.path.exists(self.path + ".bak") else None
+        self.corrupt()
+        self.cgp("block", "i1", "i4")  # an update on a corrupt file
+        self.assertEqual(self.load(self.path)["blocks"], {"i1": ["i4"]})
+        self.assertEqual(len(glob.glob(self.path + ".corrupt-*")), 1)
+        self.assertIn("no backup", self.cgp("doctor", ok=False).stdout)
+
+    def test_only_a_json_error_is_quarantined(self):
+        m = test_cgp.load_cgp().mods["store"]
+        with mock.patch.dict(os.environ, {"CGP_HOME": self.env["CGP_HOME"]}), mock.patch("builtins.open", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                m.read_data(self.path)
+        self.assertEqual(glob.glob(self.path + ".corrupt-*"), [])
+
+    def test_a_corrupt_config_stays_fatal(self):
+        with open(os.path.join(boards_dir(self.env), "P1.json"), "w") as f:
+            f.write("{nope")
+        p = self.cgp("list", ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("is corrupt", p.stderr)
+        self.assertEqual(glob.glob(os.path.join(boards_dir(self.env), "*.corrupt-*")), [])
+
+
+class TestGhRetry(Base):
+    """Transient gh failures (5xx, timeouts) are retried for reads and idempotent writes, never for posting a comment."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_board()
+        self.env["CGP_GH_BACKOFF"] = "0,0"
+
+    def fail(self, match, times, stderr="gh: HTTP 502"):
+        d = self.read_db()
+        d["failures"] = [{"match": match, "times": times, "stderr": stderr}]
+        self.write_db(d)
+
+    def test_a_read_that_fails_twice_with_502_passes(self):
+        self.fail("items(first:100", 2)
+        self.assertEqual(self.cgp("list")["board"]["number"], 1)
+        self.assertEqual(self.read_db()["failed_calls"], 2)
+
+    def test_a_third_failure_surfaces(self):
+        self.fail("items(first:100", 3)
+        p = self.cgp("list", ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("502", p.stderr)
+
+    def test_an_error_that_is_not_transient_is_not_retried(self):
+        self.fail("items(first:100", 1, "gh: HTTP 404 not found")
+        self.assertNotEqual(self.cgp("list", ok=False).returncode, 0)
+        self.assertEqual(self.read_db()["failed_calls"], 1)
+
+    def test_an_idempotent_field_update_is_retried(self):
+        self.fail("updateProjectV2ItemFieldValue", 2)
+        self.cgp("move", "i1", "plan")
+        self.assertEqual(self.read_db()["failed_calls"], 2)
+
+    def test_posting_a_comment_is_never_retried(self):
+        self.fail("issues/1/comments", 1)
+        self.assertNotEqual(self.cgp("comment", "i1", input="hello", ok=False).returncode, 0)
+        self.assertEqual(self.read_db()["failed_calls"], 1)
+        self.assertEqual(self.read_db()["comments"].get("acme/app#1", []), [])
+
+    def test_only_allowlisted_mutations_and_reads_retry(self):
+        gh = test_cgp.load_cgp().mods["gh"]
+        bad = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "", "gh: HTTP 502"))
+        with mock.patch.object(gh, "BACKOFF", (0, 0)), mock.patch("subprocess.run", bad):
+            for query, tries in (("query{ viewer{ login } }", 3), ("mutation($i:ID!){ clearProjectV2ItemFieldValue(input:{itemId:$i}){ x } }", 3),
+                                 ("mutation($i:ID!){ convertProjectV2DraftIssueItemToIssue(input:{itemId:$i}){ x } }", 1)):
+                bad.reset_mock()
+                with self.assertRaises(SystemExit):
+                    gh.gql(query)
+                self.assertEqual(bad.call_count, tries, query)
+            bad.reset_mock()
+            with self.assertRaises(SystemExit):
+                gh.gh("api", "-X", "POST", "repos/a/b/issues")  # a REST write
+            self.assertEqual(bad.call_count, 1)
+
+    def test_a_rate_limit_is_a_typed_error_that_is_not_retried(self):
+        gh = test_cgp.load_cgp().mods["gh"]
+        limited = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "", "gh: HTTP 429: API rate limit exceeded"))
+        with mock.patch.object(gh, "BACKOFF", (0, 0)), mock.patch("subprocess.run", limited):
+            with self.assertRaises(gh.RateLimited) as cm:
+                gh.gql("query{ viewer{ login } }")
+        self.assertEqual((limited.call_count, cm.exception.code), (1, 1))
+
+
+class TestAskIsIdempotent(Base):
+    def setUp(self):
+        super().setUp()
+        self.setup_board()
+        self.env["CGP_GH_BACKOFF"] = "0,0"
+
+    def questions(self):
+        return [c for c in self.read_db()["comments"].get("acme/app#1", []) if "cgp:question" in c["body"]]
+
+    def test_asking_again_after_the_field_update_failed_posts_one_comment(self):
+        d = self.read_db()
+        d["failures"] = [{"match": "updateProjectV2ItemFieldValue", "times": 3, "stderr": "gh: HTTP 502"}]  # all three attempts
+        self.write_db(d)
+        self.assertNotEqual(self.cgp("ask", "i1", input="1. which?", ok=False).returncode, 0)  # posted, then Waiting On failed
+        self.assertEqual(len(self.questions()), 1)
+        self.assertEqual(self.cgp("ask", "i1", input="1. which?")["round"], 1)
+        self.assertEqual(len(self.questions()), 1)
+        self.assertEqual([i["item"] for i in self.cgp("list")["waitingOnYou"]], ["i1"])
+
+    def test_a_different_question_or_an_answered_one_is_posted(self):
+        self.cgp("ask", "i1", input="1. which?")
+        self.assertEqual(self.cgp("ask", "i1", input="2. why?")["round"], 2)
+        d = self.read_db()
+        d["comments"]["acme/app#1"].append({"body": "sqlite", "created_at": "2026-01-01T00:59:00Z",
+                                            "user": {"login": "kelsin", "type": "User"}, "author_association": "OWNER"})
+        self.write_db(d)
+        self.assertEqual(self.cgp("ask", "i1", input="2. why?")["round"], 3)  # the same text, but the last one was answered
 
 
 class TestSkillText(test_cgp.unittest.TestCase):
