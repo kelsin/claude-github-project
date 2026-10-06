@@ -8,7 +8,7 @@ import sys
 import time
 from .consts import BOARDS, DEFAULTS, HOME, KEY_RENAMES, LOCKS, META, LOCK_STALE_SECONDS, PATHS, SCHEMA
 from .gitutil import cwd_repo
-from .util import die, pid_alive, safe, strip_id
+from .util import die, safe, strip_id
 
 
 def load_json(path, default):
@@ -147,20 +147,9 @@ def update_board(fn):
         return c
 
 
-def env_board():
-    """The board named by $CGP_BOARD (its key or its URL), set by `cgp daemon` for the sessions it starts; None when unset or unknown."""
-    want = (os.environ.get("CGP_BOARD") or "").strip().rstrip("/")
-    if not want:
-        return None
-    for k in list_boards():
-        if k == want or (load_json(board_file(k), {}).get("board", {}).get("url") or "").rstrip("/") == want:
-            return k
-    return None
-
-
 def board_key():
-    """The board for this command: $CGP_BOARD, else the session's bound board (cgp use), else the one the current repo is on, else the only board."""
-    key = env_board() or load_json(state_path(), {}).get("boardKey")
+    """The board for this command: the session's bound board (cgp use), else the one the current repo is on, else the only board."""
+    key = load_json(state_path(), {}).get("boardKey")
     if key and os.path.exists(board_file(key)):
         return key
     keys = list_boards()
@@ -242,18 +231,9 @@ def lock_file(key):
     return os.path.join(LOCKS, f"{safe(key)}.json")
 
 
-def daemon_pid(session):
-    """The pid in a daemon's session id (daemon-<pid>), None for any other id."""
-    m = re.fullmatch(r"daemon-([0-9]{1,9})", session or "")
-    return int(m.group(1)) if m else None
-
-
 def lock_alive(lk):
-    """A lock is live while its holder heartbeats; a daemon whose process is gone on this host is dead at once."""
-    if not lk or time.time() - lk.get("at", 0) >= LOCK_STALE_SECONDS:
-        return False
-    pid = daemon_pid(lk.get("session"))
-    return pid is None or (pid > 1 and pid_alive(pid))
+    """A lock is live while its holder heartbeats."""
+    return bool(lk) and time.time() - lk.get("at", 0) < LOCK_STALE_SECONDS
 
 
 def lock_mine(key):

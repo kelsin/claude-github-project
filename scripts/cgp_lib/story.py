@@ -1,7 +1,6 @@
 """Per-story commands: comments, questions, feedback, field updates, moves, prepare."""
 import hashlib
 import json
-import os
 import re
 import sys
 from urllib.parse import urlsplit
@@ -168,11 +167,6 @@ def cmd_set(a):
     value = a.value.strip() if a.value else a.value
     if key == "plan" and value and not valid_plan(value):
         die("Plan must be Skip or an https link on claude.ai or github.com")
-    if key == "plan" and value and os.environ.get("CGP_DAEMON") and value.lower() != SKIP:  # a headless worker (cgp daemon): fewer places for a plan
-        it = get_item(c, a.item)
-        if urlsplit(value).hostname != "claude.ai" and not (it["kind"] == "issue" and re.fullmatch(
-                rf"https://github\.com/{re.escape(it['issueRepo'])}/issues/{it['number']}#issuecomment-\d+", value, re.I)):
-            die("headless Plan links must be on claude.ai or a comment on the story's own issue")
     if key == "pr" and value:
         ref = parse_pr_ref(c, value)
         if not ref:

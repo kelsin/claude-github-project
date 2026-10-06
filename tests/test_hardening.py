@@ -824,18 +824,13 @@ class TestWorktreeRemove(test_cgp.SyncBase):
         self.cgp("worktree-remove", "i1", "--discard")
         self.assertFalse(os.path.isdir(self.wt))
 
-    def test_a_worker_may_not_discard(self):
-        with open(os.path.join(self.wt, "wip.txt"), "w") as f:
-            f.write("unsaved\n")
-        self.assertIn("--discard is only for you", self.refused("--discard", env={"CGP_DAEMON": "1"}))
-
 
 class TestUnstick(Base):
     KEPT = {"asked": {"i1": "t"}, "cursors": {"i1": "t"}, "pending": {"i1": "t"}, "blocks": {"i1": ["i2"]}, "epicOrder": {"i1": ["i2"]},
             "touches": {"i1": ["a.py"]}, "approvedTouches": {"i1": ["a.py"]}, "splits": {"i1": []}, "approvedSplits": {"i1": []},
             "children": {"i1": []}, "parents": {"i1": "p"}, "epicAsked": {"i1": "x"}, "policyPlans": ["i1"], "policy": {"i1": {}},
             "ratings": {"i1": {}}, "reviewed": {"i1": {"pr": "acme/app#5", "sha": "aaa"}}, "cleanRebase": {"i1": ["bbb"]},
-            "notified": {"i1": {}}, "deferred": ["i1"], "reasons": {"i1": "x"}, "daemonSpend": {"i1": 1.5}, "tainted": ["i1"]}
+            "notified": {"i1": {}}, "deferred": ["i1"], "reasons": {"i1": "x"}, "tainted": ["i1"]}
 
     def setUp(self):
         super().setUp()
@@ -917,12 +912,6 @@ class TestUnstick(Base):
         self.cgp("unstick", "i1", "--kill")
         self.assertIsNotNone(p.wait(timeout=10))
         self.assertEqual(self.rows(), [])
-
-    def test_a_worker_may_not_unstick(self):
-        r = self.cgp("unstick", "i1", ok=False, env={"CGP_DAEMON": "1"})
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn("only for you", r.stderr)
-        self.assertEqual(self.rows(), ["i1", "i2"])
 
 
 class TestWorkerOutcome(Base):

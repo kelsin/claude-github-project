@@ -323,7 +323,7 @@ def snapshot(c):
         d["parents"] = {k: v for k, v in d.get("parents", {}).items() if k in live_ids}
         d["epicAsked"] = {k: v for k, v in d.get("epicAsked", {}).items() if k in live_ids}
         d["policyPlans"] = [i for i in d.get("policyPlans", []) if i in live_ids and by_id[i]["column"] not in ("todo", "plan", "plan_review")]
-        for k in ("reviewed", "cleanRebase", "asked", "ratings", "policy", "daemonSpend"):
+        for k in ("reviewed", "cleanRebase", "asked", "ratings", "policy"):
             d[k] = {i: v for i, v in d.get(k, {}).items() if i in live_ids}
         d["tainted"] = [i for i in d.get("tainted", []) if i in live_ids]
     update_data(prune)

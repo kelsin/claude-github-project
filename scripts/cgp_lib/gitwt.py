@@ -213,8 +213,6 @@ def cmd_worktree_remove(a):
     c = cfg()
     it = issue_item(c, a.item)
     wt = wt_path(it)
-    if a.discard and os.environ.get("CGP_DAEMON"):
-        die("--discard is only for you: a worker may not throw work away")
     if os.path.isdir(wt):
         base = resolve_repo_path(c, it["issueRepo"])
         problem = None if a.discard else unsaved_work(c, it, base, wt)
