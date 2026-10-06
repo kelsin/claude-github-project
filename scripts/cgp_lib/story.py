@@ -307,8 +307,8 @@ def ask_user(c, item, body):
     rounds = len(questions)
     marker = f"<!-- cgp:q:{hashlib.sha1(body.encode()).hexdigest()[:12]} -->"  # a retry after a half-done ask finds its own question
     last = questions[-1] if questions else None
-    if last and marker in last["body"] and not any(not is_agent(cm) for cm in comments[comments.index(last) + 1:]):
-        cm, rounds = last, rounds - 1  # still unanswered: reuse it instead of posting it again
+    if last and marker in last["body"] and comments[-1] is last:
+        cm, rounds = last, rounds - 1  # still the last comment of any kind, so unanswered: reuse it instead of posting it again
     else:
         if rounds >= 3:
             body += "\n\n_This story has needed several rounds of questions; consider rescoping or splitting it._"

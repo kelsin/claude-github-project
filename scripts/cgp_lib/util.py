@@ -60,7 +60,8 @@ def pid_alive(pid):
 def ps_field(pid, field):
     """One `ps -o` field of a process ("lstart" = when it started, "stat"), '' when it is gone or ps fails."""
     try:
-        p = subprocess.run(["ps", "-o", f"{field}=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+        p = subprocess.run(["ps", "-o", f"{field}=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
+                           env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})  # the same text in every environment that compares it
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return p.stdout.strip() if p.returncode == 0 else ""

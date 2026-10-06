@@ -15,7 +15,8 @@ ROOT = test_cgp.ROOT
 
 
 def ps_start(pid):
-    return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                          env={**os.environ, "LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
 
 
 class DaemonBase(test_cgp.Base):
@@ -202,14 +203,11 @@ class TestOrphans(DaemonBase):
 
     def sleeper(self, ignore_term=False, new_session=True):
         """A fake worker: sleeps in its own session (a group leader), optionally ignoring SIGTERM. Always killed in tearDown."""
-        code = "import signal,time\n" + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else "") + "time.sleep(60)"
-        p = subprocess.Popen([sys.executable, "-c", code], start_new_session=new_session)
+        code = ("import signal,sys\n" + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else "")
+                + "print('ready', flush=True)\nsys.stdin.readline()")
+        p = subprocess.Popen([sys.executable, "-c", code], start_new_session=new_session, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.procs.append(p)
-        for _ in range(50):  # until a signal handler is installed
-            if ps_start(p.pid):
-                break
-            time.sleep(0.1)
-        time.sleep(0.3)
+        self.assertEqual(p.stdout.readline().strip(), "ready")  # the signal handling is installed
         return p
 
     def lock(self):
@@ -266,6 +264,27 @@ class TestOrphans(DaemonBase):
         self.leave(self.row(p))
         self.use()
         self.assertFalse(self.alive(p))
+
+    def test_a_dead_daemons_state_file_is_found_without_its_lock(self):
+        p = self.sleeper()
+        self.leave(self.row(p))
+        os.remove(self.lock())  # as `cgp gc` does
+        path = os.path.join(self.env["CGP_HOME"], f"state-{self.old}.json")
+        with open(path, "w") as f:
+            json.dump({"boardKey": os.path.basename(self.lock())[:-5], "workers": [self.row(p)]}, f)
+        self.use()
+        self.assertFalse(self.alive(p))
+        self.assertEqual(self.old_rows(), [])
+        self.assertEqual(self.strikes(), {"i1|todo": 1})
+
+    def test_a_live_worker_that_could_not_be_stopped_keeps_its_row_and_is_named(self):
+        p = self.sleeper()
+        self.leave(self.row(p, start="Thu Jan  1 00:00:00 1970"))
+        r = self.cgp("use", env={"CGP_SESSION": "daemon-new"}, ok=False)
+        self.assertTrue(self.alive(p))
+        self.assertEqual([w["item"] for w in self.old_rows()], ["i1"])
+        self.assertIn("unstick <item> --kill", r.stderr)
+        self.assertIn("i1", r.stderr)
 
     def test_a_dead_pid_is_only_cleared(self):
         d = subprocess.Popen(["true"])

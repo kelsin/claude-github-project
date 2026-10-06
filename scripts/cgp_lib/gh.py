@@ -30,23 +30,31 @@ def readonly(args):
     return args[:1] == ("api",) and "graphql" not in args and not WRITE_FLAGS & set(args)
 
 
-def fail(msg, text):
-    if RATE_LIMIT.search(text or ""):
+def fail(msg, stderr):
+    if RATE_LIMIT.search(stderr or ""):
         print(f"cgp: {msg}", file=sys.stderr)
         raise RateLimited(1)
     die(msg)
+
+
+def has_data(stdout):
+    """Whether stdout is a GraphQL response carrying `data` (gh exits 1 on partial errors, but there is nothing to retry)."""
+    try:
+        return isinstance(json.loads(stdout), dict) and "data" in json.loads(stdout)
+    except ValueError:
+        return False
 
 
 def gh(*args, input=None, check=True, retry=None):
     retry = readonly(args) if retry is None else retry
     for delay in (*BACKOFF, None):
         p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
-        if not p.returncode or not retry or delay is None or not TRANSIENT.search(p.stderr + p.stdout):
+        if not p.returncode or not retry or delay is None or not TRANSIENT.search(p.stderr) or has_data(p.stdout):
             break
         time.sleep(delay)
     if check and p.returncode:
         text = (p.stderr or p.stdout).strip()
-        fail(f"gh {' '.join(args[:4])} failed: {text}", p.stderr + p.stdout)
+        fail(f"gh {' '.join(args[:4])} failed: {text}", p.stderr)
     return p
 
 

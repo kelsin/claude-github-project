@@ -85,7 +85,7 @@ COMMANDS = [
         A("--once", action="store_true", help="dispatch one cycle, wait for those workers, then exit"),
         A("--dry-run", action="store_true", help="print what would be dispatched; start nothing"),
         A("--verbose", action="store_true")]),
-    ("unstick", cmd_unstick, "Clear one story's operational state (worker, strikes, answered, taint, Waiting On); you only, not agents", [
+    ("unstick", cmd_unstick, "Clear one story's operational state (worker, strikes, answered, Waiting On); you only, not agents", [
         A("item"), A("--dry-run", action="store_true", help="list what would be cleared; change nothing"),
         A("--kill", action="store_true", help="also stop its worker if it is still running")]),
     ("doctor", cmd_doctor, "Check the installation: gh, token scopes, board, clones, stale files", [

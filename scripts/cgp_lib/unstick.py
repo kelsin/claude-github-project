@@ -51,7 +51,7 @@ def clear_story_state(d, item):
 
 
 def cmd_unstick(a):
-    """Clear a story's worker row, strikes, answered flag, taint and Waiting On, and disarm auto-merge on its PR. Never touches its
+    """Clear a story's worker row, strikes, answered flag and Waiting On, and disarm auto-merge on its PR. Never touches its
     column, plan, PR, touches or approved touches (STORY_KEPT). Refuses while its worker still runs, unless --kill."""
     if os.environ.get("CGP_DAEMON"):
         die("unstick is only for you: a worker may not clear a story's state")

@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import time
+from functools import partial
 from .consts import ALL_KEYS, HOME, STRIKES
 from .util import call, out, ps_field
 from .gh import RateLimited
@@ -106,6 +107,20 @@ def seconds(env, default):
         return float(os.environ[env])
     except (KeyError, ValueError):
         return default
+
+
+def bump_strikes(key, progress, count, d):
+    """Count one strike for a finished run (progress, or a wait the board shows, forgets them); the new count goes into `count`."""
+    strikes = d.setdefault("daemonStrikes", {})
+    if progress:
+        strikes.pop(key, None)
+    else:
+        strikes[key] = strikes.get(key, 0) + 1
+        count.append(strikes[key])
+
+
+def drop_strike(key, d):
+    d.setdefault("daemonStrikes", {}).pop(key, None)
 
 
 class Daemon:
@@ -230,27 +245,25 @@ class Daemon:
         and the story really waits: a question to the user, or another story). Three strikes in one (story, column): ask the user."""
         items = {i["item"]: i for i in snap["items"]}
         asked = []
-        strikes = load_data().get("daemonStrikes", {})
         for f in self.finished:
             it, key = items.get(f["item"]), f"{f['item']}|{f['column']}"
             parked = it and (it["waiting"] or it["blockedBy"]) and re.match(r"\s*(waiting|blocked):", f.get("reply") or "")
-            if f["failed"] is None and (not it or it["column"] != f["column"] or parked):
-                strikes.pop(key, None)  # progress, or a wait the board shows
-            else:
-                strikes[key] = strikes.get(key, 0) + 1
-                if strikes[key] >= STRIKES and it and it["kind"] == "issue":
-                    reason = f["failed"] or "ended without moving it on"
-                    try:
-                        ask_user(self.c, f["item"], f"The dispatcher daemon's worker has {STRIKES} times in a row not got this story out of "
-                                                    f"{f['column']} ({reason}). Its logs are under {os.path.join(HOME, 'logs')}. "
-                                                    "Reply here with what to do, then work resumes.")
-                        asked.append(f["item"])
-                        strikes.pop(key)
-                    except SystemExit:
-                        log(f"could not ask about {f['item']}")
+            progress = f["failed"] is None and (not it or it["column"] != f["column"] or parked)
+            count = []
+            update_data(partial(bump_strikes, key, progress, count))  # against fresh data: the story's own commands change strikes meanwhile
+            if count and count[0] >= STRIKES and it and it["kind"] == "issue":
+                reason = f["failed"] or "ended without moving it on"
+                try:
+                    ask_user(self.c, f["item"], f"The dispatcher daemon's worker has {STRIKES} times in a row not got this story out of "
+                                                f"{f['column']} ({reason}). Its logs are under {os.path.join(HOME, 'logs')}. "
+                                                "Reply here with what to do, then work resumes.")
+                    asked.append(f["item"])
+                    update_data(partial(drop_strike, key))
+                except SystemExit:
+                    log(f"could not ask about {f['item']}")
         self.finished = []
 
-        update_data(lambda d: d.__setitem__("daemonStrikes", {k: v for k, v in strikes.items() if k.split("|")[0] in items}))
+        update_data(lambda d: d.__setitem__("daemonStrikes", {k: v for k, v in d.get("daemonStrikes", {}).items() if k.split("|")[0] in items}))
         return asked
 
     def dispatch(self, snap, asked):

@@ -665,6 +665,18 @@ class TestGhRetry(Base):
                 gh.gh("api", "-X", "POST", "repos/a/b/issues")  # a REST write
             self.assertEqual(bad.call_count, 1)
 
+    def test_only_stderr_decides_whether_to_retry_or_to_call_it_a_rate_limit(self):
+        gh = test_cgp.load_cgp().mods["gh"]
+        noisy = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "body: HTTP 502 and a rate limit", "gh: HTTP 404"))
+        with mock.patch.object(gh, "BACKOFF", (0, 0)), mock.patch("subprocess.run", noisy):
+            with self.assertRaises(SystemExit) as cm:
+                gh.gh("api", "repos/a/b")
+        self.assertEqual((noisy.call_count, type(cm.exception)), (1, SystemExit))
+        partial = mock.Mock(return_value=subprocess.CompletedProcess([], 1, '{"data": {"x": 1}, "errors": [{"message": "timeout"}]}', "gh: HTTP 502 timeout"))
+        with mock.patch.object(gh, "BACKOFF", (0, 0)), mock.patch("subprocess.run", partial):
+            self.assertEqual(gh.gql("query{ x }"), {"x": 1})
+        self.assertEqual(partial.call_count, 1)  # usable data: nothing to retry
+
     def test_a_rate_limit_is_a_typed_error_that_is_not_retried(self):
         gh = test_cgp.load_cgp().mods["gh"]
         limited = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "", "gh: HTTP 429: API rate limit exceeded"))
@@ -693,6 +705,12 @@ class TestAskIsIdempotent(Base):
         self.assertEqual(len(self.questions()), 1)
         self.assertEqual([i["item"] for i in self.cgp("list")["waitingOnYou"]], ["i1"])
 
+    def test_an_agent_comment_after_the_question_means_it_is_posted_again(self):
+        self.cgp("ask", "i1", input="1. which?")
+        self.cgp("comment", "i1", input="status update")
+        self.assertEqual(self.cgp("ask", "i1", input="1. which?")["round"], 2)
+        self.assertEqual(len(self.questions()), 2)
+
     def test_a_different_question_or_an_answered_one_is_posted(self):
         self.cgp("ask", "i1", input="1. which?")
         self.assertEqual(self.cgp("ask", "i1", input="2. why?")["round"], 2)
@@ -704,7 +722,8 @@ class TestAskIsIdempotent(Base):
 
 
 def lstart(pid):
-    return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                          env={**os.environ, "LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
 
 
 class TestWorktreeRepair(test_cgp.SyncBase):
@@ -816,7 +835,7 @@ class TestUnstick(Base):
             "touches": {"i1": ["a.py"]}, "approvedTouches": {"i1": ["a.py"]}, "splits": {"i1": []}, "approvedSplits": {"i1": []},
             "children": {"i1": []}, "parents": {"i1": "p"}, "epicAsked": {"i1": "x"}, "policyPlans": ["i1"], "policy": {"i1": {}},
             "ratings": {"i1": {}}, "reviewed": {"i1": {"pr": "acme/app#5", "sha": "aaa"}}, "cleanRebase": {"i1": ["bbb"]},
-            "notified": {"i1": {}}, "deferred": ["i1"], "reasons": {"i1": "x"}, "daemonSpend": {"i1": 1.5}}
+            "notified": {"i1": {}}, "deferred": ["i1"], "reasons": {"i1": "x"}, "daemonSpend": {"i1": 1.5}, "tainted": ["i1"]}
 
     def setUp(self):
         super().setUp()
@@ -828,7 +847,7 @@ class TestUnstick(Base):
         self.write_db(d)
         self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/5")
         self.cgp("ask", "i1", input="1. which?")  # Waiting On: You
-        self.save_data(**self.KEPT, answered=["i1", "i2"], tainted=["i1"], daemonStrikes={"i1|todo": 2, "i1|plan": 1, "i2|todo": 1})
+        self.save_data(**self.KEPT, answered=["i1", "i2"], daemonStrikes={"i1|todo": 2, "i1|plan": 1, "i2|todo": 1})
         self.session("state-s1.json", [{"item": "i1", "column": "todo"}, {"item": "i2", "column": "todo"}])
 
     def tearDown(self):
@@ -850,7 +869,7 @@ class TestUnstick(Base):
         before, calls = self.data(), len(self.read_db().get("calls", []))
         res = self.cgp("unstick", "i1", "--dry-run")
         self.assertEqual((res["dryRun"], res["cancelAutoMerge"], res["waitingOn"]), (True, "acme/app#5", True))
-        self.assertEqual(res["data"], {"answered": ["i1"], "tainted": ["i1"], "daemonStrikes": ["i1|todo", "i1|plan"]})
+        self.assertEqual(res["data"], {"answered": ["i1"], "daemonStrikes": ["i1|todo", "i1|plan"]})
         self.assertEqual((self.data(), self.rows(), len(self.read_db().get("calls", []))), (before, ["i1", "i2"], calls))
         self.assertEqual(len(self.cgp("list")["waitingOnYou"]), 1)
 
@@ -858,7 +877,7 @@ class TestUnstick(Base):
         before = self.data()
         self.cgp("unstick", "i1")
         d = self.data()
-        self.assertEqual((d["answered"], d["tainted"], d["daemonStrikes"]), (["i2"], [], {"i2|todo": 1}))
+        self.assertEqual((d["answered"], d["daemonStrikes"]), (["i2"], {"i2|todo": 1}))
         for key in self.KEPT:
             self.assertEqual(d[key], before[key], key)  # column data, touches and approvals stay
         self.assertEqual(self.rows(), ["i2"])
@@ -881,9 +900,10 @@ class TestUnstick(Base):
         self.assertEqual(sorted(set(self.KEPT) - set(STORY_KEPT)), [])
 
     def worker(self):
-        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        code = "import signal,sys\nprint('ready', flush=True)\nsys.stdin.readline()"
+        p = subprocess.Popen([sys.executable, "-c", code], start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.procs.append(p)
-        time.sleep(0.5)
+        self.assertEqual(p.stdout.readline().strip(), "ready")
         self.session("state-s1.json", [{"item": "i1", "column": "todo", "pid": p.pid, "pgid": p.pid, "start": lstart(p.pid)}])
         return p
 
