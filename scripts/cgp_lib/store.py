@@ -195,20 +195,33 @@ def update_data(fn):
         save_json(data_path(), d)
 
 
+def same_board(meta, owner, number):
+    """Whether a config's board meta is the board with this owner (case-insensitive) and number."""
+    return meta["number"] == number and meta["owner"].lower() == owner.lower()
+
+
 def lock_file(key):
     return os.path.join(LOCKS, f"{safe(key)}.json")
 
 
+def lock_alive(lk):
+    return bool(lk) and time.time() - lk.get("at", 0) < LOCK_STALE_SECONDS
+
+
+def lock_mine(key):
+    """The lock of a board if this session holds it, else None."""
+    lk = load_json(lock_file(key), None)
+    return lk if lk and lk.get("session") == sid() else None
+
+
 def lock_holder(key):
     lk = load_json(lock_file(key), None)
-    if lk and lk.get("session") != sid() and time.time() - lk.get("at", 0) < LOCK_STALE_SECONDS:
-        return lk
-    return None
+    return lk if lk and lk.get("session") != sid() and lock_alive(lk) else None
 
 
 def touch_lock(key):
-    lk = load_json(lock_file(key), None)
-    if lk and lk.get("session") == sid():
+    lk = lock_mine(key)
+    if lk:
         lk["at"] = time.time()
         save_json(lock_file(key), lk)
 

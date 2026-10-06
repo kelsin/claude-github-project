@@ -4,9 +4,9 @@ import os
 import re
 import sys
 import time
-from .consts import DEFAULT_PHASE, HOME, LOCKS, LOCK_STALE_SECONDS, PHASES
+from .consts import DEFAULT_PHASE, HOME, LOCKS, PHASES
 from .util import die, now_iso, out, safe, strip_id
-from .store import board_for_cwd, cfg, env_board, ensure_home, list_boards, load_board, load_json, lock_file, lock_holder, locked, save_json, sid, state_path, stop_path, update_state
+from .store import board_for_cwd, cfg, env_board, ensure_home, list_boards, load_board, load_json, lock_alive, lock_file, lock_holder, lock_mine, locked, same_board, save_json, sid, state_path, stop_path, update_state
 from .board import get_item, parse_board_url
 
 
@@ -21,7 +21,7 @@ def cmd_use(a):
     if a.url:
         kind, owner, number = parse_board_url(a.url)
         key = next((k for k, b in boards.items()
-                    if b["board"]["number"] == number and b["board"]["owner"].lower() == owner.lower()), None)
+                    if same_board(b["board"], owner, number)), None)
         if not key:
             die(f"that board is not set up yet; run /cgp:setup {a.url} first")
     elif env_board() in boards:  # $CGP_BOARD (the daemon's) decides
@@ -62,7 +62,7 @@ def cmd_session_title(a):
         boards = [load_board(k)["board"] for k in list_boards()]
         if m.group(2).startswith("http"):
             _, owner, number = parse_board_url(m.group(2))
-            found = next((b for b in boards if b["number"] == number and b["owner"].lower() == owner.lower()), None)
+            found = next((b for b in boards if same_board(b, owner, number)), None)
             name = found["title"] if found else f"{owner} project {number}"
         else:
             key = board_for_cwd() or load_json(state_path(), {}).get("boardKey")
@@ -78,8 +78,7 @@ def cmd_release(a):
     key = load_json(state_path(), {}).get("boardKey")
     if key:
         with locked():  # read and remove together: a session that claimed the board meanwhile keeps its lock
-            lk = load_json(lock_file(key), None)
-            if lk and lk.get("session") == sid():
+            if lock_mine(key):
                 os.remove(lock_file(key))
     update_state(lambda st: st.update(boardKey=None, workers=[], counts={}, waiting=[], updatedAt=None))
     out({"released": key})
@@ -87,8 +86,7 @@ def cmd_release(a):
 
 def this_session_holds_lock():
     key = load_json(state_path(), {}).get("boardKey")
-    lk = load_json(lock_file(key), None) if key else None
-    return bool(lk and lk.get("session") == sid())
+    return bool(key and lock_mine(key))
 
 
 def stop_target(arg):
@@ -99,15 +97,14 @@ def stop_target(arg):
         boards = {k: load_board(k) for k in list_boards()}
         if arg.startswith("http"):
             _, owner, number = parse_board_url(arg)
-            keys = [k for k, b in boards.items() if b["board"]["number"] == number and b["board"]["owner"].lower() == owner.lower()]
+            keys = [k for k, b in boards.items() if same_board(b["board"], owner, number)]
         else:
             keys = [k for k in boards if k == safe(arg)]
         if not keys:
             die("unknown board; pass a board URL or key (see: cgp use)")
     else:
         keys = [f[:-5] for f in sorted(os.listdir(LOCKS))] if os.path.isdir(LOCKS) else []
-    live = [lk for lk in (load_json(lock_file(k), None) for k in keys)
-            if lk and time.time() - lk.get("at", 0) < LOCK_STALE_SECONDS]
+    live = [lk for lk in (load_json(lock_file(k), None) for k in keys) if lock_alive(lk)]
     if not live and not arg:
         return stop_path()  # nothing holds a lock: a session that never claimed a board (or none at all)
     if len(live) != 1:

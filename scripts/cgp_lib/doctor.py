@@ -7,16 +7,15 @@ import shutil
 import subprocess
 import sys
 import time
-from .consts import AUTO_FIELD, PRIORITY_FIELD, HOME, LOCK_STALE_SECONDS, LOCKS, STORY_OPTION, TEXT_FIELDS, WAITING_FIELD
-from .util import die, out, strip_id
+from .consts import AUTO_FIELD, PRIORITY_FIELD, HOME, LOCKS, STORY_OPTION, TEXT_FIELDS, WAITING_FIELD
+from .util import die, out, printable, strip_id
 from .gh import gh, gql
-from .store import list_boards, load_board, load_json, locked, save_board
+from .store import list_boards, load_board, load_json, lock_alive, locked, same_board, save_board
 from .board import fetch_items, migrate_poll_default, fetch_project, fields_by_name, parse_board_url, parse_item
 from .gitutil import git
 from .gitwt import is_dirty
 from .notify import command_problem
 from .daemon import FLAGS as DAEMON_FLAGS
-from .util import printable
 
 # Permission rules docs/safety.md recommends for sessions that run the loop; doctor only reports whether they are present.
 RECOMMENDED_DENY = ("Bash(gh pr merge:*)", "Bash(gh auth token:*)", "Bash(gh api graphql:*)")
@@ -25,7 +24,7 @@ RECOMMENDED_DENY = ("Bash(gh pr merge:*)", "Bash(gh auth token:*)", "Bash(gh api
 def live_sessions():
     """Session ids that hold a board's lock and are still alive."""
     held = (load_json(f, None) for f in glob.glob(os.path.join(LOCKS, "*.json")))
-    return {strip_id(lk["session"]) for lk in held if lk and time.time() - lk.get("at", 0) < LOCK_STALE_SECONDS}
+    return {strip_id(lk["session"]) for lk in held if lock_alive(lk)}
 
 
 def session_files(days):
@@ -86,7 +85,7 @@ def cmd_gc(a):
 
 def list_stale_locks():
     return [f for f in glob.glob(os.path.join(LOCKS, "*.json"))
-            if time.time() - (load_json(f, {}) or {}).get("at", 0) >= LOCK_STALE_SECONDS]
+            if not lock_alive(load_json(f, None))]
 
 
 def settings_denies():
@@ -125,7 +124,7 @@ def cmd_doctor(a):
     boards = [load_board(k) for k in keys]
     if a.board:
         _, owner, number = parse_board_url(a.board)
-        boards = [c for c in boards if c["board"]["number"] == number and c["board"]["owner"].lower() == owner.lower()]
+        boards = [c for c in boards if same_board(c["board"], owner, number)]
         if not boards:
             die("that board is not set up yet")
     seen = {}
