@@ -15,7 +15,6 @@ from .board import fetch_items, migrate_poll_default, fetch_project, fields_by_n
 from .gitutil import git
 from .gitwt import is_dirty
 from .notify import command_problem
-from .daemon import FLAGS as DAEMON_FLAGS
 
 # Permission rules docs/safety.md recommends for sessions that run the loop; doctor only reports whether they are present.
 RECOMMENDED_DENY = ("Bash(gh pr merge:*)", "Bash(gh auth token:*)", "Bash(gh api graphql:*)")
@@ -199,14 +198,6 @@ def cmd_doctor(a):
             if ok:
                 head = git(path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False)
                 check(f"{title}: default branch of {repo}", bool(head), head or "run: git remote set-head origin --auto", warn=True)
-    try:
-        claude = subprocess.run(["claude", "--help"], capture_output=True, text=True, timeout=10).stdout if shutil.which("claude") else None
-    except (subprocess.TimeoutExpired, OSError):
-        claude = None
-    unknown = [f for f in DAEMON_FLAGS if f not in (claude or "")]
-    check("claude for cgp daemon", claude is not None and not unknown,
-          "cgp daemon needs the claude CLI on PATH" if claude is None else f"this claude does not list {', '.join(unknown)}: update it before running cgp daemon",
-          warn=True)
     bad = quarantined_data()
     check("no corrupt data files", not bad, "set aside (delete them once looked at): " + "; ".join(bad), warn=True)
     orphans = orphan_worker_rows(live_sessions())

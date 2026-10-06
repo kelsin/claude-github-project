@@ -11,7 +11,7 @@ from .util import die
 
 class RateLimited(SystemExit):
     """GitHub's rate limit. A SystemExit like die() raises (code 1), so every caller that survives a failed gh call survives this
-    too; the daemon alone looks for it, to wait longer."""
+    too."""
 
 
 TRANSIENT = re.compile(r"HTTP 5\d\d|time(d )?out|\bEOF\b|connection (reset|refused|closed)|no such host|TLS handshake|temporary failure", re.I)

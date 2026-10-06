@@ -1096,38 +1096,6 @@ class TestSessions(Base):
         p.wait()
         return p.pid
 
-    def test_a_fresh_lock_of_a_dead_daemon_is_claimed_at_once(self):
-        url = "https://github.com/orgs/acme/projects/1"
-        self.cgp("use", url, env=self.a)
-        self.lock_for(f"daemon-{self.dead_pid()}")
-        self.cgp("use", url, env={"CGP_SESSION": "c"})
-
-    def test_a_fresh_lock_of_a_live_daemon_still_exits_5(self):
-        url = "https://github.com/orgs/acme/projects/1"
-        self.cgp("use", url, env=self.a)
-        self.lock_for(f"daemon-{os.getpid()}")
-        self.assertEqual(self.cgp("use", url, ok=False, env={"CGP_SESSION": "c"}).returncode, 5)
-
-    def test_lock_alive_counts_a_permission_error_as_alive_and_only_parses_daemon_pids(self):
-        m = load_cgp().mods["store"]
-        now = time.time()
-        with mock.patch("os.kill", side_effect=PermissionError):
-            self.assertTrue(m.lock_alive({"session": "daemon-4242", "at": now}))
-        with mock.patch("os.kill", side_effect=ProcessLookupError):
-            self.assertFalse(m.lock_alive({"session": "daemon-4242", "at": now}))
-            for odd in ("daemon-4242x", "daemon-", "Daemon-4242", "daemon-1", "mydaemon-4242", "a"):  # not a daemon id, or pid 1
-                self.assertEqual(m.lock_alive({"session": odd, "at": now}), odd != "daemon-1", odd)
-
-    def test_gc_cleans_a_dead_daemons_state_file(self):
-        home = self.env["CGP_HOME"]
-        sid = f"daemon-{self.dead_pid()}"
-        self.cgp("use", "https://github.com/orgs/acme/projects/1", env=self.a)
-        self.lock_for(sid)
-        state = os.path.join(home, f"state-{sid}.json")
-        with open(state, "w") as f:
-            json.dump({"workers": []}, f)
-        self.assertIn(state, self.cgp("gc", "--days", "0", "--dry-run")["removedFiles"])
-
     def test_blocks_and_touches_survive_a_new_session_on_the_same_board(self):
         url = "https://github.com/orgs/acme/projects/1"
         self.cgp("use", url, env=self.a)
