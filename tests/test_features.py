@@ -2,10 +2,7 @@
 import importlib
 import json
 import os
-import pty
 import shutil
-import subprocess
-import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -355,8 +352,7 @@ class TestNativeDependencies(Base):
 
     def test_the_prompts_tell_workers_a_github_block_is_not_theirs_to_clear(self):
         for name in ("shared.md", "plan_approved.md"):
-            with open(os.path.join(test_cgp.ROOT, "skills", "run", "columns", name)) as f:
-                text = f.read()
+            text = test_cgp.read_text("skills", "run", "columns", name)
             self.assertIn("GitHub", text)
             self.assertIn("`waiting:`", text)
 
@@ -416,28 +412,6 @@ class PolicyBase(test_cgp.PRBase):
     def setUp(self):
         super().setUp()
         self.setting(autoApprove="plan:low,pr:low")
-
-    def setting(self, **kw):
-        boards = os.path.join(self.env["CGP_HOME"], "boards")
-        path = os.path.join(boards, next(n for n in os.listdir(boards) if not n.endswith((".data.json", ".history.json"))))
-        with open(path) as f:
-            board = json.load(f)
-        board["settings"].update(kw)
-        with open(path, "w") as f:
-            json.dump(board, f)
-
-    def data(self):
-        boards = os.path.join(self.env["CGP_HOME"], "boards")
-        with open(os.path.join(boards, next(n for n in os.listdir(boards) if n.endswith(".data.json")))) as f:
-            return json.load(f)
-
-    def set_data(self, **kw):
-        boards = os.path.join(self.env["CGP_HOME"], "boards")
-        path = os.path.join(boards, next(n for n in os.listdir(boards) if n.endswith(".data.json")))
-        d = self.data()
-        d.update(kw)
-        with open(path, "w") as f:
-            json.dump(d, f)
 
     def comments(self):
         return [c["body"] for c in self.read_db()["comments"].get("acme/app#1", [])]
@@ -645,19 +619,6 @@ class TestPRPolicy(PolicyBase):
 
 
 class TestPolicySettings(PolicyBase):
-    def tty(self, *args, env=None):
-        """`cgp` with a terminal as stdin, outside any Claude session."""
-        e = {**self.env, **(env or {})}
-        for k in ("CGP_SESSION", "CLAUDECODE"):
-            e.pop(k, None)
-        e.update(env or {})
-        master, slave = pty.openpty()
-        try:
-            return subprocess.run([sys.executable, test_cgp.CGP, *args], stdin=slave, capture_output=True, text=True, cwd=self.tmp, env=e)
-        finally:
-            os.close(slave)
-            os.close(master)
-
     def test_a_person_at_a_terminal_can_set_the_policy_and_it_is_normalised(self):
         p = self.tty("config", "autoApprove", "pr:medium, plan:low")
         self.assertEqual(p.returncode, 0, p.stderr)
@@ -713,8 +674,7 @@ class TestPolicySettings(PolicyBase):
 
     def test_the_column_prompts_tell_workers_to_rate_and_fall_back(self):
         for name in ("plan.md", "implement.md"):
-            with open(os.path.join(test_cgp.ROOT, "skills", "run", "columns", name)) as f:
-                text = f.read()
+            text = test_cgp.read_text("skills", "run", "columns", name)
             self.assertIn("`CGP rate <item>", text)
             self.assertIn("policy", text)
 
@@ -912,42 +872,32 @@ class TestSubStories(PolicyBase):
         self.assertNotIn("issue_closes", self.read_db())
 
     def test_the_prompts_split_and_stop(self):
-        read = TestMandatorySubagents.read
-        approved = read(self, "plan_approved.md")
+        approved = test_cgp.read_text("skills", "run", "columns", "plan_approved.md")
         self.assertIn("CGP split <item>", approved)
         self.assertIn("stop WITHOUT moving", approved.split("CGP split <item>")[1].split("\n")[0])
-        self.assertIn("CGP split <item> --declare", read(self, "plan.md"))
-        self.assertIn("Sub-stories", read(self, "plan_artifact.md"))
+        self.assertIn("CGP split <item> --declare", test_cgp.read_text("skills", "run", "columns", "plan.md"))
+        self.assertIn("Sub-stories", test_cgp.read_text("skills", "run", "columns", "plan_artifact.md"))
         self.assertIn("shorter than", approved)
 
 
 class TestMandatorySubagents(unittest.TestCase):
-    def read(self, name):
-        with open(os.path.join(test_cgp.ROOT, "skills", "run", "columns", name)) as f:
-            return f.read()
-
     def test_shared_rules_require_sub_agents(self):
-        s = self.read("shared.md")
+        s = test_cgp.read_text("skills", "run", "columns", "shared.md")
         self.assertIn("at least one", s)
         self.assertNotIn("do the same passes yourself", s)
         self.assertNotIn("ran inline", s)
-        with open(os.path.join(test_cgp.ROOT, "skills", "run", "SKILL.md")) as f:
-            self.assertIn("Agent tool", f.read())
+        self.assertIn("Agent tool", test_cgp.read_text("skills", "run", "SKILL.md"))
 
     def test_column_files_spawn_at_least_one(self):
         for name in ("implement.md", "plan.md"):
-            self.assertIn("at least one", self.read(name))
+            self.assertIn("at least one", test_cgp.read_text("skills", "run", "columns", name))
 
 
 class TestConventionalPRTitles(unittest.TestCase):
-    def read(self, name):
-        with open(os.path.join(test_cgp.ROOT, "skills", "run", "columns", name)) as f:
-            return f.read()
-
     def test_shared_requires_conventional_titles(self):
-        s = self.read("shared.md")
+        s = test_cgp.read_text("skills", "run", "columns", "shared.md")
         for phrase in ("conventional", "type(scope)", "never the raw story title", "gh pr edit"):
             self.assertIn(phrase, s)
 
     def test_implement_mentions_conventional_title(self):
-        self.assertIn("conventional", self.read("implement.md"))
+        self.assertIn("conventional", test_cgp.read_text("skills", "run", "columns", "implement.md"))

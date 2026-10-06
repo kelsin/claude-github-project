@@ -185,7 +185,6 @@ class TestSyncRecords(test_cgp.SyncBase):
 
 
 def subprocess_out(path, *args):
-    import subprocess
     return subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, check=True).stdout.strip()
 
 
@@ -312,15 +311,6 @@ def boards_dir(env):
 
 
 class TestMergeGates(PRBase):
-    def data(self):
-        with open(os.path.join(boards_dir(self.env), "P1.data.json")) as f:
-            return json.load(f)
-
-    def save_data(self, **kw):
-        merged = {**self.data(), **kw}
-        with open(os.path.join(boards_dir(self.env), "P1.data.json"), "w") as f:
-            json.dump(merged, f)
-
     def option(self, column):
         with open(os.path.join(boards_dir(self.env), "P1.json")) as f:
             return json.load(f)["fields"]["status"]["options"][column]
