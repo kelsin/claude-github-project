@@ -273,6 +273,12 @@ class TestNotStartingMarker(Base):
         for i in items:
             self.force(i, "plan_approved")
 
+    def columns(self, **cols):
+        """Put each story in its column (i1="implement", ...); the stories not named go to Plan Review, out of the way."""
+        self.setup_board()
+        for i in ("i1", "i2", "i3", "i4"):
+            self.force(i, cols.get(i, "plan_review"))
+
     def test_default_poll_is_15_seconds(self):
         self.setup_board()
         self.assertEqual(self.cgp("config")["pollSeconds"], 15)
@@ -283,7 +289,7 @@ class TestNotStartingMarker(Base):
         snap = self.cgp("list")
         self.assertEqual([i["item"] for i in snap["batch"]], ["i1"])
         self.assertEqual([self.waiting_on(i) for i in ("i1", "i2", "i3")], [None, "Another story", "Another story"])
-        self.assertEqual([q["title"] for q in snap["queued"]], ["two", "three"])
+        self.assertEqual([q["title"] for q in snap["queued"]], ["two", "three", "draft"])
         self.assertIn("queued", snap["queued"][0]["reason"])
         self.force("i1", "done")
         snap = self.cgp("list")
@@ -333,7 +339,7 @@ class TestNotStartingMarker(Base):
         self.assertEqual([self.waiting_on(i) for i in ("i1", "i2", "i3")], [None, "Another story", None])
 
     def test_cap_with_partly_free_slots_dispatches_one_and_marks_the_rest(self):
-        self.approved("i1", "i2", "i3")
+        self.columns(i1="plan_approved", i2="plan_approved", i3="plan_approved")
         self.cgp("config", "concurrency", "2")
         self.cgp("worker", "start", "i1", "plan_approved")
         snap = self.cgp("list")
@@ -341,12 +347,55 @@ class TestNotStartingMarker(Base):
         self.assertEqual([self.waiting_on(i) for i in ("i1", "i2", "i3")], [None, None, "Another story"])
         self.assertEqual([q["title"] for q in snap["queued"]], ["three"])
 
-    def test_a_planning_column_story_past_the_cap_is_not_marked(self):
-        self.approved("i1", "i2")
-        self.force("i3", "plan")
+    def test_a_planning_column_story_past_the_cap_is_marked_with_a_reason(self):
+        self.columns(i1="plan_approved", i2="plan_approved", i3="plan")
         self.cgp("config", "concurrency", "1")
-        self.cgp("list")
-        self.assertIsNone(self.waiting_on("i3"))
+        snap = self.cgp("list")
+        self.assertEqual([i["item"] for i in snap["batch"]], ["i1"])  # a cap of 1 reserves nothing: column order
+        self.assertEqual(self.waiting_on("i3"), "Another story")
+        self.assertEqual([q["title"] for q in snap["queued"]], ["two", "three"])
+        self.assertIn("worker slots are busy", snap["queued"][1]["reason"])
+
+    def test_a_slot_is_reserved_for_a_planning_story(self):
+        self.columns(i1="implement", i2="implement", i3="plan")
+        self.cgp("config", "concurrency", "2")
+        self.cgp("worker", "start", "i1", "implement")
+        snap = self.cgp("list")
+        self.assertEqual([i["item"] for i in snap["batch"]], ["i3"])
+        self.assertEqual([self.waiting_on(i) for i in ("i2", "i3")], ["Another story", None])
+
+    def test_an_overlap_deferred_story_does_not_use_the_reserved_slot(self):
+        self.columns(i1="plan_approved", i2="plan_approved", i3="todo", i4="implement")
+        self.cgp("config", "concurrency", "3")
+        self.cgp("touches", "i1", "src/a.py")
+        self.cgp("touches", "i2", "src/a.py")
+        snap = self.cgp("list")
+        self.assertEqual(sorted(i["item"] for i in snap["batch"]), ["i1", "i3", "i4"])
+        self.assertEqual([d["title"] for d in snap["deferred"]], ["two"])
+
+    def test_a_skip_plan_todo_story_does_not_reserve_a_slot(self):
+        self.columns(i1="plan_approved", i2="implement", i3="todo")
+        self.cgp("set", "i3", "plan", "Skip")
+        self.cgp("config", "concurrency", "2")
+        self.assertEqual(sorted(i["item"] for i in self.cgp("list")["batch"]), ["i1", "i2"])
+
+    def test_planning_stories_and_a_later_story_all_fit_under_the_cap(self):
+        self.columns(i1="implement", i2="plan", i3="plan")
+        self.cgp("config", "concurrency", "3")
+        self.assertEqual(sorted(i["item"] for i in self.cgp("list")["batch"]), ["i1", "i2", "i3"])
+
+    def test_without_a_planning_story_all_slots_go_to_later_columns(self):
+        self.columns(i1="plan_approved", i2="implement")
+        self.cgp("config", "concurrency", "2")
+        self.assertEqual([i["item"] for i in self.cgp("list")["batch"]], ["i1", "i2"])
+
+    def test_a_running_planning_worker_reserves_nothing_more(self):
+        self.columns(i1="plan_approved", i2="plan_approved", i3="plan", i4="todo")
+        self.cgp("config", "concurrency", "2")
+        self.cgp("worker", "start", "i3", "plan")
+        snap = self.cgp("list")
+        self.assertEqual([i["item"] for i in snap["batch"]], ["i1"])  # column order: i4 (Todo) waits behind the approved stories
+        self.assertEqual(self.waiting_on("i4"), "Another story")
 
     def test_stale_marker_on_an_in_flight_story_is_cleared(self):
         self.approved("i1", "i2")
@@ -388,9 +437,19 @@ class TestNotStartingMarker(Base):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("two queued", p.stdout)
         res = self.cgp("status", "--json")
-        self.assertEqual(sorted(res["notStarting"]), ["three", "two"])
+        self.assertEqual(sorted(res["notStarting"]), ["draft", "three", "two"])
         self.cgp("release")  # the loop is gone: the persisted reasons are stale
         self.assertEqual(self.cgp("status", "--json")["notStarting"], {})
+
+    def test_status_flags_you_for_todo_and_plan_stories(self):
+        self.columns(i1="todo", i2="plan")
+        d = self.read_db()
+        opts = next(f for f in d["fields"] if f["name"] == "Waiting On")["options"]
+        for i in d["items"]:
+            if i["id"] in ("i1", "i2"):
+                i["values"]["Waiting On"] = {"optionId": next(o["id"] for o in opts if o["name"] == "You")}
+        self.write_db(d)
+        self.assertEqual(sorted(self.cgp("status", "--json")["waitingOnYouNothingAsked"]), ["one", "two"])
 
     def test_status_flags_you_without_a_question(self):
         self.approved("i1")

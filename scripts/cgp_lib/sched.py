@@ -242,13 +242,28 @@ def snapshot(c):
     actionable.sort(key=lambda i: (ACTIONABLE.index(i["column"]), i["priorityRank"], -i["unlocks"]))  # stable: board order breaks remaining ties
     cap = c["settings"]["concurrency"]
     free = max(cap - len(in_flight), 0)
-    actionable, deferred = pick_compatible(c, actionable, live, in_flight, free if cap > 0 else None)
-    waiting = [i for i in live if i["waiting"]]
+    # Todo and Plan stories would starve behind the later columns, which are re-dispatched every cycle: while one is actionable and no
+    # planning worker runs, later-column stories (in flight and new) may use at most cap-1 slots. A cap of 1 reserves nothing.
+    planning = [i for i in actionable if i["column"] == "plan" or (i["column"] == "todo" and not i["skipPlan"])]
+    planning_busy = any(i["item"] in in_flight and i["column"] in ("plan", "todo") for i in live)
     stop = stop_requested()
-    batch = [] if stop else actionable[:free] if cap > 0 else actionable  # a stop request dispatches nothing new
-    # why an approved story is not starting: it overlaps a rival, or it waits for a free worker slot (a stop makes the batch empty
-    # on purpose, so it queues nothing)
-    queued = [i for i in actionable[free:] if starting(i)] if cap > 0 and not stop else []  # (stop: see held_back below)
+    if cap > 1 and planning and not planning_busy:
+        later = [i for i in actionable if i not in planning]
+        later_slots = max(free - 1, 0)
+        later, deferred = pick_compatible(c, later, live, in_flight, later_slots)
+        later = later[:later_slots]
+        picked = later + planning[:free - len(later)]
+        actionable = [i for i in actionable if i not in deferred]
+        batch = [i for i in actionable if i in picked]
+    else:
+        actionable, deferred = pick_compatible(c, actionable, live, in_flight, free if cap > 0 else None)
+        batch = actionable[:free] if cap > 0 else actionable
+    waiting = [i for i in live if i["waiting"]]
+    if stop:
+        batch = []  # a stop request dispatches nothing new
+    # why a story is not starting: it overlaps a rival, or it waits for a free worker slot (a stop makes the batch empty on purpose,
+    # so it queues nothing)
+    queued = [i for i in actionable if i not in batch] if cap > 0 and not stop else []  # (stop: see held_back below)
     reasons = {i["item"]: "waits for " + ", ".join(i["blockedBy"]) for i in blocked}
     reasons.update({i["item"]: "overlaps with " + ", ".join(i["conflictsWith"]) for i in deferred if starting(i)})
     reasons.update({i["item"]: f"queued: all {cap} worker slots are busy" for i in queued})
@@ -342,7 +357,7 @@ def cmd_status(a):
     data = load_data()
     asked = data.get("asked", {})
     why = {i["title"]: data.get("reasons", {})[i["item"]] for i in live if lock and i["item"] in data.get("reasons", {})}  # stale once the loop is gone
-    stale = [i["title"] for i in live if i["column"] in ("plan_approved", "implement") and i["waitingOn"] == "You" and i["item"] not in asked]
+    stale = [i["title"] for i in live if i["waitingOn"] == "You" and i["item"] not in asked]
     res = {"board": c["board"], "counts": {k: len(v) for k, v in by_col.items()}, "done": done,
            "waitingOnYou": [{"title": i["title"], "url": i["url"]} for i in live if i["waiting"]],
            "blocked": [b for b in blocked if b["blockedBy"]], "githubBlockedBy": github, "workers": workers,
