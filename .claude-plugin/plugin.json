@@ -1,6 +1,6 @@
 {
   "name": "cgp",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Run GitHub Project board stories through plan, review, implement and merge with parallel agents",
   "author": {
     "name": "kelsin"

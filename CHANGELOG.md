@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.2](https://github.com/kelsin/claude-github-project/compare/v0.4.1...v0.4.2) (2026-10-06)
+
+
+### :bug: Bug Fixes
+
+* show why an approved story is not starting and poll faster ([#51](https://github.com/kelsin/claude-github-project/issues/51)) ([b90040a](https://github.com/kelsin/claude-github-project/commit/b90040a12bc259cd35df7fad5af4e941cba19a54))
+* stop the plan artifact watch after publishing ([#52](https://github.com/kelsin/claude-github-project/issues/52)) ([072897a](https://github.com/kelsin/claude-github-project/commit/072897ad1d34ce68d4eb49b742b8f5dd9966d951))
+
 ## [0.4.1](https://github.com/kelsin/claude-github-project/compare/v0.4.0...v0.4.1) (2026-10-05)
 
 
