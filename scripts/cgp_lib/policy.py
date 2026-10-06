@@ -16,7 +16,7 @@ from .repoconf import merged_globs
 
 LEVELS = ("never",) + RATINGS  # the highest rating a gate may be approved at
 GATE_KEYS = {"plan_approved": "plan", "pr_approved": "pr"}
-HUMAN_ONLY = ("autoApprove", "daemon")  # setting names (prefixes) only a person at a terminal may change
+HUMAN_ONLY = ("autoApprove",)  # setting names (prefixes) only a person at a terminal may change
 MAX_FILES = 3000  # GitHub lists at most this many files of a pull request: a list that long may be cut off
 # Never auto-approved, whatever the settings say: instructions to agents, the plugin's own prompts, docs build and deploy config.
 ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKILL.md", "skills/**", "**/columns/*.md",

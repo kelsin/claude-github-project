@@ -15,7 +15,7 @@ STRIKES = 3  # failed or fruitless runs of one story in one column before the us
 STORY_STATE = {"answered": "list", "daemonStrikes": "pipe"}
 STORY_KEPT = ("asked", "cursors", "pending", "blocks", "epicOrder", "touches", "approvedTouches", "splits", "approvedSplits", "children",
               "parents", "epicAsked", "policyPlans", "policy", "ratings", "reviewed", "cleanRebase", "notified", "deferred", "reasons",
-              "daemonSpend", "tainted")  # tainted: a review safety gate (a conflicting rebase), not for unstick to lift
+              "tainted")  # tainted: a review safety gate (a conflicting rebase), not for unstick to lift
 MARK = "<!-- cgp -->"
 QMARK = "<!-- cgp:question -->"
 # key, name, emoji, color. plan_review and pr_review are the user's columns (the gates in cmd_move and cmd_merge are built on them).
@@ -65,10 +65,6 @@ STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a b
 # nativeDependencies 1: GitHub's own "blocked by" issue dependencies also hold a story back (0 = cgp's own blocks only)
 # autoApprove: plan:low,pr:never style, the highest risk rating at which the agent may pass that human gate itself (default never); only a person
 # at a terminal may change it. autoApproveFiles: segment globs (`*` stays in one path segment, `**` spans segments) every changed file must match
-# daemon*: `cgp daemon` (experimental, see docs/daemon.md); only a person at a terminal may change them. daemonMaxTurns / daemonMaxBudgetUsd cap one
-# worker run; daemonStoryBudgetUsd / daemonTotalBudgetUsd cap what one story / one daemon run may spend (0 = no cap); daemonAllowedTools adds
-# Claude Code permission rules to the built-in allowlist (the built-in denylist cannot be removed); daemonConcurrency 0 = the `concurrency`
-# setting, or 2 when that is 0 too
 # guardFiles: fnmatch globs (tried on the path and on its file name, ignoring case) for files an agent may only change when the approved plan lists them;
 # these built-in ones always apply, the setting can only add to them
 OLD_POLL_SECONDS = 30  # the default before this change: setup stored it in every board config, so a stored 30 means "never changed"
@@ -76,16 +72,13 @@ POLL_SECONDS = 15
 DEFAULTS = {"concurrency": 0, "pollSeconds": POLL_SECONDS, "remoteControl": 1, "notifyCommand": "", "previewProvider": "netlify", "draftPRs": 0,
             "plannerModel": "", "reviewerModel": "", "implementerModel": "", "maxWorkerMinutes": 240, "nativeDependencies": 1,
             "autoApprove": "plan:never,pr:never", "autoApproveFiles": ["docs/**/*.md", "*.md"],
-            "daemonMaxTurns": 150, "daemonMaxBudgetUsd": 5.0, "daemonStoryBudgetUsd": 20.0, "daemonTotalBudgetUsd": 100.0,
-            "daemonAllowedTools": [], "daemonConcurrency": 0,
             "guardFiles": [".github/*", "CODEOWNERS", "*/CODEOWNERS", ".husky/*", ".pre-commit-config.yaml", ".npmrc", ".yarnrc*",
                            "Makefile", "GNUmakefile", "Dockerfile*", ".gitmodules", ".claude/*", ".mcp.json", ".cgp.json", ".envrc",
                            ".gitlab-ci.yml", "Jenkinsfile", "lefthook.yml", ".githooks/*"],
             "sharedFiles": ["*package-lock.json", "*yarn.lock", "*pnpm-lock.yaml", "*.schema.json", "*locales/*",
                             "*__snapshots__/*", "*.md"]}
 BOOL_SETTINGS = ("nativeDependencies",)  # on / off on the command line, stored as 1 / 0
-FLOAT_SETTINGS = ("daemonMaxBudgetUsd", "daemonStoryBudgetUsd", "daemonTotalBudgetUsd")  # dollars
-LIST_SETTINGS = ("sharedFiles", "guardFiles", "autoApproveFiles", "daemonAllowedTools")
+LIST_SETTINGS = ("sharedFiles", "guardFiles", "autoApproveFiles")
 STRING_SETTINGS = ("notifyCommand", "previewProvider", "plannerModel", "reviewerModel", "implementerModel")
 PR_URL = re.compile(r"^https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pull/(\d+)/?$")
 # name, layout, visible fields, filter. The same three tabs as the 18xx-maker board. The API can set a view's name, layout,

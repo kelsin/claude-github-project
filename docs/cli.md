@@ -45,7 +45,6 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `models` | `rating` | The model for each sub-agent role at a risk rating (null: the session's model) |
 | `rate` | `item` `rating` | Record your risk rating of a story (the auto-approval policy reads it) |
 | `repo-config` | `target` | The .cgp.json of a repo's default branch (test and lint commands, shared and guarded files, ...) |
-| `daemon` | `--once` `--dry-run` `--verbose` | Experimental: run the loop headless, one `claude -p` worker per story (see docs/daemon.md) |
 | `unstick` | `item` `--dry-run` `--kill` | Clear one story's operational state (worker, strikes, answered, Waiting On); you only, not agents |
 | `doctor` | `--board` `--deep` | Check the installation: gh, token scopes, board, clones, stale files |
 | `gc` | `--days` `--dry-run` | Delete state of dead sessions and worktrees of finished stories |

@@ -4,7 +4,7 @@ import fcntl, json, os, re, sys
 
 DB = os.environ["FAKE_GH_DB"]
 _lock = open(DB + ".lock", "w")
-fcntl.flock(_lock, fcntl.LOCK_EX)  # one call at a time: the daemon polls while its worker writes, and a call is read-modify-write
+fcntl.flock(_lock, fcntl.LOCK_EX)  # one call at a time: parallel callers may race, and a call is read-modify-write
 db = json.load(open(DB))
 args = sys.argv[1:]
 with open(DB + ".invocations", "a") as _f:  # one line per call, so a test can see that a process has started polling
