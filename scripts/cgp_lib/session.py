@@ -46,9 +46,8 @@ def cmd_use(a):
     if os.path.exists(stop_path()):
         os.remove(stop_path())  # a stop request left from an earlier run
     c = boards[key]
-    res = {"board": c["board"], "session": sid(), "remoteControl": bool(c["settings"].get("remoteControl", 1)),
-           "sessionTitle": session_title("run", c["board"]["title"])}
-    out(res)
+    out({"board": c["board"], "session": sid(), "remoteControl": bool(c["settings"].get("remoteControl", 1)),
+         "sessionTitle": session_title("run", c["board"]["title"])})
 
 
 def cmd_session_title(a):
