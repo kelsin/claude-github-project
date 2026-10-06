@@ -2,7 +2,6 @@
 import fcntl
 import json
 import os
-import re
 import shutil
 import sys
 import time
