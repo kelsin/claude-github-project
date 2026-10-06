@@ -212,6 +212,164 @@ class TestListAndMove(Base):
         self.assertEqual(it["plan"], "https://claude.ai/artifact/x")
 
 
+class TestNotStartingMarker(Base):
+    """Waiting On says why an approved story is not starting (queued, overlap-deferred, blocked), and clears when it starts."""
+
+    def waiting_on(self, i):
+        v = next(x for x in self.read_db()["items"] if x["id"] == i)["values"].get("Waiting On")
+        if not v:
+            return None
+        return next(o["name"] for f in self.read_db()["fields"] if f["name"] == "Waiting On" for o in f["options"] if o["id"] == v["optionId"])
+
+    def mutations(self):
+        return self.read_db().get("mutations", [])
+
+    def approved(self, *items):
+        self.setup_board()
+        for i in items:
+            self.force(i, "plan_approved")
+
+    def test_default_poll_is_15_seconds(self):
+        self.setup_board()
+        self.assertEqual(self.cgp("config")["pollSeconds"], 15)
+
+    def test_queued_stories_are_marked_and_cleared_when_they_dispatch(self):
+        self.approved("i1", "i2", "i3")
+        self.cgp("config", "concurrency", "1")
+        snap = self.cgp("list")
+        self.assertEqual([i["item"] for i in snap["batch"]], ["i1"])
+        self.assertEqual([self.waiting_on(i) for i in ("i1", "i2", "i3")], [None, "Another story", "Another story"])
+        self.assertEqual([q["title"] for q in snap["queued"]], ["two", "three"])
+        self.assertIn("queued", snap["queued"][0]["reason"])
+        self.force("i1", "done")
+        snap = self.cgp("list")
+        self.assertEqual([i["item"] for i in snap["batch"]], ["i2"])
+        self.assertEqual([self.waiting_on(i) for i in ("i2", "i3")], [None, "Another story"])
+
+    def test_second_snapshot_writes_nothing(self):
+        self.approved("i1", "i2", "i3")
+        self.cgp("config", "concurrency", "1")
+        self.cgp("list")
+        before = len(self.mutations())
+        self.cgp("list")
+        self.assertEqual(len(self.mutations()), before)
+
+    def test_deferred_story_is_marked_until_its_rival_is_done(self):
+        self.approved("i1", "i2")
+        self.cgp("touches", "i1", "src/a.py")
+        self.cgp("touches", "i2", "src/a.py")
+        self.cgp("list")
+        self.assertEqual([self.waiting_on(i) for i in ("i1", "i2")], [None, "Another story"])
+        self.force("i1", "done")
+        self.cgp("list")
+        self.assertIsNone(self.waiting_on("i2"))
+
+    def test_waiting_on_you_is_never_overwritten(self):
+        self.approved("i1", "i2")
+        self.cgp("config", "concurrency", "1")
+        d = self.read_db()
+        you = next(f for f in d["fields"] if f["name"] == "Waiting On")["options"]
+        you = next(o["id"] for o in you if o["name"] == "You")
+        next(i for i in d["items"] if i["id"] == "i2")["values"]["Waiting On"] = {"optionId": you}
+        self.write_db(d)
+        self.cgp("list")
+        self.assertEqual(self.waiting_on("i2"), "You")
+        self.assertEqual([m for m in self.mutations() if m["item"] == "i2" and m["field"] == "Waiting On"], [])
+
+    def test_in_flight_and_held_stories_get_no_marker(self):
+        self.approved("i1", "i2", "i3")
+        self.cgp("config", "concurrency", "1")
+        self.cgp("worker", "start", "i1", "plan_approved")
+        d = self.read_db()
+        hold = next(o["id"] for f in d["fields"] if f["name"] == "Priority" for o in f["options"] if o["name"] == "Hold")
+        next(i for i in d["items"] if i["id"] == "i3")["values"]["Priority"] = {"optionId": hold}
+        self.write_db(d)
+        snap = self.cgp("list")
+        self.assertEqual(snap["held"], ["three"])
+        self.assertEqual([self.waiting_on(i) for i in ("i1", "i2", "i3")], [None, "Another story", None])
+
+    def test_cap_with_partly_free_slots_dispatches_one_and_marks_the_rest(self):
+        self.approved("i1", "i2", "i3")
+        self.cgp("config", "concurrency", "2")
+        self.cgp("worker", "start", "i1", "plan_approved")
+        snap = self.cgp("list")
+        self.assertEqual([i["item"] for i in snap["batch"]], ["i2"])
+        self.assertEqual([self.waiting_on(i) for i in ("i1", "i2", "i3")], [None, None, "Another story"])
+        self.assertEqual([q["title"] for q in snap["queued"]], ["three"])
+
+    def test_a_planning_column_story_past_the_cap_is_not_marked(self):
+        self.approved("i1", "i2")
+        self.force("i3", "plan")
+        self.cgp("config", "concurrency", "1")
+        self.cgp("list")
+        self.assertIsNone(self.waiting_on("i3"))
+
+    def test_stale_marker_on_an_in_flight_story_is_cleared(self):
+        self.approved("i1", "i2")
+        self.cgp("config", "concurrency", "1")
+        self.cgp("list")
+        self.assertEqual(self.waiting_on("i2"), "Another story")
+        self.cgp("worker", "start", "i2", "plan_approved")
+        self.cgp("list")
+        self.assertIsNone(self.waiting_on("i2"))
+
+    def test_stop_marks_nothing(self):
+        self.approved("i1", "i2", "i3")
+        for i in ("i1", "i2", "i3"):
+            self.cgp("touches", i, "src/a.py")
+        self.cgp("config", "concurrency", "1")
+        self.cgp("stop")
+        snap = self.cgp("list")
+        self.assertEqual(snap["batch"], [])
+        self.assertEqual(snap["queued"], [])
+        self.assertEqual([self.waiting_on(i) for i in ("i1", "i2", "i3")], [None, None, None])
+
+    def test_a_plan_column_story_with_a_blocker_is_written_once(self):
+        self.setup_board()
+        self.force("i1", "plan")
+        self.cgp("move", "i2", "implement")
+        self.cgp("block", "i1", "i2")
+        self.cgp("list")
+        before = len(self.mutations())
+        self.cgp("list")
+        self.cgp("list")
+        self.assertEqual(len(self.mutations()), before)
+
+    def test_status_shows_the_persisted_reason(self):
+        self.approved("i1", "i2", "i3")
+        self.cgp("config", "concurrency", "1")
+        self.cgp("list")
+        self.cgp("use")  # the loop is running
+        p = subprocess.run([sys.executable, CGP, "status"], capture_output=True, text=True, cwd=self.tmp, env=self.env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("two queued", p.stdout)
+        res = self.cgp("status", "--json")
+        self.assertEqual(sorted(res["notStarting"]), ["three", "two"])
+        self.cgp("release")  # the loop is gone: the persisted reasons are stale
+        self.assertEqual(self.cgp("status", "--json")["notStarting"], {})
+
+    def test_status_flags_you_without_a_question(self):
+        self.approved("i1")
+        d = self.read_db()
+        opts = next(f for f in d["fields"] if f["name"] == "Waiting On")["options"]
+        next(i for i in d["items"] if i["id"] == "i1")["values"]["Waiting On"] = {"optionId": next(o["id"] for o in opts if o["name"] == "You")}
+        self.write_db(d)
+        self.assertEqual(self.cgp("status", "--json")["waitingOnYouNothingAsked"], ["one"])
+
+    def test_setup_and_doctor_move_a_stored_30_to_15_but_keep_a_custom_value(self):
+        self.setup_board()
+        for stored, expect in ((30, 15), (20, 20)):
+            self.cgp("config", "pollSeconds", str(stored))
+            self.setup_board()
+            self.assertEqual(self.cgp("config")["pollSeconds"], expect)
+        self.cgp("config", "pollSeconds", "30")
+        self.cgp("repo-path", "acme/app", self.make_clone())  # a known clone, so nothing else fails the doctor
+        p = subprocess.run([sys.executable, CGP, "doctor"], capture_output=True, text=True, cwd=self.tmp, env=self.env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("pollSeconds", p.stdout)
+        self.assertEqual(self.cgp("config")["pollSeconds"], 15)
+
+
 class TestSkipAndAutoApprove(Base):
     def set_auto(self, item, option):
         d = self.read_db()
@@ -450,7 +608,7 @@ class TestOverlap(Base):
         self.cgp("touches", "i3", "src/b.py")
         snap = self.cgp("list")
         self.assertEqual({i["item"] for i in snap["batch"] if i["column"] == "plan_approved"}, {"i1", "i3"})
-        self.assertEqual(snap["deferred"], [{"title": "two", "conflictsWith": ["one"]}])
+        self.assertEqual(snap["deferred"], [{"title": "two", "conflictsWith": ["one"], "reason": "overlaps with one"}])
         # a deferred story is not something the running ones should wait on
         self.assertEqual(self.cgp("overlap", "i1")["suggest"], {"action": "proceed"})
         # a worker already running holds its files against later candidates
