@@ -10,7 +10,7 @@ from .util import call, die, now_iso, out
 from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
 from .store import cfg, load_data, update_data, update_state
 from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, set_single, set_text
-from .session import clear_phase, set_phase, worker_pr
+from .session import clear_phase, reset_strikes, set_phase, worker_pr
 from .repoconf import repo_config, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
 from .pr import cancel_auto_merge, cmd_pr_state, pr_view, record_reviewed
@@ -41,7 +41,7 @@ def process_replies(c, items):
         if replies:
             clear_field(c, it["item"], c["fields"]["waiting"]["id"])
             it["waiting"] = it["waitingOn"] = False
-            update_data(lambda d, i=it["item"]: d.setdefault("answered", []).append(i))
+            update_data(lambda d, i=it["item"]: (d.setdefault("answered", []).append(i), reset_strikes(d, i)))
 
 
 def gate_open(c, it, target):
@@ -125,7 +125,7 @@ def cmd_move(a):
                 if a.column in DEFAULT_PHASE:
                     w.update(phase=DEFAULT_PHASE[a.column], phaseAt=now_iso())
     update_state(upd)
-    update_data(lambda d: d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]))
+    update_data(lambda d: (d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]), reset_strikes(d, a.item)))
     if policy_ok:
         post_comment(it["issueRepo"], it["number"], f"{MARK}\nAuto-approved by the policy ({'plan' if a.column == 'plan_approved' else 'PR'}): {verdict['reason']}.")
         advance_cursor(a.item)  # like `cgp comment`: posting counts as having read the feedback so far

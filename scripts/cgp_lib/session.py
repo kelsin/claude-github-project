@@ -5,7 +5,7 @@ import re
 import signal
 import sys
 import time
-from .consts import DEFAULT_PHASE, HOME, LOCKS, PHASES
+from .consts import DEFAULT_PHASE, HOME, LOCKS, PHASES, STRIKES
 from .util import die, now_iso, out, pid_alive, ps_field, safe, strip_id
 from .store import board_for_cwd, cfg, daemon_pid, env_board, ensure_home, list_boards, load_board, load_json, lock_alive, lock_file, lock_holder, lock_mine, locked, same_board, save_json, sid, state_path, stop_path, update_data, update_state
 from .board import get_item, parse_board_url
@@ -209,11 +209,41 @@ def worker_pr(item, ref):
     update_state(upd)
 
 
+def reset_strikes(d, item):
+    """Forget the strikes of every column of this story (it moved, or the user answered)."""
+    strikes = d.get("daemonStrikes", {})
+    for k in [k for k in strikes if k.split("|")[0] == item]:
+        del strikes[k]
+
+
+def record_outcome(item, column, outcome):
+    """The interactive loop's strike counter, kept where the daemon keeps its own (daemonStrikes, key item|column) so a restart or a
+    context compaction does not forget it: `fail` adds one, `ok` and `waiting` (a wait the board shows) start over. Returns the count."""
+    count = []
+
+    def upd(d):
+        strikes = d.setdefault("daemonStrikes", {})
+        n = strikes.get(f"{item}|{column}", 0) + 1 if outcome == "fail" else 0
+        reset_strikes(d, item)  # another column's strikes are stale
+        if n:
+            strikes[f"{item}|{column}"] = n
+        count.append(n)
+    update_data(upd)
+    return count[0]
+
+
 def cmd_worker(a):
     """start / stop / clear / phase. `start` takes the title (and, unless given, the column) from the board: an issue title is
     text anyone can write, so it must never travel through a shell command line."""
     if a.action == "phase" and a.column not in PHASES:
         die(f"phase must be one of {list(PHASES)}")
+    outcome = getattr(a, "outcome", None)  # internal callers (the daemon) build their own namespace
+    if outcome and a.action != "stop":
+        die("--outcome belongs to `worker stop`")
+    strikes = None
+    if outcome:
+        row = next((w for w in load_json(state_path(), {}).get("workers", []) if w["item"] == a.item), None)
+        strikes = record_outcome(a.item, row["column"] if row else get_item(cfg(), a.item)["column"], outcome)
     if a.action == "start":
         it = get_item(cfg(), a.item)
         a.column, a.title = a.column or it["column"], it["title"]
@@ -234,4 +264,5 @@ def cmd_worker(a):
         update_state(lambda st: st.__setitem__("workers", []))
     else:
         update_state(upd)
-    out(load_json(state_path(), {}).get("workers", []))
+    workers = load_json(state_path(), {}).get("workers", [])
+    out(workers if strikes is None else {"workers": workers, "strikes": strikes, "park": strikes >= STRIKES})

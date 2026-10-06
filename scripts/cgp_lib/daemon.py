@@ -11,7 +11,7 @@ import signal
 import subprocess
 import sys
 import time
-from .consts import ALL_KEYS, HOME
+from .consts import ALL_KEYS, HOME, STRIKES
 from .util import call, out, ps_field
 from .gh import RateLimited
 from .store import cfg, load_data, load_json, state_path, stop_path, touch_lock, update_data, update_state
@@ -23,7 +23,6 @@ from .gitwt import wt_path
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CGP = os.path.join(ROOT, "scripts", "cgp")
 COLUMNS_DIR = os.path.join(ROOT, "skills", "run", "columns")
-STRIKES = 3  # failed or fruitless runs of one story in one column before the user is asked
 ID = re.compile(r"[A-Za-z0-9_-]{1,100}")
 REPO = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 PATH = re.compile(r"[^\x00-\x1f\x7f]+")
