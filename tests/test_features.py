@@ -437,7 +437,7 @@ class TestUnlockOrder(Base):
         self.cgp("config", "concurrency", "1")
         snap = self.cgp("list")
         self.assertEqual([i["item"] for i in snap["batch"]], ["i3"])
-        self.assertEqual([q["title"] for q in snap["queued"]], ["one"])
+        self.assertEqual([q["title"] for q in snap["queued"]], ["one", "draft"])
 
     def test_an_epic_order_edge_counts(self):
         self.approved("i1", "i2", "i3")
