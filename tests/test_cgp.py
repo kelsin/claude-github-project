@@ -273,6 +273,12 @@ class TestNotStartingMarker(Base):
         for i in items:
             self.force(i, "plan_approved")
 
+    def columns(self, **cols):
+        """Put each story in its column (i1="implement", ...); the stories not named go to Plan Review, out of the way."""
+        self.setup_board()
+        for i in ("i1", "i2", "i3", "i4"):
+            self.force(i, cols.get(i, "plan_review"))
+
     def test_default_poll_is_15_seconds(self):
         self.setup_board()
         self.assertEqual(self.cgp("config")["pollSeconds"], 15)
@@ -341,12 +347,6 @@ class TestNotStartingMarker(Base):
         self.assertEqual([self.waiting_on(i) for i in ("i1", "i2", "i3")], [None, None, "Another story"])
         self.assertEqual([q["title"] for q in snap["queued"]], ["three"])
 
-    def columns(self, **cols):
-        """Put each story in its column (i1="implement", ...); the stories not named go to Plan Review, out of the way."""
-        self.setup_board()
-        for i in ("i1", "i2", "i3", "i4"):
-            self.force(i, cols.get(i, "plan_review"))
-
     def test_a_planning_column_story_past_the_cap_is_marked_with_a_reason(self):
         self.columns(i1="plan_approved", i2="plan_approved", i3="plan")
         self.cgp("config", "concurrency", "1")
@@ -365,13 +365,24 @@ class TestNotStartingMarker(Base):
         self.assertEqual([self.waiting_on(i) for i in ("i2", "i3")], ["Another story", None])
 
     def test_an_overlap_deferred_story_does_not_use_the_reserved_slot(self):
-        self.columns(i1="plan_approved", i2="plan_approved", i3="todo")
+        self.columns(i1="plan_approved", i2="plan_approved", i3="todo", i4="implement")
         self.cgp("config", "concurrency", "3")
         self.cgp("touches", "i1", "src/a.py")
         self.cgp("touches", "i2", "src/a.py")
         snap = self.cgp("list")
-        self.assertEqual([i["item"] for i in snap["batch"]], ["i1", "i3"])
+        self.assertEqual(sorted(i["item"] for i in snap["batch"]), ["i1", "i3", "i4"])
         self.assertEqual([d["title"] for d in snap["deferred"]], ["two"])
+
+    def test_a_skip_plan_todo_story_does_not_reserve_a_slot(self):
+        self.columns(i1="plan_approved", i2="implement", i3="todo")
+        self.cgp("set", "i3", "plan", "Skip")
+        self.cgp("config", "concurrency", "2")
+        self.assertEqual(sorted(i["item"] for i in self.cgp("list")["batch"]), ["i1", "i2"])
+
+    def test_planning_stories_and_a_later_story_all_fit_under_the_cap(self):
+        self.columns(i1="implement", i2="plan", i3="plan")
+        self.cgp("config", "concurrency", "3")
+        self.assertEqual(sorted(i["item"] for i in self.cgp("list")["batch"]), ["i1", "i2", "i3"])
 
     def test_without_a_planning_story_all_slots_go_to_later_columns(self):
         self.columns(i1="plan_approved", i2="implement")
@@ -382,7 +393,6 @@ class TestNotStartingMarker(Base):
         self.columns(i1="plan_approved", i2="plan_approved", i3="plan", i4="todo")
         self.cgp("config", "concurrency", "2")
         self.cgp("worker", "start", "i3", "plan")
-        self.force("i4", "todo")
         snap = self.cgp("list")
         self.assertEqual([i["item"] for i in snap["batch"]], ["i1"])  # column order: i4 (Todo) waits behind the approved stories
         self.assertEqual(self.waiting_on("i4"), "Another story")

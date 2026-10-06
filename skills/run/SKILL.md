@@ -24,7 +24,7 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
 
 If `list` or `wait` exits 5, another session took this board over: stop and tell the user.
 
-1. `CGP list --brief` (first cycle only; after that, the JSON `CGP wait` returned is the next cycle's input, so do not read the board a second time) → JSON with `status`, `batch`, `counts`, `waitingOnYou`, `stopRequested`, `inFlight`, `blocked`, `deferred`, `stalled`, `queued` (approved stories waiting for a free worker slot; the CLI marks them Waiting On: Another story).
+1. `CGP list --brief` (first cycle only; after that, the JSON `CGP wait` returned is the next cycle's input, so do not read the board a second time) → JSON with `status`, `batch`, `counts`, `waitingOnYou`, `stopRequested`, `inFlight`, `blocked`, `deferred`, `stalled`, `queued` (actionable stories in any column waiting for a free worker slot; the CLI marks them Waiting On: Another story).
 2. `stopRequested: true` (the user pressed the stop button, or ran `CGP stop`): `batch` is empty, so nothing new is dispatched. If `inFlight` is empty, run `CGP stop --cancel` and `CGP release`, report "stopped; run /cgp:run to continue" and stop. Otherwise go to step 5 (nothing is dispatched): the running workers finish, then this step ends the loop.
 3. `status: "done"`: if `inFlight` is non-empty (a worker is still running), go to step 5; otherwise `CGP release`, report "all stories are Done" and stop. This is the only way the loop ends by itself.
 4. `status: "work"`:
