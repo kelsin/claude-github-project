@@ -3,12 +3,13 @@ import fnmatch
 import os
 import subprocess
 import sys
+import time
 from .util import covers, die, norm_path, out
 from .store import cfg, load_data, update_data
-from .board import issue_item
+from .board import issue_item, parse_pr_ref
 from .gitutil import default_ref, fetch, git, resolve_repo_path, wt_path
 from .repoconf import merged_globs
-from .pr import allow_head, is_approved_head
+from .pr import allow_head, is_approved_head, pr_view
 
 
 def is_dirty(wt):
@@ -28,6 +29,40 @@ def cleanup_worktree(c, it):
         pass
 
 
+def valid_worktree(base, wt):
+    """A directory that is a checkout git knows as a worktree of this clone (realpath on both sides: /private/var is /var on macOS)."""
+    if subprocess.run(["git", "-C", wt, "rev-parse", "--git-dir"], capture_output=True).returncode:
+        return False
+    listed = subprocess.run(["git", "-C", base, "worktree", "list", "--porcelain"], capture_output=True, text=True).stdout
+    return os.path.realpath(wt) in {os.path.realpath(line[len("worktree "):]) for line in listed.splitlines() if line.startswith("worktree ")}
+
+
+def git_running():
+    """Whether any git process runs on this machine (when that cannot be told, yes: a lock is then never taken for stale)."""
+    try:
+        return subprocess.run(["pgrep", "-x", "git"], capture_output=True).returncode == 0
+    except OSError:
+        return True
+
+
+def clear_stale_index_lock(path, minutes=5):
+    """Remove the repo's index.lock a crashed git left behind: only when it is older than `minutes` and no git process runs."""
+    lock = git(path, "rev-parse", "--git-path", "index.lock", check=False)
+    lock = lock if os.path.isabs(lock) else os.path.join(path, lock)
+    if lock and os.path.exists(lock) and time.time() - os.path.getmtime(lock) > minutes * 60 and not git_running():
+        os.remove(lock)
+
+
+def repair_worktree(base, wt):
+    """The story's worktree directory exists but git does not know it (a crash between mkdir and `worktree add`, or a registration
+    pruned): an empty directory is removed, one with files is moved aside as <wt>.broken-<time> (nothing is deleted), then git forgets it."""
+    if os.listdir(wt):
+        os.rename(wt, f"{wt}.broken-{time.strftime('%Y%m%dT%H%M%S')}")
+    else:
+        os.rmdir(wt)
+    git(base, "worktree", "prune")
+
+
 def cmd_worktree(a):
     c = cfg()
     it = issue_item(c, a.item)
@@ -37,10 +72,14 @@ def cmd_worktree(a):
     wt = wt_path(it)
     fetch(base)
     git(base, "worktree", "prune")
+    clear_stale_index_lock(base)
     default = default_ref(base)
     if os.path.isdir(wt):
-        out({"path": wt, "branch": git(wt, "branch", "--show-current"), "base": default, "repo": repo})
-        return
+        if valid_worktree(base, wt):
+            clear_stale_index_lock(wt)
+            out({"path": wt, "branch": git(wt, "branch", "--show-current"), "base": default, "repo": repo})
+            return
+        repair_worktree(base, wt)
     os.makedirs(os.path.dirname(wt), exist_ok=True)
     has_local = git(base, "rev-parse", "--verify", f"refs/heads/{branch}", check=False)
     has_remote = git(base, "rev-parse", "--verify", f"origin/{branch}", check=False)
@@ -146,12 +185,41 @@ def cmd_guard(a):
         sys.exit(4)
 
 
+def unsaved_work(c, it, base, wt):
+    """Why removing the worktree would lose work (None when nothing would be): uncommitted changes, or commits origin/<branch> lacks.
+    A branch that is not on the remote is fine only once the story's PR is merged (the branch was deleted after the squash)."""
+    status = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True)
+    if status.returncode:
+        return "git cannot read its state"
+    if status.stdout.strip():
+        return "it has uncommitted changes"
+    ref = parse_pr_ref(c, it["pr"])
+    if ref and (pr_view(*ref, check=False) or {}).get("state") == "MERGED":
+        return None
+    try:
+        fetch(base)
+    except SystemExit:
+        return "the remote cannot be fetched to check for unpushed commits"
+    remote = f"origin/cgp/{it['number']}"
+    if subprocess.run(["git", "-C", wt, "rev-parse", "--verify", remote], capture_output=True).returncode:
+        return f"{remote} does not exist, so its commits were never pushed (and its PR is not merged)"
+    ahead = subprocess.run(["git", "-C", wt, "rev-list", "--count", f"{remote}..HEAD"], capture_output=True, text=True)
+    if ahead.returncode or ahead.stdout.strip() != "0":
+        return f"it has commits that are not on {remote}"
+    return None
+
+
 def cmd_worktree_remove(a):
     c = cfg()
     it = issue_item(c, a.item)
     wt = wt_path(it)
+    if a.discard and os.environ.get("CGP_DAEMON"):
+        die("--discard is only for you: a worker may not throw work away")
     if os.path.isdir(wt):
         base = resolve_repo_path(c, it["issueRepo"])
+        problem = None if a.discard else unsaved_work(c, it, base, wt)
+        if problem:
+            die(f"not removing {wt}: {problem}. Push or commit it first; to throw it away: cgp worktree-remove {a.item} --discard (not for agents)")
         git(base, "worktree", "remove", "--force", wt)
         git(base, "branch", "-D", f"cgp/{it['number']}", check=False)
     out({"removed": wt})

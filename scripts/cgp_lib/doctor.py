@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 import time
-from .consts import AUTO_FIELD, PRIORITY_FIELD, HOME, LOCKS, STORY_OPTION, TEXT_FIELDS, WAITING_FIELD
+from .consts import AUTO_FIELD, BOARDS, PRIORITY_FIELD, HOME, LOCKS, STORY_OPTION, TEXT_FIELDS, WAITING_FIELD
 from .util import die, out, printable, strip_id
 from .gh import gh, gql
 from .store import list_boards, load_board, load_json, lock_alive, locked, same_board, save_board
@@ -36,6 +36,20 @@ def session_files(days):
             dead.append(f)
     legacy = os.path.join(HOME, "state.json")
     return dead + ([legacy] if os.path.exists(legacy) else [])
+
+
+def orphan_worker_rows(live):
+    """(session, item) of worker rows in the state files of sessions that are not live: nothing will ever clear them."""
+    found = []
+    for f in sorted(glob.glob(os.path.join(HOME, "state-*.json"))):
+        m = re.match(r"state-(.+)\.json$", os.path.basename(f))
+        if m and m.group(1) not in live:
+            found += [(m.group(1), w["item"]) for w in (load_json(f, {}).get("workers") or []) if isinstance(w, dict) and "item" in w]
+    return found
+
+
+def dirty_worktrees():
+    return [p for p in glob.glob(os.path.join(HOME, "worktrees", "*", "*", "*")) if ".broken-" not in p and is_dirty(p)]
 
 
 def finished_stories(c):
@@ -80,12 +94,23 @@ def cmd_gc(a):
         for f in removed:
             if os.path.exists(f):
                 os.remove(f)
-    out({"dryRun": a.dry_run, "removedFiles": removed, "removedWorktrees": worktrees})
+    broken = glob.glob(os.path.join(HOME, "worktrees", "*", "*", "*.broken-*"))  # moved aside by `cgp worktree`; never deleted here
+    out({"dryRun": a.dry_run, "removedFiles": removed, "removedWorktrees": worktrees, "brokenWorktrees": broken})
 
 
 def list_stale_locks():
     return [f for f in glob.glob(os.path.join(LOCKS, "*.json"))
             if not lock_alive(load_json(f, None))]
+
+
+def quarantined_data():
+    """Per-board data files read_data set aside as corrupt, each with what replaced it (the backup's age, or an empty start)."""
+    found = []
+    for f in sorted(glob.glob(os.path.join(BOARDS, "*.data.json.corrupt-*"))):
+        bak = f.split(".corrupt-")[0] + ".bak"
+        how = f"backup restored, {round((time.time() - os.path.getmtime(bak)) / 60)} min old" if os.path.exists(bak) else "no backup, started empty"
+        found.append(f"{os.path.basename(f)} ({how})")
+    return found
 
 
 def settings_denies():
@@ -182,6 +207,23 @@ def cmd_doctor(a):
     check("claude for cgp daemon", claude is not None and not unknown,
           "cgp daemon needs the claude CLI on PATH" if claude is None else f"this claude does not list {', '.join(unknown)}: update it before running cgp daemon",
           warn=True)
+    bad = quarantined_data()
+    check("no corrupt data files", not bad, "set aside (delete them once looked at): " + "; ".join(bad), warn=True)
+    orphans = orphan_worker_rows(live_sessions())
+    check("no orphan worker rows", not orphans,
+          f"{len(orphans)} worker row(s) in dead sessions ({', '.join(f'{i} in {s}' for s, i in orphans)}): cgp unstick <item>, or cgp gc", warn=True)
+    dirty = dirty_worktrees()
+    check("no worktrees with uncommitted work", not dirty, f"{', '.join(dirty)}: commit or push it before the story is cleaned up (gc keeps them)", warn=True)
+    if a.deep:
+        for c in boards:
+            ids = {raw["id"] for raw in fetch_items(c["board"]["id"])}
+            gone = []
+            for f in glob.glob(os.path.join(HOME, "state-*.json")):
+                st = load_json(f, {})
+                if st.get("boardKey") == c["board"]["id"]:
+                    gone += [(os.path.basename(f)[6:-5], w["item"]) for w in st.get("workers") or [] if isinstance(w, dict) and w.get("item") not in ids]
+            check(f"{c['board']['title']}: workers' stories are on the board", not gone,
+                  f"{', '.join(f'{i} in {s}' for s, i in gone)} are not on the board: cgp unstick <item> (or release that session)", warn=True)
     lock = list_stale_locks()
     check("no stale locks", not lock, f"{len(lock)} abandoned lock(s): cgp gc", warn=True)
     old = session_files(7)

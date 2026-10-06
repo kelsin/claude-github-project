@@ -1,4 +1,5 @@
 """Per-story commands: comments, questions, feedback, field updates, moves, prepare."""
+import hashlib
 import json
 import os
 import re
@@ -9,7 +10,7 @@ from .util import call, die, now_iso, out
 from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
 from .store import cfg, load_data, update_data, update_state
 from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, set_single, set_text
-from .session import clear_phase, set_phase, worker_pr
+from .session import clear_phase, reset_strikes, set_phase, worker_pr
 from .repoconf import repo_config, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
 from .pr import cancel_auto_merge, cmd_pr_state, pr_view, record_reviewed
@@ -40,7 +41,7 @@ def process_replies(c, items):
         if replies:
             clear_field(c, it["item"], c["fields"]["waiting"]["id"])
             it["waiting"] = it["waitingOn"] = False
-            update_data(lambda d, i=it["item"]: d.setdefault("answered", []).append(i))
+            update_data(lambda d, i=it["item"]: (d.setdefault("answered", []).append(i), reset_strikes(d, i)))
 
 
 def gate_open(c, it, target):
@@ -124,7 +125,7 @@ def cmd_move(a):
                 if a.column in DEFAULT_PHASE:
                     w.update(phase=DEFAULT_PHASE[a.column], phaseAt=now_iso())
     update_state(upd)
-    update_data(lambda d: d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]))
+    update_data(lambda d: (d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]), reset_strikes(d, a.item)))
     if policy_ok:
         post_comment(it["issueRepo"], it["number"], f"{MARK}\nAuto-approved by the policy ({'plan' if a.column == 'plan_approved' else 'PR'}): {verdict['reason']}.")
         advance_cursor(a.item)  # like `cgp comment`: posting counts as having read the feedback so far
@@ -301,10 +302,17 @@ def cmd_comment(a):
 def ask_user(c, item, body):
     """Post a question on the story's issue and set Waiting On to You; returns the question's comment and its round number."""
     repo, number, _ = item_issue(item)
-    rounds = sum(1 for cm in rest(f"repos/{repo}/issues/{number}/comments") if QMARK in (cm.get("body") or "") and is_agent(cm))
-    if rounds >= 3:
-        body += "\n\n_This story has needed several rounds of questions; consider rescoping or splitting it._"
-    cm = post_comment(repo, number, f"{QMARK}\n{MARK}\n❓ **Question for you** (reply here; work resumes automatically)\n\n{body}")
+    comments = rest(f"repos/{repo}/issues/{number}/comments")
+    questions = [cm for cm in comments if QMARK in (cm.get("body") or "") and is_agent(cm)]
+    rounds = len(questions)
+    marker = f"<!-- cgp:q:{hashlib.sha1(body.encode()).hexdigest()[:12]} -->"  # a retry after a half-done ask finds its own question
+    last = questions[-1] if questions else None
+    if last and marker in last["body"] and comments[-1] is last:
+        cm, rounds = last, rounds - 1  # still the last comment of any kind, so unanswered: reuse it instead of posting it again
+    else:
+        if rounds >= 3:
+            body += "\n\n_This story has needed several rounds of questions; consider rescoping or splitting it._"
+        cm = post_comment(repo, number, f"{QMARK}\n{marker}\n{MARK}\n❓ **Question for you** (reply here; work resumes automatically)\n\n{body}")
     set_single(c, item, c["fields"]["waiting"]["id"], c["fields"]["waiting"]["you"])
 
     advance_cursor(item, asked=cm.get("created_at"))

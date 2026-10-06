@@ -81,7 +81,7 @@ class Base(unittest.TestCase):
     def force(self, item, column):
         """Put a story in any column, bypassing the CLI's human-gate rules (test setup only)."""
         boards = os.path.join(self.env["CGP_HOME"], "boards")
-        name = next(n for n in os.listdir(boards) if not n.endswith((".data.json", ".history.json")))
+        name = next(n for n in os.listdir(boards) if n.endswith(".json") and not n.endswith((".data.json", ".history.json")))
         with open(os.path.join(boards, name)) as f:
             opt = json.load(f)["fields"]["status"]["options"][column]
         d = self.read_db()
@@ -558,9 +558,9 @@ class TestQuestions(Base):
 
     def test_rescope_hint_after_three_rounds(self):
         self.setup_board()
-        for _ in range(3):
-            self.cgp("ask", "i1", input="q")
-        self.cgp("ask", "i1", input="q")
+        for n in range(3):
+            self.cgp("ask", "i1", input=f"q{n}")  # an unanswered repeat of the same question is not posted again
+        self.cgp("ask", "i1", input="q3")
         last = self.read_db()["comments"]["acme/app#1"][-1]["body"]
         self.assertIn("rescoping", last)
 
@@ -693,7 +693,7 @@ class TestOverlap(Base):
     def test_config_saved_without_shared_files_uses_defaults(self):
         self.setup_board()
         boards = os.path.join(self.env["CGP_HOME"], "boards")
-        path = os.path.join(boards, next(n for n in os.listdir(boards) if not n.endswith((".data.json", ".history.json"))))
+        path = os.path.join(boards, next(n for n in os.listdir(boards) if n.endswith(".json") and not n.endswith((".data.json", ".history.json"))))
         with open(path) as f:
             c = json.load(f)
         del c["settings"]["sharedFiles"]
@@ -1026,6 +1026,48 @@ class TestSessions(Base):
         with open(lock, "w") as f:
             json.dump({"session": "a", "at": 0}, f)  # heartbeat from 1970
         self.cgp("use", url, env={"CGP_SESSION": "c"})
+
+    def lock_for(self, session, at=None):
+        os.makedirs(os.path.join(self.env["CGP_HOME"], "locks"), exist_ok=True)
+        with open(os.path.join(self.env["CGP_HOME"], "locks", "P1.json"), "w") as f:
+            json.dump({"session": session, "at": time.time() if at is None else at}, f)
+
+    def dead_pid(self):
+        p = subprocess.Popen(["true"])
+        p.wait()
+        return p.pid
+
+    def test_a_fresh_lock_of_a_dead_daemon_is_claimed_at_once(self):
+        url = "https://github.com/orgs/acme/projects/1"
+        self.cgp("use", url, env=self.a)
+        self.lock_for(f"daemon-{self.dead_pid()}")
+        self.cgp("use", url, env={"CGP_SESSION": "c"})
+
+    def test_a_fresh_lock_of_a_live_daemon_still_exits_5(self):
+        url = "https://github.com/orgs/acme/projects/1"
+        self.cgp("use", url, env=self.a)
+        self.lock_for(f"daemon-{os.getpid()}")
+        self.assertEqual(self.cgp("use", url, ok=False, env={"CGP_SESSION": "c"}).returncode, 5)
+
+    def test_lock_alive_counts_a_permission_error_as_alive_and_only_parses_daemon_pids(self):
+        m = load_cgp().mods["store"]
+        now = time.time()
+        with mock.patch("os.kill", side_effect=PermissionError):
+            self.assertTrue(m.lock_alive({"session": "daemon-4242", "at": now}))
+        with mock.patch("os.kill", side_effect=ProcessLookupError):
+            self.assertFalse(m.lock_alive({"session": "daemon-4242", "at": now}))
+            for odd in ("daemon-4242x", "daemon-", "Daemon-4242", "daemon-1", "mydaemon-4242", "a"):  # not a daemon id, or pid 1
+                self.assertEqual(m.lock_alive({"session": odd, "at": now}), odd != "daemon-1", odd)
+
+    def test_gc_cleans_a_dead_daemons_state_file(self):
+        home = self.env["CGP_HOME"]
+        sid = f"daemon-{self.dead_pid()}"
+        self.cgp("use", "https://github.com/orgs/acme/projects/1", env=self.a)
+        self.lock_for(sid)
+        state = os.path.join(home, f"state-{sid}.json")
+        with open(state, "w") as f:
+            json.dump({"workers": []}, f)
+        self.assertIn(state, self.cgp("gc", "--days", "0", "--dry-run")["removedFiles"])
 
     def test_blocks_and_touches_survive_a_new_session_on_the_same_board(self):
         url = "https://github.com/orgs/acme/projects/1"
@@ -1614,7 +1656,7 @@ LEGACY = [("todo", "🆕 Todo"), ("plan", "🧠 Plan"), ("plan_review", "🔍 Pl
 class TestOldLayouts(Base):
     def board_json(self):
         boards = os.path.join(self.env["CGP_HOME"], "boards")
-        path = os.path.join(boards, next(n for n in os.listdir(boards) if not n.endswith((".data.json", ".history.json"))))
+        path = os.path.join(boards, next(n for n in os.listdir(boards) if n.endswith(".json") and not n.endswith((".data.json", ".history.json"))))
         with open(path) as f:
             return path, json.load(f)
 

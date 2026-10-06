@@ -1,12 +1,18 @@
 """Tests for the safety gates and tools added after the first review: worker start, review-bound merging, guard,
 stalled workers, status, doctor, gc, setup --dry-run."""
+import contextlib
 import importlib.machinery
+import io
 import importlib.util
+import glob
 import json
 import os
 import re
+import signal
 import subprocess
+import sys
 import time
+from unittest import mock
 
 import test_cgp
 
@@ -547,6 +553,429 @@ class TestWorktreeCleanup(test_cgp.SyncBase):
         self.finish()
         self.cgp("list", "--brief")
         self.assertFalse(os.path.isdir(self.wt))
+
+
+class TestQuarantine(Base):
+    """A corrupt per-board data file is set aside (and its last good copy restored) instead of stopping the loop."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_board()
+        self.path = os.path.join(boards_dir(self.env), "P1.data.json")
+
+    def corrupt(self):
+        with open(self.path, "w") as f:
+            f.write('{"blocks": {"i1": ["i')  # a truncated write
+
+    def test_a_truncated_data_file_is_set_aside_and_the_backup_restored(self):
+        self.cgp("block", "i1", "i2")
+        self.cgp("block", "i1", "i4")  # the backup is the contents before this update
+        good = self.load(self.path + ".bak")
+        self.corrupt()
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"CGP_HOME": self.env["CGP_HOME"]}), contextlib.redirect_stderr(err):
+            self.assertEqual(test_cgp.load_cgp().mods["store"].read_data(self.path), good)
+        self.assertIn("WARNING", err.getvalue())
+        (bad,) = glob.glob(self.path + ".corrupt-*")
+        with open(bad) as f:
+            self.assertTrue(f.read().startswith('{"blocks"'))  # kept for a look
+        self.assertEqual(self.load(self.path), good)
+        self.assertEqual(self.cgp("list")["board"]["number"], 1)  # the set-aside file is not mistaken for a board
+        out = self.cgp("doctor", ok=False).stdout
+        self.assertIn("⚠️  no corrupt data files", out)
+        self.assertIn("backup restored", out)
+
+    def test_without_a_backup_the_data_starts_empty(self):
+        self.cgp("block", "i1", "i2")
+        os.remove(self.path + ".bak") if os.path.exists(self.path + ".bak") else None
+        self.corrupt()
+        self.cgp("block", "i1", "i4")  # an update on a corrupt file
+        self.assertEqual(self.load(self.path)["blocks"], {"i1": ["i4"]})
+        self.assertEqual(len(glob.glob(self.path + ".corrupt-*")), 1)
+        self.assertIn("no backup", self.cgp("doctor", ok=False).stdout)
+
+    def test_only_a_json_error_is_quarantined(self):
+        m = test_cgp.load_cgp().mods["store"]
+        with mock.patch.dict(os.environ, {"CGP_HOME": self.env["CGP_HOME"]}), mock.patch("builtins.open", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                m.read_data(self.path)
+        self.assertEqual(glob.glob(self.path + ".corrupt-*"), [])
+
+    def test_a_corrupt_config_stays_fatal(self):
+        with open(os.path.join(boards_dir(self.env), "P1.json"), "w") as f:
+            f.write("{nope")
+        p = self.cgp("list", ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("is corrupt", p.stderr)
+        self.assertEqual(glob.glob(os.path.join(boards_dir(self.env), "*.corrupt-*")), [])
+
+
+class TestGhRetry(Base):
+    """Transient gh failures (5xx, timeouts) are retried for reads and idempotent writes, never for posting a comment."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_board()
+        self.env["CGP_GH_BACKOFF"] = "0,0"
+
+    def fail(self, match, times, stderr="gh: HTTP 502"):
+        d = self.read_db()
+        d["failures"] = [{"match": match, "times": times, "stderr": stderr}]
+        self.write_db(d)
+
+    def test_a_read_that_fails_twice_with_502_passes(self):
+        self.fail("items(first:100", 2)
+        self.assertEqual(self.cgp("list")["board"]["number"], 1)
+        self.assertEqual(self.read_db()["failed_calls"], 2)
+
+    def test_a_third_failure_surfaces(self):
+        self.fail("items(first:100", 3)
+        p = self.cgp("list", ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("502", p.stderr)
+
+    def test_an_error_that_is_not_transient_is_not_retried(self):
+        self.fail("items(first:100", 1, "gh: HTTP 404 not found")
+        self.assertNotEqual(self.cgp("list", ok=False).returncode, 0)
+        self.assertEqual(self.read_db()["failed_calls"], 1)
+
+    def test_an_idempotent_field_update_is_retried(self):
+        self.fail("updateProjectV2ItemFieldValue", 2)
+        self.cgp("move", "i1", "plan")
+        self.assertEqual(self.read_db()["failed_calls"], 2)
+
+    def test_posting_a_comment_is_never_retried(self):
+        self.fail("issues/1/comments", 1)
+        self.assertNotEqual(self.cgp("comment", "i1", input="hello", ok=False).returncode, 0)
+        self.assertEqual(self.read_db()["failed_calls"], 1)
+        self.assertEqual(self.read_db()["comments"].get("acme/app#1", []), [])
+
+    def test_only_allowlisted_mutations_and_reads_retry(self):
+        gh = test_cgp.load_cgp().mods["gh"]
+        bad = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "", "gh: HTTP 502"))
+        with mock.patch.object(gh, "BACKOFF", (0, 0)), mock.patch("subprocess.run", bad):
+            for query, tries in (("query{ viewer{ login } }", 3), ("mutation($i:ID!){ clearProjectV2ItemFieldValue(input:{itemId:$i}){ x } }", 3),
+                                 ("mutation($i:ID!){ convertProjectV2DraftIssueItemToIssue(input:{itemId:$i}){ x } }", 1)):
+                bad.reset_mock()
+                with self.assertRaises(SystemExit):
+                    gh.gql(query)
+                self.assertEqual(bad.call_count, tries, query)
+            bad.reset_mock()
+            with self.assertRaises(SystemExit):
+                gh.gh("api", "-X", "POST", "repos/a/b/issues")  # a REST write
+            self.assertEqual(bad.call_count, 1)
+
+    def test_only_stderr_decides_whether_to_retry_or_to_call_it_a_rate_limit(self):
+        gh = test_cgp.load_cgp().mods["gh"]
+        noisy = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "body: HTTP 502 and a rate limit", "gh: HTTP 404"))
+        with mock.patch.object(gh, "BACKOFF", (0, 0)), mock.patch("subprocess.run", noisy):
+            with self.assertRaises(SystemExit) as cm:
+                gh.gh("api", "repos/a/b")
+        self.assertEqual((noisy.call_count, type(cm.exception)), (1, SystemExit))
+        partial = mock.Mock(return_value=subprocess.CompletedProcess([], 1, '{"data": {"x": 1}, "errors": [{"message": "timeout"}]}', "gh: HTTP 502 timeout"))
+        with mock.patch.object(gh, "BACKOFF", (0, 0)), mock.patch("subprocess.run", partial):
+            self.assertEqual(gh.gql("query{ x }"), {"x": 1})
+        self.assertEqual(partial.call_count, 1)  # usable data: nothing to retry
+
+    def test_a_rate_limit_is_a_typed_error_that_is_not_retried(self):
+        gh = test_cgp.load_cgp().mods["gh"]
+        limited = mock.Mock(return_value=subprocess.CompletedProcess([], 1, "", "gh: HTTP 429: API rate limit exceeded"))
+        with mock.patch.object(gh, "BACKOFF", (0, 0)), mock.patch("subprocess.run", limited):
+            with self.assertRaises(gh.RateLimited) as cm:
+                gh.gql("query{ viewer{ login } }")
+        self.assertEqual((limited.call_count, cm.exception.code), (1, 1))
+
+
+class TestAskIsIdempotent(Base):
+    def setUp(self):
+        super().setUp()
+        self.setup_board()
+        self.env["CGP_GH_BACKOFF"] = "0,0"
+
+    def questions(self):
+        return [c for c in self.read_db()["comments"].get("acme/app#1", []) if "cgp:question" in c["body"]]
+
+    def test_asking_again_after_the_field_update_failed_posts_one_comment(self):
+        d = self.read_db()
+        d["failures"] = [{"match": "updateProjectV2ItemFieldValue", "times": 3, "stderr": "gh: HTTP 502"}]  # all three attempts
+        self.write_db(d)
+        self.assertNotEqual(self.cgp("ask", "i1", input="1. which?", ok=False).returncode, 0)  # posted, then Waiting On failed
+        self.assertEqual(len(self.questions()), 1)
+        self.assertEqual(self.cgp("ask", "i1", input="1. which?")["round"], 1)
+        self.assertEqual(len(self.questions()), 1)
+        self.assertEqual([i["item"] for i in self.cgp("list")["waitingOnYou"]], ["i1"])
+
+    def test_an_agent_comment_after_the_question_means_it_is_posted_again(self):
+        self.cgp("ask", "i1", input="1. which?")
+        self.cgp("comment", "i1", input="status update")
+        self.assertEqual(self.cgp("ask", "i1", input="1. which?")["round"], 2)
+        self.assertEqual(len(self.questions()), 2)
+
+    def test_a_different_question_or_an_answered_one_is_posted(self):
+        self.cgp("ask", "i1", input="1. which?")
+        self.assertEqual(self.cgp("ask", "i1", input="2. why?")["round"], 2)
+        d = self.read_db()
+        d["comments"]["acme/app#1"].append({"body": "sqlite", "created_at": "2026-01-01T00:59:00Z",
+                                            "user": {"login": "kelsin", "type": "User"}, "author_association": "OWNER"})
+        self.write_db(d)
+        self.assertEqual(self.cgp("ask", "i1", input="2. why?")["round"], 3)  # the same text, but the last one was answered
+
+
+def lstart(pid):
+    return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                          env={**os.environ, "LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+
+
+class TestWorktreeRepair(test_cgp.SyncBase):
+    def drop(self):
+        """The worktree gone from git's books but (as after a crash) a directory in its place."""
+        self.git(self.clone, "worktree", "remove", "--force", self.wt)
+        os.makedirs(self.wt)
+
+    def broken(self):
+        return glob.glob(self.wt + ".broken-*")
+
+    def valid(self):
+        return subprocess.run(["git", "-C", self.wt, "rev-parse", "--git-dir"], capture_output=True).returncode == 0
+
+    def test_an_empty_bogus_directory_is_recreated(self):
+        self.drop()
+        self.assertEqual(self.cgp("worktree", "i1")["path"], self.wt)
+        self.assertTrue(self.valid())
+        self.assertEqual(self.broken(), [])
+
+    def test_a_bogus_directory_with_files_is_moved_aside_intact(self):
+        self.drop()
+        with open(os.path.join(self.wt, "keep.txt"), "w") as f:
+            f.write("mine\n")
+        self.cgp("worktree", "i1")
+        self.assertTrue(self.valid())
+        (aside,) = self.broken()
+        with open(os.path.join(aside, "keep.txt")) as f:
+            self.assertEqual(f.read(), "mine\n")
+        self.assertEqual(self.cgp("gc", "--dry-run")["brokenWorktrees"], [aside])  # listed, never deleted
+
+    def test_a_good_worktree_reached_through_a_symlink_is_left_alone(self):
+        link = os.path.join(self.tmp, "home-link")
+        os.symlink(self.env["CGP_HOME"], link)
+        with open(os.path.join(self.wt, "wip.txt"), "w") as f:
+            f.write("unsaved\n")
+        res = self.cgp("worktree", "i1", env={"CGP_HOME": link})
+        self.assertTrue(res["path"].startswith(link))
+        self.assertEqual(self.broken(), [])
+        self.assertTrue(os.path.exists(os.path.join(self.wt, "wip.txt")))
+
+    def test_an_index_lock_goes_only_when_old_and_no_git_runs(self):
+        with mock.patch.dict(os.environ, {"CGP_HOME": self.env["CGP_HOME"]}):
+            test_cgp.load_cgp()
+            sys.path.insert(0, os.path.join(test_cgp.ROOT, "scripts"))
+            try:
+                import cgp_lib.gitwt as gitwt
+            finally:
+                sys.path.remove(os.path.join(test_cgp.ROOT, "scripts"))
+        lock = os.path.join(self.clone, ".git", "index.lock")
+
+        def make(age):
+            with open(lock, "w") as f:
+                f.write("")
+            os.utime(lock, (time.time() - age, time.time() - age))
+        for age, running, gone in ((600, False, True), (60, False, False), (600, True, False)):
+            make(age)
+            with mock.patch.object(gitwt, "git_running", return_value=running):
+                gitwt.clear_stale_index_lock(self.clone)
+            self.assertEqual(not os.path.exists(lock), gone, (age, running))
+            if os.path.exists(lock):
+                os.remove(lock)
+
+
+class TestWorktreeRemove(test_cgp.SyncBase):
+    def push(self):
+        self.git(self.wt, "push", "-q", "origin", "HEAD:cgp/1")
+        self.git(self.clone, "fetch", "-q", "origin")
+
+    def refused(self, *args, env=None):
+        p = self.cgp("worktree-remove", "i1", *args, ok=False, env=env)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertTrue(os.path.isdir(self.wt))
+        return p.stderr
+
+    def test_a_branch_that_was_never_pushed_is_refused_until_its_pr_is_merged(self):
+        self.assertIn("does not exist", self.refused())
+        d = self.read_db()
+        d["prs"] = {"acme/app#5": {"state": "MERGED", "isDraft": False, "headRefOid": "bbb", "headRefName": "cgp/1",
+                                   "isCrossRepository": False, "baseRefName": "main"}}
+        self.write_db(d)
+        self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/5")
+        self.assertEqual(self.cgp("worktree-remove", "i1")["removed"], self.wt)  # the squash merge deleted the branch: fine
+        self.assertFalse(os.path.isdir(self.wt))
+
+    def test_a_pushed_clean_worktree_is_removed(self):
+        self.push()
+        self.cgp("worktree-remove", "i1")
+        self.assertFalse(os.path.isdir(self.wt))
+
+    def test_uncommitted_and_unpushed_work_is_refused_and_discard_takes_it(self):
+        self.push()
+        with open(os.path.join(self.wt, "wip.txt"), "w") as f:
+            f.write("unsaved\n")
+        self.assertIn("uncommitted", self.refused())
+        self.git(self.wt, "add", "."); self.git(self.wt, "commit", "-qm", "wip")
+        self.assertIn("not on origin/cgp/1", self.refused())
+        self.cgp("worktree-remove", "i1", "--discard")
+        self.assertFalse(os.path.isdir(self.wt))
+
+    def test_a_worker_may_not_discard(self):
+        with open(os.path.join(self.wt, "wip.txt"), "w") as f:
+            f.write("unsaved\n")
+        self.assertIn("--discard is only for you", self.refused("--discard", env={"CGP_DAEMON": "1"}))
+
+
+class TestUnstick(Base):
+    KEPT = {"asked": {"i1": "t"}, "cursors": {"i1": "t"}, "pending": {"i1": "t"}, "blocks": {"i1": ["i2"]}, "epicOrder": {"i1": ["i2"]},
+            "touches": {"i1": ["a.py"]}, "approvedTouches": {"i1": ["a.py"]}, "splits": {"i1": []}, "approvedSplits": {"i1": []},
+            "children": {"i1": []}, "parents": {"i1": "p"}, "epicAsked": {"i1": "x"}, "policyPlans": ["i1"], "policy": {"i1": {}},
+            "ratings": {"i1": {}}, "reviewed": {"i1": {"pr": "acme/app#5", "sha": "aaa"}}, "cleanRebase": {"i1": ["bbb"]},
+            "notified": {"i1": {}}, "deferred": ["i1"], "reasons": {"i1": "x"}, "daemonSpend": {"i1": 1.5}, "tainted": ["i1"]}
+
+    def setUp(self):
+        super().setUp()
+        self.setup_board()
+        self.procs = []
+        d = self.read_db()
+        d["prs"] = {"acme/app#5": {"state": "OPEN", "isDraft": False, "headRefOid": "aaa", "headRefName": "cgp/1",
+                                   "isCrossRepository": False, "baseRefName": "main", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE"}}
+        self.write_db(d)
+        self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/5")
+        self.cgp("ask", "i1", input="1. which?")  # Waiting On: You
+        self.save_data(**self.KEPT, answered=["i1", "i2"], daemonStrikes={"i1|todo": 2, "i1|plan": 1, "i2|todo": 1})
+        self.session("state-s1.json", [{"item": "i1", "column": "todo"}, {"item": "i2", "column": "todo"}])
+
+    def tearDown(self):
+        for p in self.procs:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            p.wait()
+
+    def session(self, name, rows):
+        with open(os.path.join(self.env["CGP_HOME"], name), "w") as f:
+            json.dump({"boardKey": "P1", "workers": rows}, f)
+
+    def rows(self, name="state-s1.json"):
+        return [w["item"] for w in self.load(os.path.join(self.env["CGP_HOME"], name))["workers"]]
+
+    def test_a_dry_run_changes_nothing_and_lists_the_auto_merge_cancel(self):
+        before, calls = self.data(), len(self.read_db().get("calls", []))
+        res = self.cgp("unstick", "i1", "--dry-run")
+        self.assertEqual((res["dryRun"], res["cancelAutoMerge"], res["waitingOn"]), (True, "acme/app#5", True))
+        self.assertEqual(res["data"], {"answered": ["i1"], "daemonStrikes": ["i1|todo", "i1|plan"]})
+        self.assertEqual((self.data(), self.rows(), len(self.read_db().get("calls", []))), (before, ["i1", "i2"], calls))
+        self.assertEqual(len(self.cgp("list")["waitingOnYou"]), 1)
+
+    def test_it_clears_exactly_the_listed_state_of_that_story(self):
+        before = self.data()
+        self.cgp("unstick", "i1")
+        d = self.data()
+        self.assertEqual((d["answered"], d["daemonStrikes"]), (["i2"], {"i2|todo": 1}))
+        for key in self.KEPT:
+            self.assertEqual(d[key], before[key], key)  # column data, touches and approvals stay
+        self.assertEqual(self.rows(), ["i2"])
+        self.assertEqual(self.cgp("list")["waitingOnYou"], [])
+        self.assertTrue(any("--disable-auto" in c for c in self.read_db()["calls"]))  # auto-merge was disarmed
+        self.assertEqual(self.cgp("status", "--json")["board"]["number"], 1)
+
+    def test_every_per_story_data_key_is_classified(self):
+        sys.path.insert(0, os.path.join(test_cgp.ROOT, "scripts"))
+        try:
+            from cgp_lib.consts import STORY_KEPT, STORY_STATE
+        finally:
+            sys.path.remove(os.path.join(test_cgp.ROOT, "scripts"))
+        used = set()
+        for name in glob.glob(os.path.join(test_cgp.ROOT, "scripts", "cgp_lib", "*.py")):
+            with open(name) as f:
+                used |= set(re.findall(r'\b(?:d|st|data)\.setdefault\("(\w+)"', f.read()))
+        used -= {"workers", "counts", "waiting"}  # the session state file, not the data file
+        self.assertEqual(sorted(used - set(STORY_KEPT) - set(STORY_STATE)), [], "classify new per-story keys in consts.STORY_STATE / STORY_KEPT")
+        self.assertEqual(sorted(set(self.KEPT) - set(STORY_KEPT)), [])
+
+    def worker(self):
+        code = "import signal,sys\nprint('ready', flush=True)\nsys.stdin.readline()"
+        p = subprocess.Popen([sys.executable, "-c", code], start_new_session=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.procs.append(p)
+        self.assertEqual(p.stdout.readline().strip(), "ready")
+        self.session("state-s1.json", [{"item": "i1", "column": "todo", "pid": p.pid, "pgid": p.pid, "start": lstart(p.pid)}])
+        return p
+
+    def test_a_live_worker_blocks_it_unless_kill(self):
+        p = self.worker()
+        r = self.cgp("unstick", "i1", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("still running", r.stderr)
+        self.assertIsNone(p.poll())
+        self.assertEqual(self.rows(), ["i1"])
+        self.cgp("unstick", "i1", "--kill")
+        self.assertIsNotNone(p.wait(timeout=10))
+        self.assertEqual(self.rows(), [])
+
+    def test_a_worker_may_not_unstick(self):
+        r = self.cgp("unstick", "i1", ok=False, env={"CGP_DAEMON": "1"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("only for you", r.stderr)
+        self.assertEqual(self.rows(), ["i1", "i2"])
+
+
+class TestWorkerOutcome(Base):
+    def stop(self, outcome):
+        self.cgp("worker", "start", "i1", "todo")
+        return self.cgp("worker", "stop", "i1", "--outcome", outcome)
+
+    def strikes(self):
+        return self.data()["daemonStrikes"]
+
+    def test_three_failed_runs_park_and_ok_or_waiting_start_over(self):
+        self.setup_board()
+        self.assertEqual([(r["strikes"], r["park"]) for r in (self.stop("fail") for _ in range(3))], [(1, False), (2, False), (3, True)])
+        self.assertEqual(self.strikes(), {"i1|todo": 3})
+        self.assertEqual((self.stop("waiting")["strikes"], self.strikes()), (0, {}))
+        self.stop("fail")
+        self.assertEqual(self.stop("ok")["strikes"], 0)
+        self.assertEqual(self.strikes(), {})
+
+    def test_a_move_or_the_users_answer_resets_the_count(self):
+        self.setup_board()
+        self.stop("fail")
+        self.cgp("move", "i1", "plan")
+        self.assertEqual(self.strikes(), {})
+        self.stop("fail")
+        self.cgp("ask", "i1", input="1. which?")
+        d = self.read_db()
+        d["comments"]["acme/app#1"].append({"body": "sqlite", "created_at": "2026-01-01T00:59:00Z",
+                                            "user": {"login": "kelsin", "type": "User"}, "author_association": "OWNER"})
+        self.write_db(d)
+        self.cgp("list")  # sees the reply
+        self.assertEqual(self.strikes(), {})
+
+    def test_outcome_belongs_to_stop(self):
+        self.setup_board()
+        self.assertNotEqual(self.cgp("worker", "start", "i1", "todo", "--outcome", "fail", ok=False).returncode, 0)
+
+
+class TestDoctorRecovery(test_cgp.SyncBase):
+    def test_orphan_worker_rows_and_dirty_worktrees_are_flagged(self):
+        with open(os.path.join(self.wt, "wip.txt"), "w") as f:
+            f.write("unsaved\n")
+        with open(os.path.join(self.env["CGP_HOME"], "state-dead.json"), "w") as f:
+            json.dump({"boardKey": "P1", "workers": [{"item": "i1"}]}, f)
+        out = self.cgp("doctor", ok=False).stdout
+        self.assertIn("⚠️  no orphan worker rows  1 worker row(s) in dead sessions (i1 in dead)", out)
+        self.assertIn("⚠️  no worktrees with uncommitted work", out)
+
+    def test_rows_of_stories_that_are_gone_need_deep(self):
+        with open(os.path.join(self.env["CGP_HOME"], "state-dead.json"), "w") as f:
+            json.dump({"boardKey": "P1", "workers": [{"item": "gone"}]}, f)
+        self.assertNotIn("are on the board", self.cgp("doctor", ok=False).stdout)
+        self.assertIn("⚠️  Test Board 1: workers' stories are on the board  gone in dead are not on the board", self.cgp("doctor", "--deep", ok=False).stdout)
 
 
 class TestSkillText(test_cgp.unittest.TestCase):

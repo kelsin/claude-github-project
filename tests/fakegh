@@ -18,6 +18,17 @@ def save():
     os.replace(tmp, DB)  # never a half-written file for a concurrent reader
 
 
+stdin = sys.stdin.read() if args[:2] == ["api", "graphql"] else ""
+# db["failures"]: [{"match": text in the arguments (or the GraphQL body), "stderr": "HTTP 502", "times": n}, ...]: the first n matching calls
+# fail with that message, then the calls succeed; db["failed_calls"] counts them. A sequenced failure, like gh in an outage.
+for f in db.get("failures", []):
+    if f.get("times", 1) > 0 and f.get("match", "") in " ".join(args) + stdin:
+        f["times"] = f.get("times", 1) - 1
+        db["failed_calls"] = db.get("failed_calls", 0) + 1
+        save()
+        sys.exit(f.get("stderr", "gh: HTTP 502"))
+
+
 def field(name):
     return next(f for f in db["fields"] if f["name"] == name)
 
@@ -94,7 +105,7 @@ elif args[:3] == ["api", "-X", "PUT"] and args[3].endswith("/update-branch"):
 elif args[:2] == ["run", "view"]:
     print("\n".join(f"log line {n}" for n in range(100)))
 elif args[:2] == ["api", "graphql"]:
-    body = json.loads(sys.stdin.read())
+    body = json.loads(stdin)
     q, v = body["query"], body["variables"]
     errors = None
     if "blockedBy(" in q and db.get("no_blocked_by_field"):  # an older GitHub: the whole query is rejected

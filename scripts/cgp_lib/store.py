@@ -2,10 +2,13 @@
 import fcntl
 import json
 import os
+import re
+import shutil
+import sys
 import time
 from .consts import BOARDS, DEFAULTS, HOME, KEY_RENAMES, LOCKS, META, LOCK_STALE_SECONDS, PATHS, SCHEMA
 from .gitutil import cwd_repo
-from .util import die, safe, strip_id
+from .util import die, pid_alive, safe, strip_id
 
 
 def load_json(path, default):
@@ -182,17 +185,52 @@ def data_path():
     return os.path.join(BOARDS, f"{safe(board_key())}.data.json")
 
 
+def read_data(path):
+    """A per-board data file. One that is not valid JSON (a half write, a bad edit) is set aside as <file>.corrupt-<time> and the copy
+    update_data kept of the last good contents (<file>.bak) is restored, or {} when there is none: the data is cursors, strikes and
+    blocks that are re-derivable, so one bad file must not stop the loop. Config files stay fatal (load_json)."""
+    def read():
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+    try:
+        return read()
+    except ValueError:
+        pass
+    with locked():
+        try:
+            return read()  # another process may have repaired it meanwhile
+        except ValueError:
+            pass
+        os.replace(path, f"{path}.corrupt-{time.strftime('%Y%m%dT%H%M%S')}")
+        try:
+            with open(path + ".bak") as f:
+                d = json.load(f)
+            save_json(path, d)
+            how = "restored the last good copy"
+        except (OSError, ValueError):
+            d, how = {}, "no usable backup, so it starts empty"
+        print(f"cgp: WARNING: {path} was corrupt; set it aside as {os.path.basename(path)}.corrupt-*, {how} (cgp doctor shows it)", file=sys.stderr)
+        return d
+
+
 def load_data():
-    return load_json(data_path(), {})
+    return read_data(data_path())
 
 
 def update_data(fn):
     """Per-board data that outlives sessions: blocks, touches, feedback cursors, answered flags."""
     with locked():
         os.makedirs(BOARDS, mode=0o700, exist_ok=True)
-        d = load_json(data_path(), {})
+        path = data_path()
+        d = read_data(path)
+        if os.path.exists(path):
+            shutil.copyfile(path, path + ".bak")  # the last good contents, for read_data
+            os.chmod(path + ".bak", 0o600)
         fn(d)
-        save_json(data_path(), d)
+        save_json(path, d)
 
 
 def same_board(meta, owner, number):
@@ -204,8 +242,18 @@ def lock_file(key):
     return os.path.join(LOCKS, f"{safe(key)}.json")
 
 
+def daemon_pid(session):
+    """The pid in a daemon's session id (daemon-<pid>), None for any other id."""
+    m = re.fullmatch(r"daemon-([0-9]{1,9})", session or "")
+    return int(m.group(1)) if m else None
+
+
 def lock_alive(lk):
-    return bool(lk) and time.time() - lk.get("at", 0) < LOCK_STALE_SECONDS
+    """A lock is live while its holder heartbeats; a daemon whose process is gone on this host is dead at once."""
+    if not lk or time.time() - lk.get("at", 0) >= LOCK_STALE_SECONDS:
+        return False
+    pid = daemon_pid(lk.get("session"))
+    return pid is None or (pid > 1 and pid_alive(pid))
 
 
 def lock_mine(key):

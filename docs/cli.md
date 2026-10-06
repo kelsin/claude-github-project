@@ -27,9 +27,9 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `prepare` | `item` | Everything a worker reads before acting, in one call |
 | `adopt` | `item` `repo` | Convert a draft item into an issue in a linked repo |
 | `stop` | `board` `--cancel` | Finish the current cycle, then stop the loop (a separate shell stops the live session holding the board's lock) |
-| `worker` | `action` `item` `column` `title` | Register (start/stop/clear) a worker or set its phase |
+| `worker` | `action` `item` `column` `title` `--outcome` | Register (start/stop/clear) a worker or set its phase |
 | `worktree` | `item` | Create or reuse the story's git worktree |
-| `worktree-remove` | `item` | Remove the story's worktree and branch |
+| `worktree-remove` | `item` `--discard` | Remove the story's worktree and branch; refuses uncommitted or unpushed work |
 | `sync` | `item` | Rebase the story's worktree onto its remote branch and the latest default branch |
 | `touches` | `item` `paths` | Record (or read) the files and directories a story changes |
 | `overlap` | `item` | Find stories touching the same files |
@@ -46,5 +46,6 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `rate` | `item` `rating` | Record your risk rating of a story (the auto-approval policy reads it) |
 | `repo-config` | `target` | The .cgp.json of a repo's default branch (test and lint commands, shared and guarded files, ...) |
 | `daemon` | `--once` `--dry-run` `--verbose` | Experimental: run the loop headless, one `claude -p` worker per story (see docs/daemon.md) |
-| `doctor` | `--board` | Check the installation: gh, token scopes, board, clones, stale files |
+| `unstick` | `item` `--dry-run` `--kill` | Clear one story's operational state (worker, strikes, answered, Waiting On); you only, not agents |
+| `doctor` | `--board` `--deep` | Check the installation: gh, token scopes, board, clones, stale files |
 | `gc` | `--days` `--dry-run` | Delete state of dead sessions and worktrees of finished stories |

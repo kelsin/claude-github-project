@@ -13,6 +13,7 @@ from .intake import cmd_add, cmd_import
 from .gitwt import cmd_guard, cmd_sync, cmd_worktree, cmd_worktree_remove
 from .pr import cmd_ci_wait, cmd_merge, cmd_merge_wait, cmd_pr_state
 from .sched import cmd_block, cmd_list, cmd_overlap, cmd_status, cmd_touches, cmd_wait
+from .unstick import cmd_unstick
 from .session import cmd_release, cmd_session_title, cmd_stop, cmd_use, cmd_worker
 from .story import (cmd_answers, cmd_ask, cmd_comment, cmd_feedback, cmd_move, cmd_prepare, cmd_preview, cmd_set)
 from .util import die
@@ -52,9 +53,11 @@ COMMANDS = [
         A("board", nargs="?", help="board URL or key; default: this session"), A("--cancel", action="store_true")]),
     ("worker", cmd_worker, "Register (start/stop/clear) a worker or set its phase", [
         A("action", choices=["start", "stop", "clear", "phase"]), A("item", nargs="?"), A("column", nargs="?"),
-        A("title", nargs="?", default="", help="the phase's detail text (worker phase); start looks the title up itself")]),
+        A("title", nargs="?", default="", help="the phase's detail text (worker phase); start looks the title up itself"),
+        A("--outcome", choices=["fail", "ok", "waiting"], help="stop: how the run ended, for the 3-strikes rule (fail adds a strike; ok and waiting reset it)")]),
     ("worktree", cmd_worktree, "Create or reuse the story's git worktree", [A("item")]),
-    ("worktree-remove", cmd_worktree_remove, "Remove the story's worktree and branch", [A("item")]),
+    ("worktree-remove", cmd_worktree_remove, "Remove the story's worktree and branch; refuses uncommitted or unpushed work", [
+        A("item"), A("--discard", action="store_true", help="remove it even so (you, not an agent)")]),
     ("sync", cmd_sync, "Rebase the story's worktree onto its remote branch and the latest default branch", [A("item")]),
     ("touches", cmd_touches, "Record (or read) the files and directories a story changes", [A("item"), A("paths", nargs="*")]),
     ("overlap", cmd_overlap, "Find stories touching the same files", [A("item")]),
@@ -82,8 +85,12 @@ COMMANDS = [
         A("--once", action="store_true", help="dispatch one cycle, wait for those workers, then exit"),
         A("--dry-run", action="store_true", help="print what would be dispatched; start nothing"),
         A("--verbose", action="store_true")]),
+    ("unstick", cmd_unstick, "Clear one story's operational state (worker, strikes, answered, Waiting On); you only, not agents", [
+        A("item"), A("--dry-run", action="store_true", help="list what would be cleared; change nothing"),
+        A("--kill", action="store_true", help="also stop its worker if it is still running")]),
     ("doctor", cmd_doctor, "Check the installation: gh, token scopes, board, clones, stale files", [
-        A("--board", help="board URL; default: the only or bound board")]),
+        A("--board", help="board URL; default: the only or bound board"),
+        A("--deep", action="store_true", help="also read the board: worker rows of stories that are gone")]),
     ("gc", cmd_gc, "Delete state of dead sessions and worktrees of finished stories", [
         A("--days", type=int, default=7, help="age of session files to delete"), A("--dry-run", action="store_true")]),
 ]

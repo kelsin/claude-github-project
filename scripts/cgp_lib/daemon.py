@@ -11,8 +11,10 @@ import signal
 import subprocess
 import sys
 import time
-from .consts import ALL_KEYS, HOME
-from .util import call, out
+from functools import partial
+from .consts import ALL_KEYS, HOME, STRIKES
+from .util import call, out, ps_field
+from .gh import RateLimited
 from .store import cfg, load_data, load_json, state_path, stop_path, touch_lock, update_data, update_state
 from .session import cmd_release, cmd_use, cmd_worker
 from .sched import snapshot
@@ -22,7 +24,6 @@ from .gitwt import wt_path
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CGP = os.path.join(ROOT, "scripts", "cgp")
 COLUMNS_DIR = os.path.join(ROOT, "skills", "run", "columns")
-STRIKES = 3  # failed or fruitless runs of one story in one column before the user is asked
 ID = re.compile(r"[A-Za-z0-9_-]{1,100}")
 REPO = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 PATH = re.compile(r"[^\x00-\x1f\x7f]+")
@@ -108,6 +109,20 @@ def seconds(env, default):
         return default
 
 
+def bump_strikes(key, progress, count, d):
+    """Count one strike for a finished run (progress, or a wait the board shows, forgets them); the new count goes into `count`."""
+    strikes = d.setdefault("daemonStrikes", {})
+    if progress:
+        strikes.pop(key, None)
+    else:
+        strikes[key] = strikes.get(key, 0) + 1
+        count.append(strikes[key])
+
+
+def drop_strike(key, d):
+    d.setdefault("daemonStrikes", {}).pop(key, None)
+
+
 class Daemon:
     def __init__(self, c, key, a):
         self.c, self.key, self.a = c, key, a
@@ -115,7 +130,7 @@ class Daemon:
         s = c["settings"]
         self.poll = seconds("CGP_DAEMON_POLL_SECONDS", s["pollSeconds"])
         self.deadline = seconds("CGP_DAEMON_DEADLINE_SECONDS", s["maxWorkerMinutes"] * 60)  # 0 = never
-        self.signals = 0
+        self.signals, self.rate_wait = 0, 0.0
 
     def say(self, msg):
         if self.a.verbose:
@@ -175,7 +190,7 @@ class Daemon:
         def mark(st):
             for w in st["workers"]:
                 if w["item"] == it["item"]:
-                    w.update(pid=proc.pid, token=token)
+                    w.update(pid=proc.pid, pgid=proc.pid, start=ps_field(proc.pid, "lstart"), token=token, log=path)
         update_state(mark)
         self.workers.append({"item": it["item"], "column": it["column"], "proc": proc, "token": token, "log": path, "at": time.time(), "killed": False})
         self.dispatched += 1
@@ -230,27 +245,25 @@ class Daemon:
         and the story really waits: a question to the user, or another story). Three strikes in one (story, column): ask the user."""
         items = {i["item"]: i for i in snap["items"]}
         asked = []
-        strikes = load_data().get("daemonStrikes", {})
         for f in self.finished:
             it, key = items.get(f["item"]), f"{f['item']}|{f['column']}"
             parked = it and (it["waiting"] or it["blockedBy"]) and re.match(r"\s*(waiting|blocked):", f.get("reply") or "")
-            if f["failed"] is None and (not it or it["column"] != f["column"] or parked):
-                strikes.pop(key, None)  # progress, or a wait the board shows
-            else:
-                strikes[key] = strikes.get(key, 0) + 1
-                if strikes[key] >= STRIKES and it and it["kind"] == "issue":
-                    reason = f["failed"] or "ended without moving it on"
-                    try:
-                        ask_user(self.c, f["item"], f"The dispatcher daemon's worker has {STRIKES} times in a row not got this story out of "
-                                                    f"{f['column']} ({reason}). Its logs are under {os.path.join(HOME, 'logs')}. "
-                                                    "Reply here with what to do, then work resumes.")
-                        asked.append(f["item"])
-                        strikes.pop(key)
-                    except SystemExit:
-                        log(f"could not ask about {f['item']}")
+            progress = f["failed"] is None and (not it or it["column"] != f["column"] or parked)
+            count = []
+            update_data(partial(bump_strikes, key, progress, count))  # against fresh data: the story's own commands change strikes meanwhile
+            if count and count[0] >= STRIKES and it and it["kind"] == "issue":
+                reason = f["failed"] or "ended without moving it on"
+                try:
+                    ask_user(self.c, f["item"], f"The dispatcher daemon's worker has {STRIKES} times in a row not got this story out of "
+                                                f"{f['column']} ({reason}). Its logs are under {os.path.join(HOME, 'logs')}. "
+                                                "Reply here with what to do, then work resumes.")
+                    asked.append(f["item"])
+                    update_data(partial(drop_strike, key))
+                except SystemExit:
+                    log(f"could not ask about {f['item']}")
         self.finished = []
 
-        update_data(lambda d: d.__setitem__("daemonStrikes", {k: v for k, v in strikes.items() if k.split("|")[0] in items}))
+        update_data(lambda d: d.__setitem__("daemonStrikes", {k: v for k, v in d.get("daemonStrikes", {}).items() if k.split("|")[0] in items}))
         return asked
 
     def dispatch(self, snap, asked):
@@ -283,8 +296,8 @@ class Daemon:
                 self.spawn(it, self.budget(it["item"]))
 
     def nap(self):
-        """Sleep until a worker exits or a poll interval has passed, enforcing deadlines meanwhile."""
-        end = time.time() + self.poll
+        """Sleep until a worker exits or a poll interval (longer while GitHub rate-limits us) has passed, enforcing deadlines meanwhile."""
+        end = time.time() + max(self.poll, self.rate_wait)
         while time.time() < end and self.signals < 1 and all(w["proc"].poll() is None for w in self.workers):
             self.reap()
             time.sleep(min(0.05, max(end - time.time(), 0)))
@@ -304,10 +317,15 @@ class Daemon:
                     raise
                 if self.a.once:
                     raise
-                log("the board could not be read; retrying")
+                if isinstance(e, RateLimited):  # wait twice as long each time, up to ten minutes; the next good read resets it
+                    self.rate_wait = min(max(self.rate_wait * 2, self.poll * 2), 600)
+                    log(f"GitHub is rate limiting us; waiting {self.rate_wait:g}s")
+                else:
+                    log("the board could not be read; retrying")
                 touch_lock(self.key)
                 self.nap()
                 continue
+            self.rate_wait = 0.0
             asked = self.judge(snap)
             self.say(f"cycle {cycles}: {snap['status']}, batch {len(snap['batch'])}, running {len(self.workers)}")
             if snap["stopRequested"] and not self.workers:

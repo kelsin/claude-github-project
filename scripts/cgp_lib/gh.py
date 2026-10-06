@@ -1,28 +1,75 @@
 """Wrappers around the gh CLI (GraphQL, paginated REST) and the comment trust model."""
 import json
+import os
+import re
 import subprocess
 import sys
+import time
 from .consts import MARK
 from .util import die
 
 
-def gh(*args, input=None, check=True):
-    p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
+class RateLimited(SystemExit):
+    """GitHub's rate limit. A SystemExit like die() raises (code 1), so every caller that survives a failed gh call survives this
+    too; the daemon alone looks for it, to wait longer."""
+
+
+TRANSIENT = re.compile(r"HTTP 5\d\d|time(d )?out|\bEOF\b|connection (reset|refused|closed)|no such host|TLS handshake|temporary failure", re.I)
+RATE_LIMIT = re.compile(r"rate limit|HTTP 429|RATE_LIMITED|abuse detection", re.I)
+BACKOFF = tuple(float(x) for x in os.environ.get("CGP_GH_BACKOFF", "1,3").split(","))  # waits before the retries of a transient failure
+WRITE_FLAGS = {"-f", "-F", "-X", "--method", "--input", "--field", "--raw-field"}
+# GraphQL mutations that give the same result when sent twice; every other one (creating things) is never retried
+IDEMPOTENT_MUTATIONS = ("updateProjectV2ItemFieldValue", "clearProjectV2ItemFieldValue", "updateProjectV2View", "updateProjectV2Field",
+                        "linkProjectV2ToRepository", "addProjectV2ItemById")
+
+
+def readonly(args):
+    """Whether a gh call only reads, so repeating it is safe (anything that writes, comments included, is never retried)."""
+    if args[:1] == ("pr",):
+        return args[1:2] in (("view",), ("checks",), ("diff",), ("list",))
+    return args[:1] == ("api",) and "graphql" not in args and not WRITE_FLAGS & set(args)
+
+
+def fail(msg, stderr):
+    if RATE_LIMIT.search(stderr or ""):
+        print(f"cgp: {msg}", file=sys.stderr)
+        raise RateLimited(1)
+    die(msg)
+
+
+def has_data(stdout):
+    """Whether stdout is a GraphQL response carrying `data` (gh exits 1 on partial errors, but there is nothing to retry)."""
+    try:
+        return isinstance(json.loads(stdout), dict) and "data" in json.loads(stdout)
+    except ValueError:
+        return False
+
+
+def gh(*args, input=None, check=True, retry=None):
+    retry = readonly(args) if retry is None else retry
+    for delay in (*BACKOFF, None):
+        p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
+        if not p.returncode or not retry or delay is None or not TRANSIENT.search(p.stderr) or has_data(p.stdout):
+            break
+        time.sleep(delay)
     if check and p.returncode:
-        die(f"gh {' '.join(args[:4])} failed: {(p.stderr or p.stdout).strip()}")
+        text = (p.stderr or p.stdout).strip()
+        fail(f"gh {' '.join(args[:4])} failed: {text}", p.stderr)
     return p
 
 
 def gql(query, **variables):
     body = json.dumps({"query": query, "variables": variables})
-    p = gh("api", "graphql", "--input", "-", input=body, check=False)  # exits 1 on any error, even with usable data
+    mutation = re.search(r"\{\s*(\w+)", query) if query.lstrip().startswith("mutation") else None
+    p = gh("api", "graphql", "--input", "-", input=body, check=False,  # exits 1 on any error, even with usable data
+           retry=not mutation or mutation.group(1) in IDEMPOTENT_MUTATIONS)
     try:
         res = json.loads(p.stdout)
     except json.JSONDecodeError:
-        die(f"gh api graphql failed: {(p.stderr or p.stdout).strip()}")
+        fail(f"gh api graphql failed: {(p.stderr or p.stdout).strip()}", p.stderr + p.stdout)
     data, errors = res.get("data"), res.get("errors")
     if data is None or (any(v is None for v in data.values()) and (errors or query.lstrip().startswith("mutation"))):
-        die(f"graphql: {json.dumps(errors or res)}")
+        fail(f"graphql: {json.dumps(errors or res)}", json.dumps(errors or res))
     if errors:  # partial result (e.g. one item whose content is not readable): keep the data, report the rest
         print(f"cgp: graphql: {json.dumps(errors)}", file=sys.stderr)
     return data
@@ -80,5 +127,5 @@ def trusted(repo, comment):
 
 
 def post_comment(repo, number, body):
-    p = gh("api", f"repos/{repo}/issues/{number}/comments", "-f", f"body={body}")
+    p = gh("api", f"repos/{repo}/issues/{number}/comments", "-f", f"body={body}", retry=False)  # a retry could post it twice
     return json.loads(p.stdout)

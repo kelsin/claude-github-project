@@ -14,6 +14,11 @@ import test_cgp
 ROOT = test_cgp.ROOT
 
 
+def ps_start(pid):
+    return subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                          env={**os.environ, "LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+
+
 class DaemonBase(test_cgp.Base):
     def setUp(self):
         super().setUp()
@@ -178,6 +183,153 @@ class TestStrikes(DaemonBase):
                 sys.path.remove(os.path.join(ROOT, "scripts"))
 
 
+class TestOrphans(DaemonBase):
+    """A daemon that died hard leaves its workers running; the next one to claim the board stops them (old state file names them)."""
+
+    def setUp(self):
+        super().setUp()
+        p = subprocess.Popen(["true"])
+        p.wait()
+        self.old = f"daemon-{p.pid}"
+        self.procs = []
+
+    def tearDown(self):
+        for p in self.procs:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                p.kill()  # not a group leader
+            p.wait()
+
+    def sleeper(self, ignore_term=False, new_session=True):
+        """A fake worker: sleeps in its own session (a group leader), optionally ignoring SIGTERM. Always killed in tearDown."""
+        code = ("import signal,sys\n" + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else "")
+                + "print('ready', flush=True)\nsys.stdin.readline()")
+        p = subprocess.Popen([sys.executable, "-c", code], start_new_session=new_session, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.procs.append(p)
+        self.assertEqual(p.stdout.readline().strip(), "ready")  # the signal handling is installed
+        return p
+
+    def lock(self):
+        return os.path.join(self.env["CGP_HOME"], "locks", os.path.basename(self.board_path()))
+
+    def leave(self, *rows, raw=None):
+        """What a daemon that was killed leaves behind: its lock (fresh heartbeat) and a state file with these worker rows."""
+        home = self.env["CGP_HOME"]
+        os.makedirs(os.path.join(home, "locks"), exist_ok=True)
+        with open(self.lock(), "w") as f:
+            json.dump({"session": self.old, "at": time.time()}, f)
+        with open(os.path.join(home, f"state-{self.old}.json"), "w") as f:
+            f.write(raw if raw is not None else json.dumps({"workers": list(rows)}))
+
+    def row(self, p, **kw):
+        return {"item": "i1", "column": "todo", "pid": p.pid, "pgid": p.pid, "start": ps_start(p.pid), "token": "t", **kw}
+
+    def strikes(self):
+        try:
+            return self.data().get("daemonStrikes", {})
+        except StopIteration:  # no data file yet
+            return {}
+
+    def old_rows(self):
+        with open(os.path.join(self.env["CGP_HOME"], f"state-{self.old}.json")) as f:
+            return json.load(f)["workers"]
+
+    def alive(self, p):
+        return p.poll() is None
+
+    def use(self):
+        return self.cgp("use", env={"CGP_SESSION": "daemon-new"})
+
+    def test_a_live_orphan_is_killed_its_row_cleared_and_a_strike_counted(self):
+        p = self.sleeper()
+        self.leave(self.row(p))
+        self.use()
+        self.assertFalse(self.alive(p))
+        self.assertEqual(self.old_rows(), [])
+        self.assertEqual(self.strikes(), {"i1|todo": 1})
+
+    def test_the_daemon_reaps_orphans_when_it_starts_and_does_not_double_dispatch(self):
+        p = self.sleeper()
+        self.leave(self.row(p))
+        self.script(default={"result": "done: one"})
+        proc, res = self.daemon("--once")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(self.alive(p))
+        self.assertEqual(res["dispatched"], 1)  # the orphan is gone, so the one new worker is the only one
+        self.assertIn("left running", proc.stderr)
+
+    def test_a_worker_that_ignores_sigterm_is_killed(self):
+        p = self.sleeper(ignore_term=True)
+        self.leave(self.row(p))
+        self.use()
+        self.assertFalse(self.alive(p))
+
+    def test_a_dead_daemons_state_file_is_found_without_its_lock(self):
+        p = self.sleeper()
+        self.leave(self.row(p))
+        os.remove(self.lock())  # as `cgp gc` does
+        path = os.path.join(self.env["CGP_HOME"], f"state-{self.old}.json")
+        with open(path, "w") as f:
+            json.dump({"boardKey": os.path.basename(self.lock())[:-5], "workers": [self.row(p)]}, f)
+        self.use()
+        self.assertFalse(self.alive(p))
+        self.assertEqual(self.old_rows(), [])
+        self.assertEqual(self.strikes(), {"i1|todo": 1})
+
+    def test_a_live_worker_that_could_not_be_stopped_keeps_its_row_and_is_named(self):
+        p = self.sleeper()
+        self.leave(self.row(p, start="Thu Jan  1 00:00:00 1970"))
+        r = self.cgp("use", env={"CGP_SESSION": "daemon-new"}, ok=False)
+        self.assertTrue(self.alive(p))
+        self.assertEqual([w["item"] for w in self.old_rows()], ["i1"])
+        self.assertIn("unstick <item> --kill", r.stderr)
+        self.assertIn("i1", r.stderr)
+
+    def test_a_dead_pid_is_only_cleared(self):
+        d = subprocess.Popen(["true"])
+        d.wait()
+        self.leave({"item": "i1", "column": "todo", "pid": d.pid, "pgid": d.pid, "start": "x", "token": "t"})
+        self.use()
+        self.assertEqual(self.old_rows(), [])
+        self.assertEqual(self.strikes(), {})
+
+    def test_a_pid_whose_start_time_does_not_match_is_left_alone(self):
+        p = self.sleeper()
+        self.leave(self.row(p, start="Thu Jan  1 00:00:00 1970"))
+        self.use()
+        self.assertTrue(self.alive(p))
+        self.assertEqual(self.strikes(), {})
+
+    def test_a_process_that_is_not_a_group_leader_is_left_alone(self):
+        p = self.sleeper(new_session=False)  # in the test's own group
+        self.leave(self.row(p, pgid=p.pid))
+        self.use()
+        self.assertTrue(self.alive(p))
+
+    def test_rows_without_identity_and_pid_1_are_never_signalled(self):
+        p = self.sleeper()
+        self.leave({"item": "i1", "column": "todo", "pid": p.pid}, {"item": "i2", "column": "todo", "pid": 1, "pgid": 1, "start": "x"})
+        self.use()
+        self.assertTrue(self.alive(p))
+
+    def test_a_missing_or_corrupt_old_state_does_nothing(self):
+        self.leave(raw="{not json")
+        self.use()
+        os.remove(os.path.join(self.env["CGP_HOME"], f"state-{self.old}.json"))
+        self.cgp("release", env={"CGP_SESSION": "daemon-new"})
+        self.leave()
+        os.remove(os.path.join(self.env["CGP_HOME"], f"state-{self.old}.json"))
+        self.use()
+
+    def test_a_live_daemons_workers_are_not_touched(self):
+        p = self.sleeper()
+        self.old = f"daemon-{os.getpid()}"  # alive; a takeover leaves it to notice by itself
+        self.leave(self.row(p))
+        self.cgp("use", "--takeover", env={"CGP_SESSION": "daemon-new"})
+        self.assertTrue(self.alive(p))
+
+
 class TestLifecycle(DaemonBase):
     def test_a_signal_lets_the_running_worker_finish_and_dispatches_nothing_new(self):
         self.script(default={"sleep": 1.5, "result": "done: slow"})
@@ -201,6 +353,19 @@ class TestLifecycle(DaemonBase):
             self.force(item, "done")
         p, res = self.daemon()
         self.assertEqual((p.returncode, res["stopped"], res["dispatched"]), (0, "all stories are Done", 0))
+
+
+class TestRateLimit(DaemonBase):
+    def test_a_rate_limit_doubles_the_nap_and_a_good_read_resets_it(self):
+        for item in ("i1", "i2", "i4"):
+            self.force(item, "done")  # the daemon ends once it can read the board
+        d = self.read_db()
+        d["failures"] = [{"match": "items(first:100", "times": 3, "stderr": "gh: HTTP 429: API rate limit exceeded"}]
+        self.write_db(d)
+        p, res = self.daemon("--verbose")
+        self.assertEqual((p.returncode, res["stopped"]), (0, "all stories are Done"), p.stderr)
+        waits = [line.split("waiting ")[1] for line in p.stderr.splitlines() if "rate limiting" in line]
+        self.assertEqual(waits, ["0.2s", "0.4s", "0.8s"])
 
 
 class TestSpend(DaemonBase):
