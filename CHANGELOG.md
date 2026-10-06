@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.0](https://github.com/kelsin/claude-github-project/compare/v0.4.2...v0.5.0) (2026-10-06)
+
+
+### :tada: Features
+
+* dispatch stories that unlock the most work first ([#57](https://github.com/kelsin/claude-github-project/issues/57)) ([789f0d8](https://github.com/kelsin/claude-github-project/commit/789f0d8a4e3380d83861ff07081d0d307ee70f1b))
+* recover faster from daemon death, corrupt state and github errors ([#63](https://github.com/kelsin/claude-github-project/issues/63)) ([3cb9926](https://github.com/kelsin/claude-github-project/commit/3cb99267e2f643965b159b2ccf76baa8af00d039))
+
+
+### :bug: Bug Fixes
+
+* stop Todo and Plan stories stalling behind later columns ([#64](https://github.com/kelsin/claude-github-project/issues/64)) ([413339a](https://github.com/kelsin/claude-github-project/commit/413339a692922e6f3fb7fd90260c921bdf42c9af))
+
+
+### :hammer_and_wrench: Code Refactoring
+
+* remove duplicated helpers and dead code ([#58](https://github.com/kelsin/claude-github-project/issues/58)) ([e4d7b8e](https://github.com/kelsin/claude-github-project/commit/e4d7b8e616c24f7b590ca3b1768391504ee3e8c3))
+* remove the daemon ([#65](https://github.com/kelsin/claude-github-project/issues/65)) ([a72bcc4](https://github.com/kelsin/claude-github-project/commit/a72bcc45d69c6daa34ec5b06395d2f241d52aa00))
+
 ## [0.4.2](https://github.com/kelsin/claude-github-project/compare/v0.4.1...v0.4.2) (2026-10-06)
 
 
