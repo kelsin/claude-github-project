@@ -3,7 +3,9 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -42,6 +44,26 @@ def safe(key):
 def strip_id(key):
     """A session id with everything outside [A-Za-z0-9_-] removed (the same sanitising as the mod)."""
     return re.sub(r"[^A-Za-z0-9_-]", "", key or "")
+
+
+def pid_alive(pid):
+    """Whether a process with this pid exists on this host (a process we may not signal still counts)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def ps_field(pid, field):
+    """One `ps -o` field of a process ("lstart" = when it started, "stat"), '' when it is gone or ps fails."""
+    try:
+        p = subprocess.run(["ps", "-o", f"{field}=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return p.stdout.strip() if p.returncode == 0 else ""
 
 
 def split_repo(repo):

@@ -2,16 +2,73 @@
 import json
 import os
 import re
+import signal
 import sys
 import time
 from .consts import DEFAULT_PHASE, HOME, LOCKS, PHASES
-from .util import die, now_iso, out, safe, strip_id
-from .store import board_for_cwd, cfg, env_board, ensure_home, list_boards, load_board, load_json, lock_alive, lock_file, lock_holder, lock_mine, locked, same_board, save_json, sid, state_path, stop_path, update_state
+from .util import die, now_iso, out, pid_alive, ps_field, safe, strip_id
+from .store import board_for_cwd, cfg, daemon_pid, env_board, ensure_home, list_boards, load_board, load_json, lock_alive, lock_file, lock_holder, lock_mine, locked, same_board, save_json, sid, state_path, stop_path, update_data, update_state
 from .board import get_item, parse_board_url
 
 
 def session_title(kind, name):
     return f"{'🚀' if kind == 'run' else '🛠️'} {name}"
+
+
+def kill_orphan(w, grace=2.0):
+    """Kill a dead daemon's worker process group, but only when the row's identity still matches the process: a group leader (pid and
+    pgid recorded equal), not our own group, and started at the recorded time (a reused pid starts later). True when it was killed."""
+    pid, start = w.get("pid"), w.get("start")
+    if not (isinstance(pid, int) and pid > 1 and w.get("pgid") == pid and start and pid_alive(pid)):
+        return False
+    try:
+        if os.getpgid(pid) != pid or pid == os.getpgrp():
+            return False
+    except OSError:
+        return False
+    if ps_field(pid, "lstart") != start:
+        return False
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return False
+    end = time.time() + grace
+    while time.time() < end and not ps_field(pid, "stat").startswith("Z") and pid_alive(pid):
+        time.sleep(0.05)
+    try:
+        os.killpg(pid, signal.SIGKILL)  # whatever ignored SIGTERM, or outlived the group's leader
+    except (ProcessLookupError, PermissionError):
+        pass
+    return True
+
+
+def reap_orphans(old):
+    """The previous holder of a board's lock was a daemon that is gone: stop the workers it left running (its state file names them),
+    count one strike for each story and clear the rows. A missing or unreadable state file does nothing. Returns the stories reaped."""
+    session = (old or {}).get("session")
+    pid = daemon_pid(session)
+    if pid is None or pid_alive(pid):
+        return []
+    path = os.path.join(HOME, f"state-{session}.json")
+    try:
+        with open(path) as f:
+            st = json.load(f)
+        rows = [w for w in st["workers"] if isinstance(w, dict)]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    reaped = [w for w in rows if kill_orphan(w)]
+
+    def strike(d):
+        strikes = d.setdefault("daemonStrikes", {})
+        for w in reaped:
+            key = f"{w['item']}|{w.get('column')}"
+            strikes[key] = strikes.get(key, 0) + 1
+    if reaped:
+        update_data(strike)
+        print(f"cgp: stopped {len(reaped)} worker(s) the dead daemon {session} left running: {', '.join(w['item'] for w in reaped)}", file=sys.stderr)
+    st["workers"] = []
+    save_json(path, st)
+    return [w["item"] for w in reaped]
 
 
 def cmd_use(a):
@@ -40,9 +97,12 @@ def cmd_use(a):
         if holder and not a.takeover:
             out({"heldBy": holder["session"], "minutesSinceHeartbeat": round((time.time() - holder["at"]) / 60, 1)})
             die("another session is running this board's loop (use --takeover only if that session is gone)", code=5)
+        old = load_json(lock_file(key), None)
         os.makedirs(LOCKS, mode=0o700, exist_ok=True)
         save_json(lock_file(key), {"session": sid(), "at": time.time()})
-    update_state(lambda st: st.update(boardKey=key, board=boards[key]["board"], workers=[]))
+        update_state(lambda st: st.update(boardKey=key, board=boards[key]["board"], workers=[]))
+        if old and old.get("session") != sid():
+            reap_orphans(old)
     if os.path.exists(stop_path()):
         os.remove(stop_path())  # a stop request left from an earlier run
     c = boards[key]

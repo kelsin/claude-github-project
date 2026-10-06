@@ -2,10 +2,11 @@
 import fcntl
 import json
 import os
+import re
 import time
 from .consts import BOARDS, DEFAULTS, HOME, KEY_RENAMES, LOCKS, META, LOCK_STALE_SECONDS, PATHS, SCHEMA
 from .gitutil import cwd_repo
-from .util import die, safe, strip_id
+from .util import die, pid_alive, safe, strip_id
 
 
 def load_json(path, default):
@@ -204,8 +205,18 @@ def lock_file(key):
     return os.path.join(LOCKS, f"{safe(key)}.json")
 
 
+def daemon_pid(session):
+    """The pid in a daemon's session id (daemon-<pid>), None for any other id."""
+    m = re.fullmatch(r"daemon-([0-9]{1,9})", session or "")
+    return int(m.group(1)) if m else None
+
+
 def lock_alive(lk):
-    return bool(lk) and time.time() - lk.get("at", 0) < LOCK_STALE_SECONDS
+    """A lock is live while its holder heartbeats; a daemon whose process is gone on this host is dead at once."""
+    if not lk or time.time() - lk.get("at", 0) >= LOCK_STALE_SECONDS:
+        return False
+    pid = daemon_pid(lk.get("session"))
+    return pid is None or (pid > 1 and pid_alive(pid))
 
 
 def lock_mine(key):

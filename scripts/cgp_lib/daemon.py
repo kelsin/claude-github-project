@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 from .consts import ALL_KEYS, HOME
-from .util import call, out
+from .util import call, out, ps_field
 from .store import cfg, load_data, load_json, state_path, stop_path, touch_lock, update_data, update_state
 from .session import cmd_release, cmd_use, cmd_worker
 from .sched import snapshot
@@ -175,7 +175,7 @@ class Daemon:
         def mark(st):
             for w in st["workers"]:
                 if w["item"] == it["item"]:
-                    w.update(pid=proc.pid, token=token)
+                    w.update(pid=proc.pid, pgid=proc.pid, start=ps_field(proc.pid, "lstart"), token=token, log=path)
         update_state(mark)
         self.workers.append({"item": it["item"], "column": it["column"], "proc": proc, "token": token, "log": path, "at": time.time(), "killed": False})
         self.dispatched += 1
