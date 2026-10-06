@@ -6,7 +6,6 @@ from .store import cfg
 ROLES = ("planner", "reviewer", "implementer")
 NAMES = ("sonnet", "opus", "haiku", "fable")
 RATINGS = ("low", "medium", "high")
-SETTINGS = tuple(f"{r}Model" for r in ROLES)
 
 
 def parse(value):
