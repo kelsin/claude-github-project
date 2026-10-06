@@ -63,7 +63,7 @@ STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a b
 # setting, or 2 when that is 0 too
 # guardFiles: fnmatch globs (tried on the path and on its file name, ignoring case) for files an agent may only change when the approved plan lists them;
 # these built-in ones always apply, the setting can only add to them
-OLD_POLL_SECONDS = 30  # the default before 0.5: setup stored it in every board config, so a stored 30 means "never changed"
+OLD_POLL_SECONDS = 30  # the default before this change: setup stored it in every board config, so a stored 30 means "never changed"
 POLL_SECONDS = 15
 DEFAULTS = {"concurrency": 0, "pollSeconds": POLL_SECONDS, "remoteControl": 1, "notifyCommand": "", "previewProvider": "netlify", "draftPRs": 0,
             "plannerModel": "", "reviewerModel": "", "implementerModel": "", "maxWorkerMinutes": 240, "nativeDependencies": 1,

@@ -5,7 +5,7 @@ Show all with `scripts/cgp config`; set one with `scripts/cgp config <key> <valu
 | Key | Default | Meaning |
 |---|---|---|
 | `concurrency` | 0 | cap on parallel workers (0 = no cap) |
-| `pollSeconds` | 15 | how often the loop polls the board. Each poll reads the board (GraphQL) plus one REST comments call per story waiting on `You`, so 15 s is 240 polls an hour; going much lower (10 s with many waiting stories) approaches the 5000 requests/hour limit. `cgp setup` and `cgp doctor` move a stored 30 (the old default) to 15; set your own with `cgp config pollSeconds N` |
+| `pollSeconds` | 15 | how often the loop polls the board. Each poll reads the board (GraphQL) plus one REST comments call per story waiting on `You`, so 15 s is 240 polls an hour; the REST budget is the one at risk, because of the comments call per story waiting on `You` (10 s with many waiting stories approaches the 5000 requests/hour limit), and workers share the token's budgets. `cgp setup` and `cgp doctor` move a stored 30 (the old default) to 15; set your own with `cgp config pollSeconds N` |
 | `remoteControl` | 1 | `/cgp:run` turns on Remote Control for its session when it runs in the Claude desktop app, so you can follow and steer the loop from claude.ai or the phone; 0 skips that |
 | `maxWorkerMinutes` | 240 | a worker running longer is reported as `stalled` by `cgp list` and released by the loop (0 = never) |
 | `nativeDependencies` | 1 | `on` / `off`: GitHub's own "blocked by" issue dependencies also hold a story back (see [architecture](architecture.md)); `off` leaves only cgp's blocks |

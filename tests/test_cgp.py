@@ -288,8 +288,35 @@ class TestNotStartingMarker(Base):
         self.assertEqual(snap["held"], ["three"])
         self.assertEqual([self.waiting_on(i) for i in ("i1", "i2", "i3")], [None, "Another story", None])
 
+    def test_cap_with_partly_free_slots_dispatches_one_and_marks_the_rest(self):
+        self.approved("i1", "i2", "i3")
+        self.cgp("config", "concurrency", "2")
+        self.cgp("worker", "start", "i1", "plan_approved")
+        snap = self.cgp("list")
+        self.assertEqual([i["item"] for i in snap["batch"]], ["i2"])
+        self.assertEqual([self.waiting_on(i) for i in ("i1", "i2", "i3")], [None, None, "Another story"])
+        self.assertEqual([q["title"] for q in snap["queued"]], ["three"])
+
+    def test_a_planning_column_story_past_the_cap_is_not_marked(self):
+        self.approved("i1", "i2")
+        self.force("i3", "plan")
+        self.cgp("config", "concurrency", "1")
+        self.cgp("list")
+        self.assertIsNone(self.waiting_on("i3"))
+
+    def test_stale_marker_on_an_in_flight_story_is_cleared(self):
+        self.approved("i1", "i2")
+        self.cgp("config", "concurrency", "1")
+        self.cgp("list")
+        self.assertEqual(self.waiting_on("i2"), "Another story")
+        self.cgp("worker", "start", "i2", "plan_approved")
+        self.cgp("list")
+        self.assertIsNone(self.waiting_on("i2"))
+
     def test_stop_marks_nothing(self):
         self.approved("i1", "i2", "i3")
+        for i in ("i1", "i2", "i3"):
+            self.cgp("touches", i, "src/a.py")
         self.cgp("config", "concurrency", "1")
         self.cgp("stop")
         snap = self.cgp("list")
@@ -312,11 +339,14 @@ class TestNotStartingMarker(Base):
         self.approved("i1", "i2", "i3")
         self.cgp("config", "concurrency", "1")
         self.cgp("list")
+        self.cgp("use")  # the loop is running
         p = subprocess.run([sys.executable, CGP, "status"], capture_output=True, text=True, cwd=self.tmp, env=self.env)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("two queued", p.stdout)
         res = self.cgp("status", "--json")
         self.assertEqual(sorted(res["notStarting"]), ["three", "two"])
+        self.cgp("release")  # the loop is gone: the persisted reasons are stale
+        self.assertEqual(self.cgp("status", "--json")["notStarting"], {})
 
     def test_status_flags_you_without_a_question(self):
         self.approved("i1")
@@ -333,7 +363,9 @@ class TestNotStartingMarker(Base):
             self.setup_board()
             self.assertEqual(self.cgp("config")["pollSeconds"], expect)
         self.cgp("config", "pollSeconds", "30")
+        self.cgp("repo-path", "acme/app", self.make_clone())  # a known clone, so nothing else fails the doctor
         p = subprocess.run([sys.executable, CGP, "doctor"], capture_output=True, text=True, cwd=self.tmp, env=self.env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("pollSeconds", p.stdout)
         self.assertEqual(self.cgp("config")["pollSeconds"], 15)
 

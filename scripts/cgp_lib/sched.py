@@ -19,8 +19,8 @@ from .story import ask_user, process_replies
 
 def sync_story_field(c, live, held_back=frozenset(), in_flight=frozenset()):
     """Show why a story is not starting: Waiting On = 'Another story' while it has live blockers or is held back (overlap deferral,
-    queued behind the concurrency cap), and not waiting on you. The marker clears once none of that holds. 'You' is never touched,
-    and neither is a story a worker already owns."""
+    queued behind the concurrency cap), and not waiting on you. The marker clears once none of that holds. 'You' is never touched.
+    A story a worker already owns is never marked, but a stale marker on it is still cleared."""
     w = c["fields"]["waiting"]
     if not w.get("story"):  # a config from before this option existed: add it to the board now
         b = c["board"]
@@ -28,9 +28,7 @@ def sync_story_field(c, live, held_back=frozenset(), in_flight=frozenset()):
         w["story"] = ensure_story_option(field)
         update_board(lambda cur: cur["fields"]["waiting"].__setitem__("story", w["story"]))
     for i in live:
-        if i["item"] in in_flight:
-            continue
-        desired = bool(i["blockedBy"]) or i["item"] in held_back
+        desired = i["item"] not in in_flight and (bool(i["blockedBy"]) or i["item"] in held_back)
         if desired and not i["waitingOn"]:
             set_single(c, i["item"], w["id"], w["story"])
             i["waitingOn"] = STORY_OPTION
@@ -229,11 +227,11 @@ def snapshot(c):
     batch = [] if stop else actionable[:free] if cap > 0 else actionable  # a stop request dispatches nothing new
     # why an approved story is not starting: it overlaps a rival, or it waits for a free worker slot (a stop makes the batch empty
     # on purpose, so it queues nothing)
-    queued = [i for i in actionable[free:] if starting(i)] if cap > 0 and not stop else []
+    queued = [i for i in actionable[free:] if starting(i)] if cap > 0 and not stop else []  # (stop: see held_back below)
     reasons = {i["item"]: "waits for " + ", ".join(i["blockedBy"]) for i in blocked}
     reasons.update({i["item"]: "overlaps with " + ", ".join(i["conflictsWith"]) for i in deferred if starting(i)})
     reasons.update({i["item"]: f"queued: all {cap} worker slots are busy" for i in queued})
-    held_back = {i["item"] for i in deferred if starting(i)} | {i["item"] for i in queued}
+    held_back = set() if stop else {i["item"] for i in deferred if starting(i)} | {i["item"] for i in queued}
     sync_story_field(c, live, held_back, in_flight)
     status = "done" if not live else "work" if batch else "idle"  # idle also when the cap is full
     stalled = stalled_workers(c)
@@ -322,7 +320,7 @@ def cmd_status(a):
     workers = [{**w, "minutes": round(age_seconds(w.get("startedAt")) / 60)} for w in state.get("workers", [])]
     data = load_data()
     asked = data.get("asked", {})
-    why = {i["title"]: data.get("reasons", {})[i["item"]] for i in live if i["item"] in data.get("reasons", {})}
+    why = {i["title"]: data.get("reasons", {})[i["item"]] for i in live if lock and i["item"] in data.get("reasons", {})}  # stale once the loop is gone
     stale = [i["title"] for i in live if i["column"] in ("plan_approved", "implement") and i["waitingOn"] == "You" and i["item"] not in asked]
     res = {"board": c["board"], "counts": {k: len(v) for k, v in by_col.items()}, "done": done,
            "waitingOnYou": [{"title": i["title"], "url": i["url"]} for i in live if i["waiting"]],
