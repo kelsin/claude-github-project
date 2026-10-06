@@ -24,7 +24,7 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
 
 If `list` or `wait` exits 5, another session took this board over: stop and tell the user.
 
-1. `CGP list --brief` → JSON with `status`, `batch`, `counts`, `waitingOnYou`, `stopRequested`, `inFlight`, `blocked`, `deferred`, `stalled`.
+1. `CGP list --brief` (first cycle only; after that, the JSON `CGP wait` returned is the next cycle's input when its `status` is `work`, so do not read the board a second time) → JSON with `status`, `batch`, `counts`, `waitingOnYou`, `stopRequested`, `inFlight`, `blocked`, `deferred`, `stalled`, `queued` (approved stories waiting for a free worker slot; the CLI marks them Waiting On: Another story).
 2. `stopRequested: true` (the user pressed the stop button, or ran `CGP stop`): `batch` is empty, so nothing new is dispatched. If `inFlight` is empty, run `CGP stop --cancel` and `CGP release`, report "stopped; run /cgp:run to continue" and stop. Otherwise go to step 5 (nothing is dispatched): the running workers finish, then this step ends the loop.
 3. `status: "done"`: if `inFlight` is non-empty (a worker is still running), go to step 5; otherwise `CGP release`, report "all stories are Done" and stop. This is the only way the loop ends by itself.
 4. `status: "work"`:
@@ -39,7 +39,7 @@ If `list` or `wait` exits 5, another session took this board over: stop and tell
      Delegate planning, review, implementation and fixes to sub-agents with the Agent tool (rule 4, including its fallback).
      When finished (or blocked) run `CGP worker stop <item>` and reply with one line: "<title>: <outcome>".
      ```
-5. Wait: `CGP wait --timeout 540` via Bash (set the Bash timeout to 560000). It polls the board every `pollSeconds` and returns as soon as a story becomes actionable (new, answered, approved, or moved by the user), a worker is released (`worker stop`), all stories are Done, the user requests a stop and no worker is left, or the timeout passes. Then start the next cycle. Do not sleep any other way. Before waiting with `status: "idle"` and no workers in flight, print the waiting list once: if the set of waiting stories changed since the last report, one short list of `waitingOnYou` (title and url only), `blocked` (title and who they wait for), and the Plan Review / PR Review counts.
+5. Wait: `CGP wait --timeout 540` via Bash (set the Bash timeout to 560000). It polls the board every `pollSeconds` and returns as soon as a story becomes actionable (new, answered, approved, or moved by the user), a worker is released (`worker stop`), all stories are Done, the user requests a stop and no worker is left, or the timeout passes. Then start the next cycle with that JSON when `status` is `work` (a `wait` result has the same fields as `list --brief`). Do not sleep any other way. Before waiting with `status: "idle"` and no workers in flight, print the waiting list once: if the set of waiting stories changed since the last report, one short list of `waitingOnYou` (title and url only), `blocked` (title and who they wait for), and the Plan Review / PR Review counts.
 6. Worker completions arrive as notifications. Print one line `<emoji> <title>: <outcome>` for each. Workers stop themselves; do not `worker stop` on a normal completion, because the story may already have been re-dispatched in its new column. Only when the notification is an error or crash run `CGP worker stop <item>` so the story is released. The story's new column is handled by the next cycle, not by the same worker.
 
 ## Rules

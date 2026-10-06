@@ -17,8 +17,10 @@ from .policy import current_rating
 from .story import ask_user, process_replies
 
 
-def sync_story_field(c, live):
-    """Show the hierarchy on the board: Waiting On = 'Another story' while a story has live blockers (and is not waiting on you)."""
+def sync_story_field(c, live, held_back=frozenset(), in_flight=frozenset()):
+    """Show why a story is not starting: Waiting On = 'Another story' while it has live blockers or is held back (overlap deferral,
+    queued behind the concurrency cap), and not waiting on you. The marker clears once none of that holds. 'You' is never touched,
+    and neither is a story a worker already owns."""
     w = c["fields"]["waiting"]
     if not w.get("story"):  # a config from before this option existed: add it to the board now
         b = c["board"]
@@ -26,10 +28,13 @@ def sync_story_field(c, live):
         w["story"] = ensure_story_option(field)
         update_board(lambda cur: cur["fields"]["waiting"].__setitem__("story", w["story"]))
     for i in live:
-        if i["blockedBy"] and not i["waitingOn"]:
+        if i["item"] in in_flight:
+            continue
+        desired = bool(i["blockedBy"]) or i["item"] in held_back
+        if desired and not i["waitingOn"]:
             set_single(c, i["item"], w["id"], w["story"])
             i["waitingOn"] = STORY_OPTION
-        elif not i["blockedBy"] and i["waitingOn"] == STORY_OPTION:
+        elif not desired and i["waitingOn"] == STORY_OPTION:
             clear_field(c, i["item"], w["id"])
             i["waitingOn"] = None
 
@@ -209,7 +214,6 @@ def snapshot(c):
         rows = block_rows(by_id, blocks.get(i["item"], []))
         i["blockedBy"] = [r["title"] for r in rows]
         i["blockers"] = [{"title": r["title"], "column": r["column"], "waiting": r["waiting"]} for r in rows]
-    sync_story_field(c, live)
     # a block gates a story that is about to start work (see starting)
     parents = parent_edges(by_id, data)  # a story waiting for its sub-stories is never dispatched, whatever its column
     blocked = [i for i in live if i["blockedBy"] and (starting(i) or i["item"] in parents)]
@@ -218,9 +222,19 @@ def snapshot(c):
                   and i["item"] not in in_flight]
     actionable.sort(key=lambda i: (ACTIONABLE.index(i["column"]), i["priorityRank"]))  # stable: board order breaks ties
     cap = c["settings"]["concurrency"]
-    actionable, deferred = pick_compatible(c, actionable, live, in_flight, max(cap - len(in_flight), 0) if cap > 0 else None)
+    free = max(cap - len(in_flight), 0)
+    actionable, deferred = pick_compatible(c, actionable, live, in_flight, free if cap > 0 else None)
     waiting = [i for i in live if i["waiting"]]
-    batch = [] if stop_requested() else actionable[: max(cap - len(in_flight), 0)] if cap > 0 else actionable  # a stop request dispatches nothing new
+    stop = stop_requested()
+    batch = [] if stop else actionable[:free] if cap > 0 else actionable  # a stop request dispatches nothing new
+    # why an approved story is not starting: it overlaps a rival, or it waits for a free worker slot (a stop makes the batch empty
+    # on purpose, so it queues nothing)
+    queued = [i for i in actionable[free:] if starting(i)] if cap > 0 and not stop else []
+    reasons = {i["item"]: "waits for " + ", ".join(i["blockedBy"]) for i in blocked}
+    reasons.update({i["item"]: "overlaps with " + ", ".join(i["conflictsWith"]) for i in deferred if starting(i)})
+    reasons.update({i["item"]: f"queued: all {cap} worker slots are busy" for i in queued})
+    held_back = {i["item"] for i in deferred if starting(i)} | {i["item"] for i in queued}
+    sync_story_field(c, live, held_back, in_flight)
     status = "done" if not live else "work" if batch else "idle"  # idle also when the cap is full
     stalled = stalled_workers(c)
     check(c, items, stalled)
@@ -234,8 +248,9 @@ def snapshot(c):
         "inFlight": sorted(in_flight),
         "actionableTotal": len(actionable),
         "waitingOnYou": waiting,
-        "blocked": [{"title": i["title"], "blockedBy": i["blockedBy"], "blockers": i["blockers"]} for i in blocked],
-        "deferred": [{"title": i["title"], "conflictsWith": i["conflictsWith"]} for i in deferred],
+        "blocked": [{"title": i["title"], "blockedBy": i["blockedBy"], "blockers": i["blockers"], "reason": reasons[i["item"]]} for i in blocked],
+        "deferred": [{"title": i["title"], "conflictsWith": i["conflictsWith"], "reason": reasons.get(i["item"])} for i in deferred],
+        "queued": [{"title": i["title"], "reason": reasons[i["item"]]} for i in queued],
         "stalled": stalled,
         "held": [i["title"] for i in live if i["held"]],
         "items": items,
@@ -251,6 +266,7 @@ def snapshot(c):
 
     def prune(d):
         d["deferred"] = [i["item"] for i in deferred]
+        d["reasons"] = reasons  # for `cgp status`, which does not build a snapshot
         d["blocks"] = {k: v for k, v in local_blocks(by_id, d.get("blocks")).items() if v}  # re-read under the lock: keeps blocks written meanwhile
         d["epicOrder"] = {k: v for k, v in ordered_blocks(by_id, d.get("epicOrder")).items() if v}
         d["touches"] = {k: v for k, v in d.get("touches", {}).items() if k in live_ids}
@@ -304,10 +320,14 @@ def cmd_status(a):
     session = (lock or {}).get("session")
     state = load_json(os.path.join(HOME, f"state-{strip_id(session)}.json"), {}) if session else {}
     workers = [{**w, "minutes": round(age_seconds(w.get("startedAt")) / 60)} for w in state.get("workers", [])]
+    data = load_data()
+    asked = data.get("asked", {})
+    why = {i["title"]: data.get("reasons", {})[i["item"]] for i in live if i["item"] in data.get("reasons", {})}
+    stale = [i["title"] for i in live if i["column"] in ("plan_approved", "implement") and i["waitingOn"] == "You" and i["item"] not in asked]
     res = {"board": c["board"], "counts": {k: len(v) for k, v in by_col.items()}, "done": done,
            "waitingOnYou": [{"title": i["title"], "url": i["url"]} for i in live if i["waiting"]],
            "blocked": [b for b in blocked if b["blockedBy"]], "githubBlockedBy": github, "workers": workers,
-           "held": [i["title"] for i in live if i["held"]], "autoApprove": c["settings"]["autoApprove"],
+           "held": [i["title"] for i in live if i["held"]], "notStarting": why, "waitingOnYouNothingAsked": stale, "autoApprove": c["settings"]["autoApprove"],
            "loop": {"session": session, "heartbeatMinutes": round((time.time() - lock["at"]) / 60, 1)} if lock else None,
            "review": {k: [{"title": i["title"], "url": i["url"]} for i in by_col.get(k, [])] for k in ("plan_review", "pr_review")}}
     if a.json:
@@ -334,6 +354,12 @@ def cmd_status(a):
         show(f"🤖 auto-approval policy: {res['autoApprove']} (autoApproveFiles: {', '.join(c['settings']['autoApproveFiles']) or 'none'})")
     for b in res["blocked"]:
         show(f"⛓ {b['title']} waits for {', '.join(b['blockedBy'])}")
+    for b in res["blocked"]:
+        why.pop(b["title"], None)  # already shown above
+    for title, reason in why.items():
+        show(f"⏳ {title} {reason}")
+    for title in stale:
+        show(f"❔ {title} is waiting on you but nothing was asked: clear the Waiting On field")
     for g in res["githubBlockedBy"]:
         shown = ", ".join(f"{b['story']} (opened by {b['author'] or '?'}{'' if b['onBoard'] else '; not on this board, ignored'})" for b in g["blockedBy"])
         show(f"🔗 {g['title']} is blocked by {shown} on GitHub")

@@ -5,7 +5,7 @@ import os
 import re
 import subprocess
 import sys
-from .consts import ALL_KEYS, BOOL_SETTINGS, FLOAT_SETTINGS, LIST_SETTINGS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, PATHS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
+from .consts import ALL_KEYS, BOOL_SETTINGS, FLOAT_SETTINGS, LIST_SETTINGS, STRING_SETTINGS, PRIORITY_FIELD, PRIORITY_OPTIONS, AUTO_FIELD, AUTO_OPTIONS, COLUMNS, DEFAULTS, OLD_POLL_SECONDS, PATHS, POLL_SECONDS, PR_URL, SCHEMA, SKIP, STORY_OPTION, TEXT_FIELDS, VIEWS, WAITING_FIELD
 from .util import die, norm, out, safe, split_repo
 from .gh import gh, gql
 from .gitutil import origin_ok
@@ -356,6 +356,15 @@ def ensure_views(proj, fields):
     return done, updated
 
 
+def migrate_poll_default(settings):
+    """Boards set up before the default dropped to 15 s store the old default (30); move it to the new one. A custom value stays.
+    Returns True when it changed the value."""
+    if settings.get("pollSeconds") == OLD_POLL_SECONDS:
+        settings["pollSeconds"] = POLL_SECONDS
+        return True
+    return False
+
+
 def cmd_setup(a):
     check_scope()
     kind, owner, number = parse_board_url(a.url)
@@ -432,6 +441,7 @@ def cmd_setup(a):
         "repos": repos,
         "settings": {**DEFAULTS, **old.get("settings", {})},
     }
+    migrate_poll_default(c["settings"])
 
     skipped = []
     for r in proj["repositories"]["nodes"]:

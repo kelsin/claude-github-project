@@ -19,7 +19,7 @@ Planning and review share one worker run (as do implementing and PR review), so 
 
 ## Dispatch
 
-The loop dispatches one background worker per actionable story (no cap by default) and keeps watching the board: a story that arrives while others are mid-implementation is picked up on the next poll, and a finished worker's story is dispatched again in its new column. When several stories are ready to start and some touch the same files (per `cgp touches`), the loop starts the largest group that doesn't collide and holds the rest back until their rivals finish. `concurrency` caps workers in flight. When only stories in your columns, or waiting on your answers, are left, it polls the board every 30 seconds and resumes the moment something changes.
+The loop dispatches one background worker per actionable story (no cap by default) and keeps watching the board: a story that arrives while others are mid-implementation is picked up on the next poll, and a finished worker's story is dispatched again in its new column. When several stories are ready to start and some touch the same files (per `cgp touches`), the loop starts the largest group that doesn't collide and holds the rest back until their rivals finish. `concurrency` caps workers in flight. A Plan Approved story that is not starting because it is queued behind that cap, or held back for a file overlap, shows `Waiting On: Another story` on the board (cleared once it starts); `cgp status` says which. When only stories in your columns, or waiting on your answers, are left, it polls the board every 15 seconds (`pollSeconds`) and resumes the moment something changes.
 
 ## Story fields
 

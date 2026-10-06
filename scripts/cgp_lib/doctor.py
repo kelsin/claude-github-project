@@ -10,8 +10,8 @@ import time
 from .consts import AUTO_FIELD, PRIORITY_FIELD, HOME, LOCK_STALE_SECONDS, LOCKS, STORY_OPTION, TEXT_FIELDS, WAITING_FIELD
 from .util import die, out, strip_id
 from .gh import gh, gql
-from .store import list_boards, load_board, load_json
-from .board import fetch_items, fetch_project, fields_by_name, parse_board_url, parse_item
+from .store import list_boards, load_board, load_json, save_board
+from .board import fetch_items, migrate_poll_default, fetch_project, fields_by_name, parse_board_url, parse_item
 from .gitutil import git
 from .gitwt import is_dirty
 from .notify import command_problem
@@ -138,6 +138,9 @@ def cmd_doctor(a):
     for c in boards:
         title = c["board"]["title"]
         b = c["board"]
+        if migrate_poll_default(c["settings"]):
+            save_board(c)
+            check(f"{title}: pollSeconds", True, "moved from the old default of 30 s to 15 s (cgp config pollSeconds N sets your own)", info=True)
         try:
             proj = fetch_project(b["kind"], b["owner"], b["number"])
         except SystemExit:

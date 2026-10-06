@@ -134,10 +134,12 @@ elif args[:2] == ["api", "graphql"]:
         fname = next(x["name"] for x in db["fields"] if x["id"] == v["f"])
         item = next(i for i in db["items"] if i["id"] == v["i"])
         item["values"][fname] = {"optionId": v["o"]} if "o" in v and "t" not in v else {"text": v["t"]}
+        db.setdefault("mutations", []).append({"op": "set", "item": item["id"], "field": fname})
         r = {}
     elif "clearProjectV2ItemFieldValue" in q:
         fname = next(x["name"] for x in db["fields"] if x["id"] == v["f"])
         next(i for i in db["items"] if i["id"] == v["i"])["values"].pop(fname, None)
+        db.setdefault("mutations", []).append({"op": "clear", "item": v["i"], "field": fname})
         r = {}
     elif "items(first:100" in q:
         start, size = int(v.get("after") or 0), db.get("page_size") or len(db["items"])
