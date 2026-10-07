@@ -66,6 +66,8 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@example.com
           git config --global init.defaultBranch main
+      - name: Allow long paths in checkouts and worktrees
+        run: git config --global core.longpaths true
       - run: python tests/test_windows.py
       - run: python scripts/cgp --help
       - name: Full suite

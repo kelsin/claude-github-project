@@ -4,6 +4,8 @@ import glob
 import importlib
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -80,10 +82,31 @@ class TestWindowsImports(unittest.TestCase):
         commands = [h["command"] for g in hooks["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
         self.assertTrue(commands and all("scripts/cgp" in c for c in commands))
 
+    @unittest.skipUnless(shutil.which("bash"), "needs bash")
+    def test_hooks_json_falls_through_a_broken_python3(self):
+        with open(os.path.join(ROOT, "hooks", "hooks.json"), encoding="utf-8") as f:
+            command = json.load(f)["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = os.path.join(tmp, "plugin")
+            os.makedirs(os.path.join(plugin, "scripts"))
+            with open(os.path.join(plugin, "scripts", "cgp"), "w") as f:
+                f.write("import sys; print('ran', *sys.argv[1:])\n")
+            bindir = os.path.join(tmp, "bin")
+            os.makedirs(bindir)
+            for name, body in (("python3", "#!/bin/sh\nexit 9009\n"), ("python", '#!/bin/sh\nexec "%s" "$@"\n' % sys.executable)):
+                path = os.path.join(bindir, name)
+                with open(path, "w") as f:
+                    f.write(body)
+                os.chmod(path, 0o755)
+            env = {**os.environ, "CLAUDE_PLUGIN_ROOT": plugin, "PATH": bindir + os.pathsep + os.environ["PATH"]}
+            p = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True)
+            self.assertEqual(p.stdout.strip(), "ran session-title", p.stderr)
+
 
 class TestWindowsBranches(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
         patch = mock.patch.dict(os.environ, {"CGP_HOME": self.home})
         patch.start()
         self.addCleanup(patch.stop)
@@ -124,10 +147,9 @@ class TestWindowsBranches(unittest.TestCase):
         def close_handle(handle):
             state.closed.append(handle)
         wintypes = types.SimpleNamespace(DWORD=lambda: types.SimpleNamespace(value=0), BOOL=bool, HANDLE=object)
-        ctypes = types.SimpleNamespace(
-            windll=types.SimpleNamespace(kernel32=types.SimpleNamespace(OpenProcess=open_process, GetExitCodeProcess=exit_code,
-                                                                       CloseHandle=close_handle)),
-            POINTER=lambda t: t, byref=lambda o: o, GetLastError=lambda: 5, wintypes=wintypes)
+        kernel32 = types.SimpleNamespace(OpenProcess=open_process, GetExitCodeProcess=exit_code, CloseHandle=close_handle)
+        ctypes = types.SimpleNamespace(WinDLL=lambda name, use_last_error=False: kernel32, POINTER=lambda t: t, byref=lambda o: o,
+                                       get_last_error=lambda: 5, wintypes=wintypes)
         with mock.patch.object(self.util, "IS_WINDOWS", True), mock.patch.dict(sys.modules, {"ctypes": ctypes, "ctypes.wintypes": wintypes}), \
                 mock.patch("os.kill", side_effect=AssertionError("os.kill would terminate the process on Windows")):
             self.assertTrue(self.util.pid_alive(7))
@@ -155,17 +177,32 @@ class TestWindowsBranches(unittest.TestCase):
 
 
 class TestEncoding(unittest.TestCase):
+    @staticmethod
+    def legacy_env(home, **extra):
+        return {**os.environ, "CGP_HOME": home, "PYTHONUTF8": "0", "PYTHONIOENCODING": "cp1252", "PYTHONCOERCECLOCALE": "0",
+                "LC_ALL": "C", "LANG": "C", **extra}
+
     def test_emoji_survives_a_legacy_code_page(self):
         with tempfile.TemporaryDirectory() as home:
             path = os.path.join(home, "x.json")
             code = ("import sys; sys.path.insert(0, %r)\nfrom cgp_lib.store import save_json, load_json\n"
                     "save_json(%r, {'t': '\\U0001F680 caf\\u00e9'})\nprint(ascii(load_json(%r, None)['t']))\n" % (os.path.join(ROOT, "scripts"), path, path))
-            env = {**os.environ, "CGP_HOME": home, "PYTHONUTF8": "0", "PYTHONIOENCODING": "cp1252"}
-            p = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True)
+            p = subprocess.run([sys.executable, "-c", code], env=self.legacy_env(home), capture_output=True)
             self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(p.stdout.strip(), b"'\\U0001f680 caf\\xe9'")
             with open(path, "rb") as f:
-                self.assertIn("\U0001F680 café".encode("utf-8"), f.read())
-                self.assertNotIn(b"\r\n", open(path, "rb").read())
+                raw = f.read()
+            self.assertIn("\U0001F680 café".encode("utf-8"), raw)
+            self.assertNotIn(b"\r\n", raw)
+
+    def test_stdin_is_read_as_utf8(self):
+        with tempfile.TemporaryDirectory() as home:
+            prompt = "/cgp:run https://github.com/users/\u3042\u3044/projects/3"
+            stdin = json.dumps({"prompt": prompt}, ensure_ascii=False).encode("utf-8")
+            p = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "cgp"), "session-title"], input=stdin,
+                               env=self.legacy_env(home), capture_output=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn("\u3042\u3044", json.loads(p.stdout.decode("utf-8"))["hookSpecificOutput"]["sessionTitle"])
 
 
 if __name__ == "__main__":

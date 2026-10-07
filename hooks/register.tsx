@@ -15,9 +15,8 @@ const clean = (s: unknown) => String(s ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '
 
 const safeUrl = (u: unknown) => (/^https:\/\/github\.com\/[\x21-\x7e]{1,2000}$/.test(String(u ?? '')) && !String(u).includes('@') ? String(u) : null)
 
-// Windows has no HOME in a plain shell; USERPROFILE is the home there.
-export const homeDir = (env: { USERPROFILE?: string; HOME?: string }, platform: string = process.platform) =>
-  (platform === 'win32' ? env.USERPROFILE || env.HOME : env.HOME) || ''
+// Windows has no HOME in a plain shell; USERPROFILE is the home there (and unset elsewhere).
+export const homeDir = (env: { USERPROFILE?: string; HOME?: string }) => env.USERPROFILE || env.HOME || ''
 
 const view = atom({ plugin: 'cgp', key: 'view' } as const, null)
 

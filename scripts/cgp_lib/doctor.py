@@ -71,8 +71,10 @@ def stale_worktrees(done):
 
 def _clear_readonly(func, path, exc_info):
     """rmtree error handler: Windows refuses to delete read-only files (git's object files), so clear the bit and retry; give up quietly."""
+    if os.name != "nt":
+        return
     try:
-        os.chmod(path, stat.S_IWRITE)
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
         func(path)
     except OSError:
         pass
