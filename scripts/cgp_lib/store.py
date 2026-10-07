@@ -220,7 +220,7 @@ def read_data(path):
     blocks that are re-derivable, so one bad file must not stop the loop. Config files stay fatal (load_json)."""
     def read():
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 return json.load(f)
         except FileNotFoundError:
             return {}

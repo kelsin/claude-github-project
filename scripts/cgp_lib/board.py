@@ -495,7 +495,7 @@ def cmd_discover(a):
                 if not os.path.exists(os.path.join(cand, ".git")):
                     continue
                 url = subprocess.run(["git", "-C", cand, "remote", "get-url", "origin"],
-                                     capture_output=True, text=True).stdout.strip()
+                                     capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
                 m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", url)
                 if m and m.group(1).lower() in wanted:
                     found[wanted.pop(m.group(1).lower())] = cand

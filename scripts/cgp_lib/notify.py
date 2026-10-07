@@ -6,7 +6,7 @@ import shlex
 import subprocess
 from .consts import HOME
 from .store import update_data
-from .util import printable
+from .util import IS_WINDOWS, printable
 
 REVIEW = ("plan_review", "pr_review")
 
@@ -18,6 +18,8 @@ WORKTREES = os.path.join(HOME, "worktrees")
 def command_problem(cmd):
     """Why `notifyCommand` may not run (None when it may): the program must be an absolute path to an executable file that only
     this user can write, outside worktrees, /tmp and the cgp home, because a worker can write files in all of those."""
+    if IS_WINDOWS:
+        return "notifyCommand is not supported on Windows"
     try:
         argv = shlex.split(cmd)
     except ValueError:

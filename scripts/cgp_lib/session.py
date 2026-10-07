@@ -6,7 +6,7 @@ import signal
 import sys
 import time
 from .consts import DEFAULT_PHASE, HOME, LOCKS, PHASES, STRIKES
-from .util import die, now_iso, out, pid_alive, ps_field, safe, strip_id
+from .util import IS_WINDOWS, die, now_iso, out, pid_alive, ps_field, safe, strip_id
 from .store import board_for_cwd, cfg, ensure_home, list_boards, load_board, load_json, lock_alive, lock_file, lock_holder, lock_mine, locked, same_board, save_json, sid, state_path, stop_path, update_data, update_state
 from .board import get_item, parse_board_url
 
@@ -21,6 +21,8 @@ def kill_orphan(w, grace=2.0):
     pid, start = w.get("pid"), w.get("start")
     if not (isinstance(pid, int) and pid > 1 and w.get("pgid") == pid and start and pid_alive(pid)):
         return False
+    if IS_WINDOWS:
+        return False  # no process groups to signal
     try:
         if os.getpgid(pid) != pid or pid == os.getpgrp():
             return False
@@ -140,7 +142,7 @@ def stop_target(arg):
 def cmd_stop(a):
     ensure_home()
     path = stop_target(a.board)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8", errors="replace") as f:
         f.write("0" if a.cancel else "1")
     out({"stopRequested": not a.cancel, "session": os.path.basename(path)[len("stop-"):]})
 

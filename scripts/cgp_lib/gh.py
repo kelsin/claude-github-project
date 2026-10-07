@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -48,7 +49,7 @@ def has_data(stdout):
 def gh(*args, input=None, check=True, retry=None):
     retry = readonly(args) if retry is None else retry
     for delay in (*BACKOFF, None):
-        p = subprocess.run(["gh", *args], input=input, capture_output=True, text=True)
+        p = subprocess.run([shutil.which("gh") or "gh", *args], input=input, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if not p.returncode or not retry or delay is None or not TRANSIENT.search(p.stderr) or has_data(p.stdout):
             break
         time.sleep(delay)

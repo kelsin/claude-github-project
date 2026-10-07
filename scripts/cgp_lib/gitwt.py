@@ -4,7 +4,7 @@ import os
 import subprocess
 import sys
 import time
-from .util import covers, die, norm_path, out
+from .util import IS_WINDOWS, covers, die, norm_path, out
 from .store import cfg, load_data, update_data
 from .board import issue_item, parse_pr_ref
 from .gitutil import default_ref, fetch, git, resolve_repo_path, wt_path
@@ -14,7 +14,7 @@ from .pr import allow_head, is_approved_head, pr_view
 
 def is_dirty(wt):
     """True when the worktree has uncommitted work. (Unpushed commits are not checked: after a squash merge they never look merged.)"""
-    p = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True)
+    p = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     return p.returncode != 0 or bool(p.stdout.strip())
 
 
@@ -33,12 +33,14 @@ def valid_worktree(base, wt):
     """A directory that is a checkout git knows as a worktree of this clone (realpath on both sides: /private/var is /var on macOS)."""
     if subprocess.run(["git", "-C", wt, "rev-parse", "--git-dir"], capture_output=True).returncode:
         return False
-    listed = subprocess.run(["git", "-C", base, "worktree", "list", "--porcelain"], capture_output=True, text=True).stdout
+    listed = subprocess.run(["git", "-C", base, "worktree", "list", "--porcelain"], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
     return os.path.realpath(wt) in {os.path.realpath(line[len("worktree "):]) for line in listed.splitlines() if line.startswith("worktree ")}
 
 
 def git_running():
     """Whether any git process runs on this machine (when that cannot be told, yes: a lock is then never taken for stale)."""
+    if IS_WINDOWS:
+        return True
     try:
         return subprocess.run(["pgrep", "-x", "git"], capture_output=True).returncode == 0
     except OSError:
@@ -57,7 +59,10 @@ def repair_worktree(base, wt):
     """The story's worktree directory exists but git does not know it (a crash between mkdir and `worktree add`, or a registration
     pruned): an empty directory is removed, one with files is moved aside as <wt>.broken-<time> (nothing is deleted), then git forgets it."""
     if os.listdir(wt):
-        os.rename(wt, f"{wt}.broken-{time.strftime('%Y%m%dT%H%M%S')}")
+        try:
+            os.rename(wt, f"{wt}.broken-{time.strftime('%Y%m%dT%H%M%S')}")
+        except OSError as e:
+            die(f"could not move the broken worktree {wt} aside ({e}); close anything using it (editor, terminal) and retry")
     else:
         os.rmdir(wt)
     git(base, "worktree", "prune")
@@ -102,7 +107,7 @@ def rebase_in_progress(wt):
 
 def run_rebase(wt, target):
     """None on success, else a result dict: conflict (rebase left in progress) or error."""
-    p = subprocess.run(["git", "-C", wt, "rebase", "--autostash", target], capture_output=True, text=True)
+    p = subprocess.run(["git", "-C", wt, "rebase", "--autostash", target], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if p.returncode == 0:
         return None
     if rebase_in_progress(wt):
@@ -188,7 +193,7 @@ def cmd_guard(a):
 def unsaved_work(c, it, base, wt):
     """Why removing the worktree would lose work (None when nothing would be): uncommitted changes, or commits origin/<branch> lacks.
     A branch that is not on the remote is fine only once the story's PR is merged (the branch was deleted after the squash)."""
-    status = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True)
+    status = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if status.returncode:
         return "git cannot read its state"
     if status.stdout.strip():
@@ -203,7 +208,7 @@ def unsaved_work(c, it, base, wt):
     remote = f"origin/cgp/{it['number']}"
     if subprocess.run(["git", "-C", wt, "rev-parse", "--verify", remote], capture_output=True).returncode:
         return f"{remote} does not exist, so its commits were never pushed (and its PR is not merged)"
-    ahead = subprocess.run(["git", "-C", wt, "rev-list", "--count", f"{remote}..HEAD"], capture_output=True, text=True)
+    ahead = subprocess.run(["git", "-C", wt, "rev-list", "--count", f"{remote}..HEAD"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if ahead.returncode or ahead.stdout.strip() != "0":
         return f"it has commits that are not on {remote}"
     return None
