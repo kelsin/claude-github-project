@@ -755,6 +755,7 @@ class TestWorktreeRepair(test_cgp.SyncBase):
             self.assertEqual(f.read(), "mine\n")
         self.assertEqual(self.cgp("gc", "--dry-run")["brokenWorktrees"], [aside])  # listed, never deleted
 
+    @test_cgp.posix_only
     def test_a_good_worktree_reached_through_a_symlink_is_left_alone(self):
         link = os.path.join(self.tmp, "home-link")
         os.symlink(self.env["CGP_HOME"], link)
@@ -825,6 +826,7 @@ class TestWorktreeRemove(test_cgp.SyncBase):
         self.assertFalse(os.path.isdir(self.wt))
 
 
+@test_cgp.posix_only  # process groups, ps
 class TestUnstick(Base):
     KEPT = {"asked": {"i1": "t"}, "cursors": {"i1": "t"}, "pending": {"i1": "t"}, "blocks": {"i1": ["i2"]}, "epicOrder": {"i1": ["i2"]},
             "touches": {"i1": ["a.py"]}, "approvedTouches": {"i1": ["a.py"]}, "splits": {"i1": []}, "approvedSplits": {"i1": []},

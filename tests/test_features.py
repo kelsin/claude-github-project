@@ -60,6 +60,7 @@ class TestIntake(Base):
         self.assertEqual(self.cgp("import", "cgp")["added"], [])
 
 
+@test_cgp.posix_only  # sh notifier scripts and mode bits
 class TestNotify(Base):
     def script(self, body='echo "$CGP_EVENT|$CGP_TITLE|$CGP_BOARD" >> "$OUT"'):
         """A notifier the CLI accepts: owned by us and not group/world writable, and outside /tmp (the temp dir may be under it)."""
@@ -713,6 +714,7 @@ class TestPolicySettings(PolicyBase):
             self.assertNotEqual(p.returncode, 0, args)
         self.assertEqual(self.cgp("config")["autoApprove"], "plan:low,pr:low")
 
+    @test_cgp.posix_only
     def test_a_change_notifies_and_status_and_doctor_show_the_policy(self):
         here = tempfile.mkdtemp(dir=os.path.dirname(os.path.abspath(__file__)))
         self.addCleanup(shutil.rmtree, here, True)
