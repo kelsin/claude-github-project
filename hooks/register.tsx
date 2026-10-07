@@ -15,6 +15,10 @@ const clean = (s: unknown) => String(s ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '
 
 const safeUrl = (u: unknown) => (/^https:\/\/github\.com\/[\x21-\x7e]{1,2000}$/.test(String(u ?? '')) && !String(u).includes('@') ? String(u) : null)
 
+// Windows has no HOME in a plain shell; USERPROFILE is the home there.
+export const homeDir = (env: { USERPROFILE?: string; HOME?: string }, platform: string = process.platform) =>
+  (platform === 'win32' ? env.USERPROFILE || env.HOME : env.HOME) || ''
+
 const view = atom({ plugin: 'cgp', key: 'view' } as const, null)
 
 export const register: Register = on => {
@@ -22,7 +26,7 @@ export const register: Register = on => {
   let seenWaiting: Set<string> | null = null // null until the first board read, so a restart does not toast old questions
 
   on('session.start', async ($, e, next) => {
-    const home = (await $.env.get('CGP_HOME')) || `${await $.env.get('HOME')}/.config/claude-github-project`
+    const home = (await $.env.get('CGP_HOME')) || `${homeDir({ USERPROFILE: await $.env.get('USERPROFILE'), HOME: await $.env.get('HOME') })}/.config/claude-github-project`
     // Derived from the session id (stable across resume), never from an inherited CGP_SESSION that child sessions would share.
     // Exported so this session's cgp commands write their own state file, which only this band reads (same sanitising as scripts/cgp sid()).
     const session = (await $.session.id()).replace(/[^A-Za-z0-9_-]/g, '') || 'default'
