@@ -44,6 +44,34 @@ jobs:
           git config --global init.defaultBranch main
       - run: python3 tests/run_parallel.py
 
+  test-windows:
+    # Native Windows support is new; not required to pass yet.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+      - name: Configure git identity for the temp repos the tests create
+        run: |
+          git config --global user.name ci
+          git config --global user.email ci@example.com
+          git config --global init.defaultBranch main
+      - run: python tests/test_windows.py
+      - run: python scripts/cgp --help
+      - name: Full suite
+        continue-on-error: true
+        run: python tests/run_parallel.py
+
   mod:
     # The band's tests need a Claude Code build that knows mods (`claude plugin test`); not required to pass until that is in a release.
     runs-on: ubuntu-latest

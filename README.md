@@ -3,7 +3,7 @@
 A Claude Code plugin that turns a GitHub Projects v2 board into an agent pipeline. Stories move through planning, plan review, implementation, PR review and merge; you only approve plans and PRs.
 
 - **Skills**: `/cgp:setup` configures a board, `/cgp:run` runs the loop, `/cgp:add` adds a story (or imports issues by label), `/cgp:status` shows the board, `/cgp:stop` stops the loop cleanly, `/cgp:doctor` checks the installation.
-- **`scripts/cgp`**: a Python CLI doing every deterministic step (GraphQL, comments, CI polling, merging, worktrees), so agents only make decisions. Needs Python 3.8+ and `gh`; macOS and Linux (WSL on Windows).
+- **`scripts/cgp`**: a Python CLI doing every deterministic step (GraphQL, comments, CI polling, merging, worktrees), so agents only make decisions. Needs Python 3.8+, `git` and `gh`; runs on macOS, Linux and native Windows (with [Git for Windows](https://gitforwindows.org)).
 - **A mod**: a band above the prompt showing the board link, what is waiting on you, and one line per active worker ([details](docs/mod.md)).
 
 ## Install

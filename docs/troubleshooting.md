@@ -14,4 +14,5 @@ Start with `scripts/cgp doctor` (or `/cgp:doctor`): it checks `gh`, the token sc
 | "no local clone known for <repo>" | `scripts/cgp repo-path <owner/name> <path>` or `scripts/cgp discover` |
 | a worker never finishes | the loop reports it as `stalled` after `maxWorkerMinutes` and releases the story |
 | `~/.config/claude-github-project` is full of old files | `scripts/cgp gc --dry-run`, then `scripts/cgp gc` |
-| Windows | not supported (the state lock uses `fcntl`); use WSL |
+| Windows: "Filename too long" or a worktree fails to create | `git config --global core.longpaths true` (worktree paths can exceed 260 characters) |
+| Windows: `python3` not found | use `python` (the plugin hook falls back to it); install Python 3.8+ from python.org and tick "Add to PATH" |
