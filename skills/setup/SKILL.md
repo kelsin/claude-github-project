@@ -5,7 +5,7 @@ description: Use when the user gives a GitHub Projects v2 board URL and wants it
 
 # cgp setup
 
-The CLI is `scripts/cgp` at the plugin root, two directories above this skill's base directory. Call it `CGP` below and always use its absolute path.
+The CLI is `scripts/cgp` at the plugin root, two directories above this skill's base directory. Call `CGP` below the command `python3 "<absolute path>/scripts/cgp"` (`python` on Windows), quoting the path.
 
 Input: a board URL (`https://github.com/orgs/<org>/projects/<n>` or `/users/<user>/projects/<n>`). If the user gave none, ask for it.
 

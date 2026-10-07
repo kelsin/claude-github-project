@@ -1,5 +1,7 @@
 import { test, expect, mock } from 'claude-code/testing'
 
+import { homeDir } from './register'
+
 const now = Date.parse('2026-10-03T12:00:00Z')
 const state = (over: object) =>
   JSON.stringify({
@@ -201,3 +203,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(toasts).toEqual(['❓ Question for you: New'])
   })
 }
+
+test('homeDir prefers USERPROFILE and falls back to HOME', () => {
+  expect(homeDir({ USERPROFILE: 'C:\\Users\\k', HOME: '/h' })).toBe('C:\\Users\\k')
+  expect(homeDir({ HOME: '/h' })).toBe('/h')
+  expect(homeDir({})).toBe('')
+})

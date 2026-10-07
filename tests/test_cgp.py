@@ -1,8 +1,15 @@
 import importlib
 import json
-import os, pty, subprocess, sys, tempfile, time, types, unittest
+import os, subprocess, sys, tempfile, time, types, unittest
 from unittest import mock
 
+try:
+    import pty
+except ImportError:  # native Windows
+    pty = None
+
+WIN = sys.platform == "win32"
+posix_only = unittest.skipIf(WIN, "POSIX-only")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CGP = os.path.join(ROOT, "scripts", "cgp")
 
@@ -50,8 +57,12 @@ class Base(unittest.TestCase):
             ]})
         bin_ = os.path.join(self.tmp, "bin")
         os.makedirs(bin_)
-        os.symlink(os.path.join(ROOT, "tests", "fakegh"), os.path.join(bin_, "gh"))
-        self.env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "FAKE_GH_DB": self.db,
+        if WIN:  # no shebangs or symlinks: a batch shim that runs the script with this interpreter
+            with open(os.path.join(bin_, "gh.bat"), "w") as f:
+                f.write(f'@"{sys.executable}" "{os.path.join(ROOT, "tests", "fakegh")}" %*\r\n')
+        else:
+            os.symlink(os.path.join(ROOT, "tests", "fakegh"), os.path.join(bin_, "gh"))
+        self.env = {**os.environ, "PATH": f"{bin_}{os.pathsep}{os.environ['PATH']}", "FAKE_GH_DB": self.db,
                     "CGP_HOME": os.path.join(self.tmp, "home")}
         self.env.pop("CGP_SESSION", None)
 
@@ -122,6 +133,8 @@ class Base(unittest.TestCase):
 
     def tty(self, *args, env=None):
         """`cgp` with a terminal as stdin, outside any Claude session (unless `env` puts it back)."""
+        if pty is None:
+            self.skipTest("needs a pty")
         e = {**self.env, **(env or {})}
         for k in ("CGP_SESSION", "CLAUDECODE"):
             e.pop(k, None)
@@ -867,6 +880,7 @@ class TestGates(Base):
         self.assertNotEqual(p.returncode, 0)
         self.assertIn("pr_approved", p.stderr)
 
+    @posix_only
     def test_state_files_are_private(self):
         self.setup_board()
         self.assertEqual(os.stat(self.env["CGP_HOME"]).st_mode & 0o777, 0o700)
@@ -1092,7 +1106,7 @@ class TestSessions(Base):
             json.dump({"session": session, "at": time.time() if at is None else at}, f)
 
     def dead_pid(self):
-        p = subprocess.Popen(["true"])
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
         p.wait()
         return p.pid
 

@@ -3,7 +3,7 @@ import glob
 import json
 import os
 from .consts import HOME, STORY_STATE
-from .util import die, out, pid_alive, ps_field
+from .util import IS_WINDOWS, die, out, pid_alive, ps_field
 from .store import cfg, load_data, locked, save_json, update_data
 from .board import clear_field, get_item, parse_pr_ref
 from .pr import cancel_auto_merge
@@ -13,7 +13,10 @@ from .session import kill_orphan
 def live_worker(w):
     """A worker row whose process is still the one that was started (a recorded start time must still match)."""
     pid = w.get("pid")
-    return isinstance(pid, int) and pid > 1 and pid_alive(pid) and (not w.get("start") or ps_field(pid, "lstart") == w["start"])
+    if not (isinstance(pid, int) and pid > 1 and pid_alive(pid)):
+        return False
+    started = ps_field(pid, "lstart")
+    return not w.get("start") or (IS_WINDOWS and not started) or started == w["start"]  # Windows has no start time to compare
 
 
 def worker_rows(item):
@@ -21,7 +24,7 @@ def worker_rows(item):
     found = []
     for f in sorted(glob.glob(os.path.join(HOME, "state-*.json"))):
         try:
-            with open(f) as fh:
+            with open(f, encoding="utf-8", errors="replace") as fh:
                 rows = [w for w in json.load(fh).get("workers", []) if isinstance(w, dict) and w.get("item") == item]
         except (OSError, ValueError, AttributeError):
             continue
@@ -64,6 +67,8 @@ def cmd_unstick(a):
     if a.dry_run:
         out({**plan, "stillRunning": [w["pid"] for w in live]})
         return
+    if live and a.kill and IS_WINDOWS:
+        die("unstick --kill is not supported on Windows; stop the worker process yourself")
     if live and not a.kill:
         die(f"its worker (pid {', '.join(str(w['pid']) for w in live)}) is still running; stop it, or pass --kill")
     for w in live:
@@ -71,7 +76,7 @@ def cmd_unstick(a):
             die(f"could not stop its worker (pid {w['pid']})")
     with locked():
         for f, _ in rows:
-            with open(f) as fh:
+            with open(f, encoding="utf-8", errors="replace") as fh:
                 st = json.load(fh)
             st["workers"] = [w for w in st["workers"] if not (isinstance(w, dict) and w.get("item") == a.item)]
             save_json(f, st)

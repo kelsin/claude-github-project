@@ -1,5 +1,4 @@
 """Everything under ~/.config/claude-github-project: board configs, per-board data, session state, locks."""
-import fcntl
 import json
 import os
 import shutil
@@ -7,12 +6,17 @@ import sys
 import time
 from .consts import BOARDS, DEFAULTS, HOME, KEY_RENAMES, LOCKS, META, LOCK_STALE_SECONDS, PATHS, SCHEMA
 from .gitutil import cwd_repo
-from .util import die, safe, strip_id
+from .util import IS_WINDOWS, die, safe, strip_id
+
+try:
+    import fcntl
+except ImportError:  # native Windows
+    fcntl = None
 
 
 def load_json(path, default):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             return json.load(f)
     except FileNotFoundError:
         return default
@@ -22,23 +26,52 @@ def load_json(path, default):
 
 def ensure_home():
     os.makedirs(HOME, mode=0o700, exist_ok=True)
-    if os.stat(HOME).st_mode & 0o777 != 0o700:
+    if os.name != "nt" and os.stat(HOME).st_mode & 0o777 != 0o700:
         os.chmod(HOME, 0o700)
+
+
+def replace_retry(src, dst):
+    """os.replace; on Windows retry for ~2s on PermissionError (a reader or scanner briefly holding the target open)."""
+    end = time.time() + 2
+    while True:
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            if not IS_WINDOWS or time.time() >= end:
+                raise
+            time.sleep(0.05)
 
 
 def save_json(path, obj):
     ensure_home()
     tmp = f"{path}.{os.getpid()}.tmp"
     try:
-        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w",
+                       encoding="utf-8", errors="replace", newline="\n") as f:
             json.dump(obj, f, indent=2, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        replace_retry(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
+
+
+def _win_lock(f, timeout=60):
+    """Take the 1-byte lock on the .lock file (msvcrt has no blocking mode that waits long enough, so poll)."""
+    import msvcrt
+    end = time.time() + timeout
+    while True:
+        f.seek(0)
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError:
+            if time.time() >= end:
+                f.close()
+                die(f"could not get the lock {f.name} within {timeout}s; another cgp process holds it")
+            time.sleep(0.05)
 
 
 class locked:
@@ -49,14 +82,22 @@ class locked:
     def __enter__(self):
         if locked.depth == 0:
             ensure_home()
-            locked.f = open(os.path.join(HOME, ".lock"), "w")
-            fcntl.flock(locked.f, fcntl.LOCK_EX)
+            locked.f = open(os.path.join(HOME, ".lock"), "w", encoding="utf-8", errors="replace")
+            if fcntl is None:
+                _win_lock(locked.f)
+            else:
+                fcntl.flock(locked.f, fcntl.LOCK_EX)
         locked.depth += 1
 
     def __exit__(self, *a):
         locked.depth -= 1
         if locked.depth == 0:
-            fcntl.flock(locked.f, fcntl.LOCK_UN)
+            if fcntl is None:
+                import msvcrt
+                locked.f.seek(0)
+                msvcrt.locking(locked.f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(locked.f, fcntl.LOCK_UN)
             locked.f.close()
 
 
@@ -179,7 +220,7 @@ def read_data(path):
     blocks that are re-derivable, so one bad file must not stop the loop. Config files stay fatal (load_json)."""
     def read():
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 return json.load(f)
         except FileNotFoundError:
             return {}
@@ -192,9 +233,9 @@ def read_data(path):
             return read()  # another process may have repaired it meanwhile
         except ValueError:
             pass
-        os.replace(path, f"{path}.corrupt-{time.strftime('%Y%m%dT%H%M%S')}")
+        replace_retry(path, f"{path}.corrupt-{time.strftime('%Y%m%dT%H%M%S')}")
         try:
-            with open(path + ".bak") as f:
+            with open(path + ".bak", encoding="utf-8", errors="replace") as f:
                 d = json.load(f)
             save_json(path, d)
             how = "restored the last good copy"
@@ -266,7 +307,7 @@ def update_state(fn):
 
 def stop_requested():
     try:
-        with open(stop_path()) as f:
+        with open(stop_path(), encoding="utf-8", errors="replace") as f:
             return f.read().strip() == "1"
     except FileNotFoundError:
         return False

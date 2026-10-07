@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -68,6 +69,17 @@ def stale_worktrees(done):
             if tuple(os.path.relpath(p, root).split(os.sep)) in done and not is_dirty(p)]  # uncommitted work is kept
 
 
+def _clear_readonly(func, path, exc_info):
+    """rmtree error handler: Windows refuses to delete read-only files (git's object files), so clear the bit and retry; give up quietly."""
+    if os.name != "nt":
+        return
+    try:
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
 def cmd_gc(a):
     removed = [f for f in list_stale_locks()] + session_files(a.days)
     worktrees = []
@@ -84,7 +96,7 @@ def cmd_gc(a):
                 if path and os.path.isdir(path):
                     git(path, "worktree", "remove", "--force", wt, check=False)
                     git(path, "branch", "-D", f"cgp/{number}", check=False)
-                shutil.rmtree(wt, ignore_errors=True)
+                shutil.rmtree(wt, onerror=_clear_readonly)
             worktrees.append(wt)
             plan = os.path.join(HOME, "plans", f"{owner}-{name}-{number}.html")
             if os.path.exists(plan):
@@ -118,7 +130,7 @@ def settings_denies():
     for f in (os.path.expanduser("~/.claude/settings.json"), os.path.join(os.getcwd(), ".claude", "settings.json"),
               os.path.join(os.getcwd(), ".claude", "settings.local.json")):
         try:
-            with open(f) as fh:
+            with open(f, encoding="utf-8", errors="replace") as fh:
                 rules |= set(json.load(fh).get("permissions", {}).get("deny", []))
         except (OSError, ValueError):
             pass
@@ -134,7 +146,7 @@ def cmd_doctor(a):
         return ok
 
     check("python", sys.version_info >= (3, 8), sys.version.split()[0], info=True)
-    v = subprocess.run(["gh", "--version"], capture_output=True, text=True) if shutil.which("gh") else None
+    v = subprocess.run([shutil.which("gh") or "gh", "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace") if shutil.which("gh") else None
     if not check("gh installed", bool(v and v.returncode == 0), (v.stdout.splitlines() or [""])[0] if v else "install https://cli.github.com", info=True):
         return report(results)
     p = gh("auth", "status", check=False)

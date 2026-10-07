@@ -10,6 +10,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+IS_WINDOWS = os.name == "nt"
+
 
 def die(msg, code=1):
     print(f"cgp: {msg}", file=sys.stderr)
@@ -46,8 +48,30 @@ def strip_id(key):
     return re.sub(r"[^A-Za-z0-9_-]", "", key or "")
 
 
+def _win_pid_alive(pid):
+    """pid_alive on Windows: os.kill(pid, 0) would terminate the process there, so ask the OS for its exit code (259 = still active)."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k32.GetExitCodeProcess.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists, we may not open it
+    try:
+        code = wintypes.DWORD()
+        return bool(k32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+    finally:
+        k32.CloseHandle(handle)
+
+
 def pid_alive(pid):
     """Whether a process with this pid exists on this host (a process we may not signal still counts)."""
+    if IS_WINDOWS:
+        return _win_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -59,8 +83,10 @@ def pid_alive(pid):
 
 def ps_field(pid, field):
     """One `ps -o` field of a process ("lstart" = when it started, "stat"), '' when it is gone or ps fails."""
+    if IS_WINDOWS:
+        return ""
     try:
-        p = subprocess.run(["ps", "-o", f"{field}=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
+        p = subprocess.run(["ps", "-o", f"{field}=", "-p", str(pid)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
                            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})  # the same text in every environment that compares it
     except (OSError, subprocess.TimeoutExpired):
         return ""

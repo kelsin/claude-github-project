@@ -1,5 +1,6 @@
 """Command table and argument parsing: every `cgp <command>` is one row of COMMANDS."""
 import argparse
+import sys
 
 
 from .board import (cmd_adopt, cmd_config, cmd_discover, cmd_repo_path, cmd_repos, cmd_setup)
@@ -103,6 +104,9 @@ def build_parser():
 
 
 def main():
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     a = build_parser().parse_args()
     a.fn(a)
 

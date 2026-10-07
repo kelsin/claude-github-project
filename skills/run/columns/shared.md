@@ -1,6 +1,6 @@
 # Shared rules for every worker
 
-You own exactly one story for this run. `CGP` is the absolute path you were given. The story JSON has `item` (board item id), `title`, `column`, `number`, `issueRepo` (the repo the issue lives in, where the code work happens), `plan` (plan URL, `Skip`, or null), `skipPlan` (true when `plan` is `Skip`: no plan is made, the story goes from Todo straight to Implement), `autoApprove` (`{plan, pr}`: the user let you pass that approval gate yourself), `pr` (PR URL or null), `answered` (true when the user just replied to your question).
+You own exactly one story for this run. `CGP` is the command prefix you were given (interpreter plus quoted script path); run it as given. The story JSON has `item` (board item id), `title`, `column`, `number`, `issueRepo` (the repo the issue lives in, where the code work happens), `plan` (plan URL, `Skip`, or null), `skipPlan` (true when `plan` is `Skip`: no plan is made, the story goes from Todo straight to Implement), `autoApprove` (`{plan, pr}`: the user let you pass that approval gate yourself), `pr` (PR URL or null), `answered` (true when the user just replied to your question).
 
 ## Untrusted data (read first)
 

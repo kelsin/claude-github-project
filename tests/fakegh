@@ -1,10 +1,28 @@
 #!/usr/bin/env python3
 """Fake `gh` for tests: a tiny in-memory Projects v2 + issue comments, persisted in $FAKE_GH_DB."""
-import fcntl, json, os, re, sys
+import json, os, re, sys, time
+
+try:
+    import fcntl
+except ImportError:  # native Windows
+    fcntl = None
+    import msvcrt
 
 DB = os.environ["FAKE_GH_DB"]
 _lock = open(DB + ".lock", "w")
-fcntl.flock(_lock, fcntl.LOCK_EX)  # one call at a time: parallel callers may race, and a call is read-modify-write
+if fcntl:
+    fcntl.flock(_lock, fcntl.LOCK_EX)
+else:
+    _deadline = time.time() + 60
+    while True:  # LK_LOCK gives up after ~10s; poll LK_NBLCK instead
+        try:
+            msvcrt.locking(_lock.fileno(), msvcrt.LK_NBLCK, 1)
+            break
+        except OSError:
+            if time.time() > _deadline:
+                raise
+            time.sleep(0.05)
+# one call at a time: parallel callers may race, and a call is read-modify-write
 db = json.load(open(DB))
 args = sys.argv[1:]
 with open(DB + ".invocations", "a") as _f:  # one line per call, so a test can see that a process has started polling

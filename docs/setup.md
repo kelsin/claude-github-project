@@ -2,6 +2,8 @@
 
 `/cgp:setup https://github.com/orgs/<org>/projects/<n>` (or `/users/<user>/projects/<n>`), run from a checkout of one of your repos.
 
+Prerequisites: `git`, an authenticated `gh` and Python 3.8+ on macOS, Linux or native Windows (install [Git for Windows](https://gitforwindows.org), `gh` and Python, and make sure `python` is on your PATH).
+
 What it does:
 
 - Replaces the Status options with the 8 [columns](workflow.md#columns). A board in the old ten-column layout is refused, see [migration](migration.md).

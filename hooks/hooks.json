@@ -2,7 +2,7 @@
   "modules": ["./register.tsx"],
   "hooks": {
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/cgp session-title" }] }
+      { "hooks": [{ "type": "command", "command": "PY=python3; \"$PY\" -c '' >/dev/null 2>&1 || PY=python; \"$PY\" \"${CLAUDE_PLUGIN_ROOT}/scripts/cgp\" session-title" }] }
     ]
   }
 }
