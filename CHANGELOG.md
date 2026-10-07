@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/kelsin/claude-github-project/compare/v0.5.0...v0.6.0) (2026-10-07)
+
+
+### :tada: Features
+
+* support native windows ([#67](https://github.com/kelsin/claude-github-project/issues/67)) ([515d7c9](https://github.com/kelsin/claude-github-project/commit/515d7c905628f9fffa66f6ffdc038d94c2c8c9a7))
+
 ## [0.5.0](https://github.com/kelsin/claude-github-project/compare/v0.4.2...v0.5.0) (2026-10-06)
 
 
