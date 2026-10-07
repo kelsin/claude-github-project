@@ -42,6 +42,25 @@ class StubMsvcrt(types.ModuleType):
         self.calls.append((mode, n))
 
 
+def working_bash():
+    """A bash that runs, or None; on Windows prefer Git's, since PATH's bash may be the WSL launcher."""
+    candidates = []
+    git = shutil.which("git")
+    if os.name == "nt" and git:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(git)))
+        candidates += [os.path.join(root, d, "bash.exe") for d in ("bin", os.path.join("usr", "bin"))]
+    candidates.append(shutil.which("bash"))
+    for c in candidates:
+        if c and os.path.exists(c):
+            try:
+                p = subprocess.run([c, "-c", "echo ok"], capture_output=True, timeout=30)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if p.returncode == 0 and p.stdout.decode("utf-8", "replace").strip() == "ok":
+                return c
+    return None
+
+
 class TestWindowsImports(unittest.TestCase):
     def test_cli_imports_without_fcntl_and_the_lock_is_reentrant(self):
         msvcrt = StubMsvcrt()
@@ -80,24 +99,25 @@ class TestWindowsImports(unittest.TestCase):
         commands = [h["command"] for g in hooks["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
         self.assertTrue(commands and all("scripts/cgp" in c for c in commands))
 
-    @unittest.skipUnless(shutil.which("bash"), "needs bash")
+    @unittest.skipUnless(working_bash(), "needs a working bash")
     def test_hooks_json_falls_through_a_broken_python3(self):
         with open(os.path.join(ROOT, "hooks", "hooks.json"), encoding="utf-8") as f:
             command = json.load(f)["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
         with tempfile.TemporaryDirectory() as tmp:
-            plugin = os.path.join(tmp, "plugin")
-            os.makedirs(os.path.join(plugin, "scripts"))
-            with open(os.path.join(plugin, "scripts", "cgp"), "w") as f:
+            tmp = tmp.replace("\\", "/")
+            plugin = tmp + "/plugin"
+            os.makedirs(plugin + "/scripts")
+            with open(plugin + "/scripts/cgp", "w") as f:
                 f.write("import sys; print('ran', *sys.argv[1:])\n")
             bindir = os.path.join(tmp, "bin")
             os.makedirs(bindir)
-            for name, body in (("python3", "#!/bin/sh\nexit 9009\n"), ("python", '#!/bin/sh\nexec "%s" "$@"\n' % sys.executable)):
+            for name, body in (("python3", "#!/bin/sh\nexit 9009\n"), ("python", '#!/bin/sh\nexec "%s" "$@"\n' % sys.executable.replace("\\", "/"))):
                 path = os.path.join(bindir, name)
                 with open(path, "w") as f:
                     f.write(body)
                 os.chmod(path, 0o755)
             env = {**os.environ, "CLAUDE_PLUGIN_ROOT": plugin, "PATH": bindir + os.pathsep + os.environ["PATH"]}
-            p = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True)
+            p = subprocess.run([working_bash(), "-c", command], env=env, capture_output=True, text=True)
             self.assertEqual(p.stdout.strip(), "ran session-title", p.stderr)
 
 
