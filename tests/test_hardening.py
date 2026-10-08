@@ -554,6 +554,126 @@ class TestWorktreeCleanup(test_cgp.SyncBase):
         self.cgp("list", "--brief")
         self.assertFalse(os.path.isdir(self.wt))
 
+    def commit(self, name="work.txt"):
+        with open(os.path.join(self.wt, name), "w") as f:
+            f.write("x\n")
+        self.git(self.wt, "add", "."); self.git(self.wt, "commit", "-qm", "work")
+
+    def head(self):
+        return subprocess.run(["git", "-C", self.wt, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+    def branches(self):
+        return subprocess.run(["git", "-C", self.clone, "branch", "--list", "cgp/1"], capture_output=True, text=True).stdout.strip()
+
+    def done(self):
+        self.force("i1", "done")
+
+    def set_pr(self, state, oid=None):
+        d = self.read_db()
+        d["prs"] = {"acme/app#5": {"state": state, "isDraft": False, "headRefOid": oid or self.head(), "headRefName": "cgp/1",
+                                   "isCrossRepository": False, "baseRefName": "main"}}
+        self.write_db(d)
+        self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/5")
+
+    def test_a_done_story_loses_its_clean_worktree_and_branch(self):
+        self.done()
+        self.cgp("list", "--brief")
+        self.assertFalse(os.path.isdir(self.wt))
+        self.assertEqual(self.branches(), "")
+
+    def test_a_done_story_with_an_uncommitted_file_keeps_its_worktree(self):
+        with open(os.path.join(self.wt, "wip.txt"), "w") as f:
+            f.write("unsaved\n")
+        self.done()
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+
+    def test_unpushed_commits_survive_unless_the_pr_is_merged_at_that_commit(self):
+        self.commit()
+        self.finish()
+        self.set_pr("OPEN")
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+        self.set_pr("MERGED")
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))  # kept: still inside the hourly backoff
+        self.assertEqual(list(self.state()["worktreeKept"]), ["i1"])
+        d = self.state(); d["worktreeKept"]["i1"]["at"] -= 7200
+        with open(os.path.join(self.env["CGP_HOME"], "state-default.json"), "w") as f:
+            json.dump(d, f)
+        self.cgp("list", "--brief")
+        self.assertFalse(os.path.isdir(self.wt))
+        self.cgp("list", "--brief")  # nothing left to do
+        self.assertEqual(self.state()["worktreeKept"], {})
+
+    def test_a_merged_pr_with_commits_added_after_its_head_keeps_the_worktree(self):
+        self.set_pr("MERGED", oid="0" * 40)
+        self.commit()
+        self.finish()
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+
+    def test_gc_keeps_the_unpushed_commits_of_a_closed_story(self):
+        self.commit()
+        self.finish()
+        self.assertNotIn(self.wt, self.cgp("gc", "--dry-run")["removedWorktrees"])
+        self.cgp("gc")
+        self.assertTrue(os.path.isdir(self.wt))
+
+    def test_gc_removes_a_clean_worktree_of_a_closed_story(self):
+        self.finish()
+        self.assertIn(self.wt, self.cgp("gc", "--dry-run")["removedWorktrees"])
+        self.cgp("gc")
+        self.assertFalse(os.path.isdir(self.wt))
+
+    def test_a_fresh_worktree_with_nothing_ahead_of_the_default_branch_is_safe(self):
+        self.finish()
+        self.git(self.clone, "remote", "set-url", "origin", os.path.join(self.tmp, "gone.git"))  # no fetch needed to decide
+        self.cgp("list", "--brief")
+        self.assertFalse(os.path.isdir(self.wt))
+
+    def test_a_done_but_open_issue_is_swept(self):
+        self.done()
+        self.assertEqual(self.read_db()["items"][0]["content"]["state"], "OPEN")
+        self.cgp("list", "--brief")
+        self.assertFalse(os.path.isdir(self.wt))
+
+    def test_a_story_with_a_worker_row_is_left_alone(self):
+        self.cgp("worker", "start", "i1", "todo")
+        self.finish()
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+        self.cgp("worker", "stop", "i1")
+        self.cgp("list", "--brief")
+        self.assertFalse(os.path.isdir(self.wt))
+
+    def test_a_remote_that_cannot_be_fetched_keeps_the_worktree_and_is_not_retried_within_the_hour(self):
+        self.commit()
+        self.finish()
+        self.git(self.clone, "remote", "set-url", "origin", os.path.join(self.tmp, "gone.git"))
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+        self.assertIn("cannot be fetched", self.state()["worktreeKept"]["i1"]["reason"])
+        at = self.state()["worktreeKept"]["i1"]["at"]
+        self.cgp("list", "--brief")
+        self.assertEqual(self.state()["worktreeKept"]["i1"]["at"], at)  # not tried again
+
+    def test_a_branch_head_has_left_keeps_its_unpushed_commits(self):
+        self.commit()
+        self.git(self.wt, "checkout", "-q", "--detach", "HEAD~1")
+        self.finish()
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+        self.assertNotEqual(self.branches(), "")
+
+    def test_a_worktree_git_cannot_remove_is_kept_with_its_branch(self):
+        self.finish()
+        self.git(self.clone, "worktree", "lock", self.wt)
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+        self.assertNotEqual(self.branches(), "")
+        self.assertIn("remove failed", self.state()["worktreeKept"]["i1"]["reason"])
+
 
 class TestQuarantine(Base):
     """A corrupt per-board data file is set aside (and its last good copy restored) instead of stopping the loop."""
@@ -790,6 +910,9 @@ class TestWorktreeRepair(test_cgp.SyncBase):
 
 
 class TestWorktreeRemove(test_cgp.SyncBase):
+    def head(self):
+        return subprocess.run(["git", "-C", self.wt, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
     def push(self):
         self.git(self.wt, "push", "-q", "origin", "HEAD:cgp/1")
         self.git(self.clone, "fetch", "-q", "origin")
@@ -801,9 +924,12 @@ class TestWorktreeRemove(test_cgp.SyncBase):
         return p.stderr
 
     def test_a_branch_that_was_never_pushed_is_refused_until_its_pr_is_merged(self):
+        with open(os.path.join(self.wt, "work.txt"), "w") as f:
+            f.write("x\n")
+        self.git(self.wt, "add", "."); self.git(self.wt, "commit", "-qm", "work")
         self.assertIn("does not exist", self.refused())
         d = self.read_db()
-        d["prs"] = {"acme/app#5": {"state": "MERGED", "isDraft": False, "headRefOid": "bbb", "headRefName": "cgp/1",
+        d["prs"] = {"acme/app#5": {"state": "MERGED", "isDraft": False, "headRefOid": self.head(), "headRefName": "cgp/1",
                                    "isCrossRepository": False, "baseRefName": "main"}}
         self.write_db(d)
         self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/5")
