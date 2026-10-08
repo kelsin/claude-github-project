@@ -185,19 +185,20 @@ def close_finished(c, items):
     way goes to a person once. Marks the closed parents `closed` in `items`: the caller files them under Done."""
     data = load_data()
     by_id = {i["item"]: i for i in items}
+    is_done = lambda k: by_id.get(k["item"], {}).get("column") == "done"  # noqa: E731
     for parent, kids in (data.get("children") or {}).items():
         p = by_id.get(parent)
         expected = len((data.get("approvedSplits") or {}).get(parent) or [])
         if p and expected and len(kids) < expected and p["column"] != "done" and not p["closed"] and not p["waiting"] \
                 and (data.get("epicAsked") or {}).get(parent) != ["short", len(kids)] \
-                and all(by_id.get(k["item"], {}).get("column", "done") == "done" for k in kids):
+                and all(is_done(k) for k in kids):
             ask_user(c, parent, f"Only {len(kids)} of the {expected} approved sub-stories were created, so this story is not closed. "
                      "Run `CGP split` again to create the rest, then reply here.")
             short = ["short", len(kids)]
             update_data(lambda d, parent=parent, short=short: d.setdefault("epicAsked", {}).__setitem__(parent, short))
             p["waiting"], p["waitingOn"] = True, "You"
             continue
-        if not p or not expected or len(kids) != expected or p["closed"] or p["column"] == "done" or any(by_id.get(k["item"], {}).get("column", "done") != "done" for k in kids):
+        if not p or not expected or len(kids) != expected or p["closed"] or p["column"] == "done" or not all(is_done(k) for k in kids):
             continue
         bad = [k for k in kids if not finished(c, k, by_id.get(k["item"]))]
         if bad:

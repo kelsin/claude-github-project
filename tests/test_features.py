@@ -891,6 +891,29 @@ class TestSubStories(PolicyBase):
         self.cgp("list")
         self.assertEqual(len([c for c in self.comments() if "approved sub-stories were created" in c]), 1)
 
+    def drop_item(self, item):  # as if the board snapshot did not (yet) show this item
+        d = self.read_db()
+        d["items"] = [i for i in d["items"] if i["id"] != item]
+        self.write_db(d)
+
+    def test_a_split_still_in_progress_is_not_reported_short(self):
+        self.split()
+        kept = self.data()["children"]["i1"][:1]
+        self.set_data(children={"i1": kept})
+        self.drop_item(kept[0]["item"])
+        snap = self.cgp("list")
+        self.assertFalse([c for c in self.comments() if "approved sub-stories were created" in c])
+        self.assertNotEqual(next(i for i in snap["items"] if i["item"] == "i1")["waitingOn"], "You")
+        self.assertNotIn("i1", self.data().get("epicAsked", {}))
+
+    def test_a_complete_split_with_a_late_kid_is_not_reported_unmerged(self):
+        kids = self.split()
+        self.finish(kids[:1])
+        self.drop_item(kids[1]["item"])
+        self.cgp("list")
+        self.assertFalse([c for c in self.comments() if "not by a merged PR of their own" in c])
+        self.assertNotIn("i1", self.data().get("epicAsked", {}))
+
     def test_a_sub_story_cannot_be_split_or_declare(self):
         kids = self.split()
         self.force(kids[0]["item"], "plan")
