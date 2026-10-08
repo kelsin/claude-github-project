@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/kelsin/claude-github-project/compare/v0.6.0...v0.7.0) (2026-10-08)
+
+
+### :tada: Features
+
+* remove worktrees of finished stories automatically ([#71](https://github.com/kelsin/claude-github-project/issues/71)) ([81c8931](https://github.com/kelsin/claude-github-project/commit/81c893189fae67b0c815c9d15dea101201d72b59))
+
+
+### :bug: Bug Fixes
+
+* do not count unseen sub-stories as done when closing a split parent ([#73](https://github.com/kelsin/claude-github-project/issues/73)) ([077a093](https://github.com/kelsin/claude-github-project/commit/077a093b7da2880ba9ddfe9aff411dddc166c5bb))
+
 ## [0.6.0](https://github.com/kelsin/claude-github-project/compare/v0.5.0...v0.6.0) (2026-10-07)
 
 
