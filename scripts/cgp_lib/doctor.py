@@ -14,7 +14,7 @@ from .gh import gh, gql
 from .store import list_boards, load_board, load_json, lock_alive, locked, same_board, save_board
 from .board import fetch_items, migrate_poll_default, fetch_project, fields_by_name, parse_board_url, parse_item
 from .gitutil import git
-from .gitwt import is_dirty
+from .gitwt import is_dirty, unsaved_work
 from .notify import command_problem
 
 # Permission rules docs/safety.md recommends for sessions that run the loop; doctor only reports whether they are present.
@@ -63,10 +63,16 @@ def finished_stories(c):
     return found
 
 
-def stale_worktrees(done):
+def stale_worktrees(c, done, fetched=None):
+    """Worktrees of finished stories that hold no unsaved work (see unsaved_work); with no known clone to check against, they stay."""
     root = os.path.join(HOME, "worktrees")
-    return [p for p in glob.glob(os.path.join(root, "*", "*", "*"))
-            if tuple(os.path.relpath(p, root).split(os.sep)) in done and not is_dirty(p)]  # uncommitted work is kept
+    found = []
+    for p in glob.glob(os.path.join(root, "*", "*", "*")):
+        key = tuple(os.path.relpath(p, root).split(os.sep))
+        base = c["repos"].get(f"{key[0]}/{key[1]}")
+        if key in done and base and os.path.isdir(base) and not unsaved_work(c, done[key], base, p, fetched):
+            found.append(p)
+    return found
 
 
 def _clear_readonly(func, path, exc_info):
@@ -89,13 +95,12 @@ def cmd_gc(a):
             done = finished_stories(c)
         except SystemExit:  # no network: leave worktrees alone
             continue
-        for wt in stale_worktrees(done):
+        for wt in stale_worktrees(c, done, {}):
             owner, name, number = os.path.relpath(wt, os.path.join(HOME, "worktrees")).split(os.sep)
             path = c["repos"].get(f"{owner}/{name}")
             if not a.dry_run:
-                if path and os.path.isdir(path):
-                    git(path, "worktree", "remove", "--force", wt, check=False)
-                    git(path, "branch", "-D", f"cgp/{number}", check=False)
+                git(path, "worktree", "remove", "--force", wt, check=False)
+                git(path, "branch", "-D", f"cgp/{number}", check=False)
                 shutil.rmtree(wt, onerror=_clear_readonly)
             worktrees.append(wt)
             plan = os.path.join(HOME, "plans", f"{owner}-{name}-{number}.html")

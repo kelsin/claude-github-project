@@ -1,5 +1,7 @@
 """Per-story git worktrees: create, sync (rebase), guard, remove."""
+import contextlib
 import fnmatch
+import io
 import os
 import subprocess
 import sys
@@ -13,20 +15,27 @@ from .pr import allow_head, is_approved_head, pr_view
 
 
 def is_dirty(wt):
-    """True when the worktree has uncommitted work. (Unpushed commits are not checked: after a squash merge they never look merged.)"""
+    """True when the worktree has uncommitted work. Only that: unpushed commits are unsaved_work's business."""
     p = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     return p.returncode != 0 or bool(p.stdout.strip())
 
 
-def cleanup_worktree(c, it):
+def cleanup_worktree(c, it, fetched=None):
+    """Remove a finished story's worktree and branch unless that would lose work (see unsaved_work). None when it is gone,
+    else why it was kept. `fetched` (repo clone -> fetch worked) lets one sweep fetch each repo once. Never prints, never raises."""
+    wt = wt_path(it)
+    if not os.path.isdir(wt):
+        return None
     try:
-        wt = wt_path(it)
-        if os.path.isdir(wt) and not is_dirty(wt):
+        with contextlib.redirect_stderr(io.StringIO()):  # die() prints before it exits
             base = resolve_repo_path(c, it["issueRepo"])
-            git(base, "worktree", "remove", "--force", wt, check=False)
-            git(base, "branch", "-D", f"cgp/{it['number']}", check=False)
+            problem = unsaved_work(c, it, base, wt, fetched)
+            if not problem:
+                git(base, "worktree", "remove", "--force", wt, check=False)
+                git(base, "branch", "-D", f"cgp/{it['number']}", check=False)
     except SystemExit:
-        pass
+        return "git could not be run for it"
+    return problem
 
 
 def valid_worktree(base, wt):
@@ -190,20 +199,39 @@ def cmd_guard(a):
         sys.exit(4)
 
 
-def unsaved_work(c, it, base, wt):
+def unsaved_work(c, it, base, wt, fetched=None):
     """Why removing the worktree would lose work (None when nothing would be): uncommitted changes, or commits origin/<branch> lacks.
-    A branch that is not on the remote is fine only once the story's PR is merged (the branch was deleted after the squash)."""
+    A branch that is not on the remote is fine only once the story's PR is merged (the branch was deleted after the squash) and
+    HEAD is that PR's head, or when HEAD is already on the default branch. Local checks run before anything is fetched; an unknown
+    default branch or a failed fetch keeps the worktree. `fetched` caches fetches per clone."""
     status = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if status.returncode:
         return "git cannot read its state"
     if status.stdout.strip():
         return "it has uncommitted changes"
     ref = parse_pr_ref(c, it["pr"])
-    if ref and (pr_view(*ref, check=False) or {}).get("state") == "MERGED":
-        return None
+    view = (pr_view(*ref, check=False) or {}) if ref else {}
+    if view.get("state") == "MERGED":
+        head = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
+        return None if head and head == view.get("headRefOid") else "HEAD is not the head of its merged PR (commits were added after)"
     try:
-        fetch(base)
+        default = default_ref(base)
     except SystemExit:
+        return "the default branch is unknown"
+    ahead_of_default = subprocess.run(["git", "-C", wt, "rev-list", "--count", f"{default}..HEAD"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if ahead_of_default.returncode == 0 and ahead_of_default.stdout.strip() == "0":
+        return None  # nothing on it that the default branch lacks
+    if fetched is None or base not in fetched:
+        try:
+            fetch(base)
+            ok = True
+        except SystemExit:
+            ok = False
+        if fetched is not None:
+            fetched[base] = ok
+    else:
+        ok = fetched[base]
+    if not ok:
         return "the remote cannot be fetched to check for unpushed commits"
     remote = f"origin/cgp/{it['number']}"
     if subprocess.run(["git", "-C", wt, "rev-parse", "--verify", remote], capture_output=True).returncode:

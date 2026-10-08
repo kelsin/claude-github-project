@@ -8,7 +8,8 @@ from .consts import ACTIONABLE, ALL_KEYS, COLUMNS, HOME, STORY_OPTION, WAITING_F
 from .util import Poll, age_seconds, printable, strip_id, covers, die, norm_path, now_iso, out
 from .gh import gh, rest
 from .store import cfg, load_data, load_json, lock_file, lock_holder, state_path, stop_requested, update_board, update_data, update_state
-from .board import board_keys, clear_field, ensure_story_option, fetch_items, fetch_project, fields_by_name, get_item, parse_item, parse_pr_ref, rank, set_single
+from .board import board_keys, clear_field, ensure_story_option, fetch_items, fetch_project, fields_by_name, get_item, known_repo, parse_item, parse_pr_ref, rank, set_single
+from .gitutil import wt_path
 from .gitwt import cleanup_worktree
 from .notify import check
 from .epics import close_finished, parent_edges
@@ -210,10 +211,26 @@ def snapshot(c):
             if i["closed"] and i["column"] != "done" and i["kind"] == "issue":
                 set_single(c, i["item"], c["fields"]["status"]["id"], c["fields"]["status"]["options"]["done"])
                 i["column"] = "done"
-                cleanup_worktree(c, i)
+    def sweep_done():  # a finished story's worktree goes unless it holds work that is not saved elsewhere; tried again hourly if kept
+        kept = load_json(state_path(), {}).get("worktreeKept", {})
+        now, fetched, seen = time.time(), {}, {}
+        for i in items:
+            if i["kind"] != "issue" or i["column"] != "done" or i["item"] in in_flight or not os.path.isdir(wt_path(i)) \
+                    or not known_repo(c, i["issueRepo"]):
+                continue
+            if i["item"] in kept and now - kept[i["item"]]["at"] < 3600:
+                seen[i["item"]] = kept[i["item"]]
+                continue
+            reason = cleanup_worktree(c, i, fetched)
+            if reason:
+                seen[i["item"]] = {"at": now, "reason": reason}
+        if seen != kept:
+            update_state(lambda st: st.__setitem__("worktreeKept", seen))
+    in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these
     file_closed()
     close_finished(c, items)  # a story split into sub-stories is closed once they are all done (see epics.py)
     file_closed()
+    sweep_done()
     live = [i for i in items if i["column"] != "done"]
     counts = {k: sum(1 for i in items if i["column"] == k) for k in board_keys(c)}
     by_id = {i["item"]: i for i in live}
@@ -236,7 +253,6 @@ def snapshot(c):
     # a block gates a story that is about to start work (see starting)
     parents = parent_edges(by_id, data)  # a story waiting for its sub-stories is never dispatched, whatever its column
     blocked = [i for i in live if i["blockedBy"] and (starting(i) or i["item"] in parents)]
-    in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and not i["held"] and i not in blocked
                   and i["item"] not in in_flight]
     actionable.sort(key=lambda i: (ACTIONABLE.index(i["column"]), i["priorityRank"], -i["unlocks"]))  # stable: board order breaks remaining ties
