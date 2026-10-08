@@ -658,6 +658,22 @@ class TestWorktreeCleanup(test_cgp.SyncBase):
         self.cgp("list", "--brief")
         self.assertEqual(self.state()["worktreeKept"]["i1"]["at"], at)  # not tried again
 
+    def test_a_branch_head_has_left_keeps_its_unpushed_commits(self):
+        self.commit()
+        self.git(self.wt, "checkout", "-q", "--detach", "HEAD~1")
+        self.finish()
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+        self.assertNotEqual(self.branches(), "")
+
+    def test_a_worktree_git_cannot_remove_is_kept_with_its_branch(self):
+        self.finish()
+        self.git(self.clone, "worktree", "lock", self.wt)
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+        self.assertNotEqual(self.branches(), "")
+        self.assertIn("remove failed", self.state()["worktreeKept"]["i1"]["reason"])
+
 
 class TestQuarantine(Base):
     """A corrupt per-board data file is set aside (and its last good copy restored) instead of stopping the loop."""

@@ -12,7 +12,7 @@ from .consts import AUTO_FIELD, BOARDS, PRIORITY_FIELD, HOME, LOCKS, STORY_OPTIO
 from .util import die, out, printable, strip_id
 from .gh import gh, gql
 from .store import list_boards, load_board, load_json, lock_alive, locked, same_board, save_board
-from .board import fetch_items, migrate_poll_default, fetch_project, fields_by_name, parse_board_url, parse_item
+from .board import fetch_items, migrate_poll_default, fetch_project, fields_by_name, known_repo, parse_board_url, parse_item
 from .gitutil import git
 from .gitwt import is_dirty, unsaved_work
 from .notify import command_problem
@@ -69,7 +69,7 @@ def stale_worktrees(c, done, fetched=None):
     found = []
     for p in glob.glob(os.path.join(root, "*", "*", "*")):
         key = tuple(os.path.relpath(p, root).split(os.sep))
-        base = c["repos"].get(f"{key[0]}/{key[1]}")
+        base = c["repos"].get(known_repo(c, f"{key[0]}/{key[1]}"))
         if key in done and base and os.path.isdir(base) and not unsaved_work(c, done[key], base, p, fetched):
             found.append(p)
     return found
@@ -97,7 +97,7 @@ def cmd_gc(a):
             continue
         for wt in stale_worktrees(c, done, {}):
             owner, name, number = os.path.relpath(wt, os.path.join(HOME, "worktrees")).split(os.sep)
-            path = c["repos"].get(f"{owner}/{name}")
+            path = c["repos"].get(known_repo(c, f"{owner}/{name}"))
             if not a.dry_run:
                 git(path, "worktree", "remove", "--force", wt, check=False)
                 git(path, "branch", "-D", f"cgp/{number}", check=False)

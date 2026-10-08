@@ -8,7 +8,7 @@ import sys
 import time
 from .util import IS_WINDOWS, covers, die, norm_path, out
 from .store import cfg, load_data, update_data
-from .board import issue_item, parse_pr_ref
+from .board import issue_item, known_repo, parse_pr_ref
 from .gitutil import default_ref, fetch, git, resolve_repo_path, wt_path
 from .repoconf import merged_globs
 from .pr import allow_head, is_approved_head, pr_view
@@ -28,10 +28,12 @@ def cleanup_worktree(c, it, fetched=None):
         return None
     try:
         with contextlib.redirect_stderr(io.StringIO()):  # die() prints before it exits
-            base = resolve_repo_path(c, it["issueRepo"])
+            base = resolve_repo_path(c, known_repo(c, it["issueRepo"]) or it["issueRepo"])
             problem = unsaved_work(c, it, base, wt, fetched)
             if not problem:
                 git(base, "worktree", "remove", "--force", wt, check=False)
+                if os.path.isdir(wt):  # e.g. a locked worktree: git refused, so the branch stays too
+                    return "git worktree remove failed"
                 git(base, "branch", "-D", f"cgp/{it['number']}", check=False)
     except SystemExit:
         return "git could not be run for it"
@@ -209,37 +211,51 @@ def unsaved_work(c, it, base, wt, fetched=None):
         return "git cannot read its state"
     if status.stdout.strip():
         return "it has uncommitted changes"
+    def rev(name):
+        return subprocess.run(["git", "-C", wt, "rev-parse", "--verify", "-q", name], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
+    head = rev("HEAD")
+    branch_tip = rev(f"refs/heads/cgp/{it['number']}")  # `branch -D` follows removal: a branch HEAD has left must be safe too
+    tips = [head] + ([branch_tip] if branch_tip and branch_tip != head else [])
     ref = parse_pr_ref(c, it["pr"])
     view = (pr_view(*ref, check=False) or {}) if ref else {}
-    if view.get("state") == "MERGED":
-        head = subprocess.run(["git", "-C", wt, "rev-parse", "HEAD"], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
-        return None if head and head == view.get("headRefOid") else "HEAD is not the head of its merged PR (commits were added after)"
+    merged = view.get("state") == "MERGED"
     try:
         default = default_ref(base)
     except SystemExit:
-        return "the default branch is unknown"
-    ahead_of_default = subprocess.run(["git", "-C", wt, "rev-list", "--count", f"{default}..HEAD"], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if ahead_of_default.returncode == 0 and ahead_of_default.stdout.strip() == "0":
-        return None  # nothing on it that the default branch lacks
-    if fetched is None or base not in fetched:
-        try:
-            fetch(base)
-            ok = True
-        except SystemExit:
-            ok = False
-        if fetched is not None:
-            fetched[base] = ok
-    else:
-        ok = fetched[base]
-    if not ok:
-        return "the remote cannot be fetched to check for unpushed commits"
-    remote = f"origin/cgp/{it['number']}"
-    if subprocess.run(["git", "-C", wt, "rev-parse", "--verify", remote], capture_output=True).returncode:
-        return f"{remote} does not exist, so its commits were never pushed (and its PR is not merged)"
-    ahead = subprocess.run(["git", "-C", wt, "rev-list", "--count", f"{remote}..HEAD"], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if ahead.returncode or ahead.stdout.strip() != "0":
-        return f"it has commits that are not on {remote}"
-    return None
+        default = None
+    ok = None
+
+    def tip_problem(tip):
+        nonlocal ok
+        if merged:
+            return None if tip and tip == view.get("headRefOid") else "HEAD is not the head of its merged PR (commits were added after)"
+        if not default:
+            return "the default branch is unknown"
+        ahead_of_default = subprocess.run(["git", "-C", wt, "rev-list", "--count", f"{default}..{tip}"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if ahead_of_default.returncode == 0 and ahead_of_default.stdout.strip() == "0":
+            return None  # nothing on it that the default branch lacks
+        if ok is None:
+            if fetched is None or base not in fetched:
+                try:
+                    fetch(base)
+                    ok = True
+                except SystemExit:
+                    ok = False
+                if fetched is not None:
+                    fetched[base] = ok
+            else:
+                ok = fetched[base]
+        if not ok:
+            return "the remote cannot be fetched to check for unpushed commits"
+        remote = f"origin/cgp/{it['number']}"
+        if subprocess.run(["git", "-C", wt, "rev-parse", "--verify", remote], capture_output=True).returncode:
+            return f"{remote} does not exist, so its commits were never pushed (and its PR is not merged)"
+        ahead = subprocess.run(["git", "-C", wt, "rev-list", "--count", f"{remote}..{tip}"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if ahead.returncode or ahead.stdout.strip() != "0":
+            return f"it has commits that are not on {remote}"
+        return None
+
+    return next((p for p in map(tip_problem, tips) if p), None)
 
 
 def cmd_worktree_remove(a):
