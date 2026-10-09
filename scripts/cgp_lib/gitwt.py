@@ -147,7 +147,6 @@ def stack_sync(c, it, wt, rec, default):
     from .story import send_back  # story imports this module
     item = it["item"]
     repo, num = blocker_ref(rec)
-    subprocess.run(["git", "-C", wt, "fetch", "origin", f"refs/pull/{num}/head"], capture_output=True)  # the commits stay local once the branch is deleted
     view = pr_view(repo, num, check=False)
     if not view:
         die("could not read the blocker's PR; not changing the stacked story")
@@ -156,32 +155,45 @@ def stack_sync(c, it, wt, rec, default):
                            "cannot go on as it is. It is back in Implement; the user decides what happens to the stack.")
         return {"state": "blocker-closed", "pr": rec["pr"], "base": rec["branch"]}
     merged = view["state"] == "MERGED"
+    if merged and view.get("baseRefName") != default.split("/", 1)[1]:  # merged into some other branch: the default branch lacks its changes
+        send_back(c, item, f"The blocker's PR ({rec['pr']}) was merged into {view.get('baseRefName')}, not the default branch, so this story, "
+                           "stacked on it, cannot be rebased onto the default branch. It is back in Implement; the user decides what happens to the stack.")
+        return {"state": "error", "stderr": f"the blocker's PR merged into {view.get('baseRefName')}, not {default}", "base": default}
     target = default if merged else f"origin/{rec['branch']}"
     new_tip = git(wt, "rev-parse", "--verify", "-q", target, check=False)
     if not new_tip:
         return {"state": "error", "stderr": f"{target} does not exist", "base": target}
     behind = int(git(wt, "rev-list", "--count", f"HEAD..{target}") or 0)
-    if not merged and new_tip == rec["tip"]:
+    pending = rec.get("onto" if merged else "pendingTip")  # the commit an earlier sync set out to rebase onto (its conflict may have been resolved by hand)
+    resumed = bool(pending) and is_ancestor(wt, pending)
+    if resumed and not merged and pending != new_tip:  # rebased by hand onto a blocker commit that has moved on since: carry on from there
+        rec = {**rec, "tip": pending}
+        update_data(lambda d: (d["stack"][item].__setitem__("tip", pending), d["stack"][item].pop("pendingTip", None)))
+        resumed = False
+    if not merged and not resumed and new_tip == rec["tip"]:
         return {"state": "clean", "behind": 0, "base": target}
-    if not (merged and rec.get("onto") and is_ancestor(wt, rec["onto"])):  # not rebased onto the default branch already (e.g. by hand after a conflict)
+    if not resumed:
         if not is_ancestor(wt, rec["tip"]):
             taint(item)
             send_back(c, item, f"This story was recorded as built on {rec['branch']} at {rec['tip'][:8]}, but that commit is not in its "
                                "branch any more, so it cannot be rebased safely. It is back in Implement.")
             return {"state": "tainted", "base": target, "note": "the recorded blocker commit is not in the branch"}
-        if merged:
-            update_data(lambda d: d["stack"][item].__setitem__("onto", new_tip))
+        key = "onto" if merged else "pendingTip"
+        update_data(lambda d: d["stack"][item].__setitem__(key, new_tip))
         res = run_rebase(wt, target, upstream=rec["tip"])
         if res:
             if res["state"] == "conflict":
                 taint(item)
             return {**res, "behind": behind, "base": target}
+    pushed = push_rebased(wt, git(wt, "branch", "--show-current"))  # the branch on the remote still holds the blocker's old commits
+    if pushed:
+        return {"state": "error", "stderr": pushed, "base": target}
     if not merged:
         try:
             files = pr_files(repo, num)
         except SystemExit:
             files = rec["files"]
-        update_data(lambda d: d["stack"][item].update(tip=new_tip, files=files))
+        update_data(lambda d: (d["stack"][item].update(tip=new_tip, files=files), d["stack"][item].pop("pendingTip", None)))
     else:
         retarget(c, it, default)
         update_data(lambda d: d.get("stack", {}).pop(item, None))
@@ -191,6 +203,17 @@ def stack_sync(c, it, wt, rec, default):
     else:
         forget_review(item)
     return {"state": "rebased", "behind": behind, "base": target, **({"retargeted": True} if merged else {})}
+
+
+def push_rebased(wt, branch):
+    """Force-push (with lease on what was fetched) the rebased story branch when it is on the remote already, so the commits there are
+    not left to be taken for someone else's push by the next sync. None on success or when there is nothing to update, else why not."""
+    remote = git(wt, "rev-parse", "--verify", "-q", f"origin/{branch}", check=False)
+    if not remote:
+        return None
+    p = subprocess.run(["git", "-C", wt, "push", f"--force-with-lease={branch}:{remote}", "origin", f"HEAD:refs/heads/{branch}"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return None if p.returncode == 0 else f"could not push the rebased branch: {p.stderr.strip()}"
 
 
 def retarget(c, it, default):
@@ -232,11 +255,14 @@ def cmd_sync(a):
     if not branch:
         die("worktree is on a detached HEAD; check out the story branch first")
     moved = ahead_of_us = 0
+    rec = load_data().get("stack", {}).get(a.item)
     old_head = git(wt, "rev-parse", "HEAD")  # before anything moves it: only a rebase of an approved commit is itself approved
     remote = f"origin/{branch}"
     if git(wt, "rev-parse", "--verify", remote, check=False):
         # commits on the remote that are not (patch-equivalent to) ours: a local rebase not yet pushed is not someone else's push
-        ahead_of_us = int(git(wt, "rev-list", "--count", "--cherry-pick", "--right-only", f"HEAD...{remote}") or 0)
+        # (a stacked story's remote branch may still hold the blocker's commits it was rebased away from: they are not someone's push)
+        skip = [f"^{rec['tip']}"] if rec and git(wt, "rev-parse", "--verify", "-q", f"{rec['tip']}^{{commit}}", check=False) else []
+        ahead_of_us = int(git(wt, "rev-list", "--count", "--cherry-pick", "--right-only", f"HEAD...{remote}", *skip) or 0)
         if ahead_of_us:  # someone (e.g. a GitHub suggested change) pushed to the PR branch: keep their commits
             res = run_rebase(wt, remote)
             if res:
@@ -244,9 +270,10 @@ def cmd_sync(a):
                 out({**res, "base": remote})
                 return
             moved += ahead_of_us
-    rec = load_data().get("stack", {}).get(a.item)
     if rec:  # a stacked story follows its blocker's branch, not the default branch
         res = stack_sync(c, it, wt, rec, default)
+        if res["state"] == "clean" and moved:  # only the commits others pushed to the branch moved it
+            res = {**res, "state": "rebased"}
         out({**res, **({"stack": rec["branch"]} if res["state"] != "blocker-closed" else {})})
         return
     behind = int(git(wt, "rev-list", "--count", f"HEAD..{default}") or 0)
