@@ -1696,15 +1696,15 @@ class TestMergeTrain(PRBase):
         self.assertEqual(self.calls("merge"), [])
 
     def test_a_dependency_overrides_an_armed_pr_and_its_auto_merge_is_disarmed(self):
-        self.set_prs({2: self.v(2, autoMergeRequest={"enabledAt": "x"})})
+        self.set_prs({2: [self.v(2, autoMergeRequest={"enabledAt": "x"}), self.v(2)]})  # the second read: disarmed
         self.save_data(epicOrder={"i2": ["i1"]})
         self.assertEqual(self.numbers(self.wait("i2")), [1])
-        self.assertEqual(self.calls("merge")[0][-1], "--disable-auto")
+        self.assertEqual([c[-1] for c in self.calls("merge")], ["--disable-auto"])  # exactly one merge call
 
     def test_after_the_pr_ahead_merged_the_next_is_updated_once_then_merged(self):
         self.set_prs({1: self.v(1, state="MERGED"), 2: [self.v(2, mergeStateStatus="BEHIND"), self.v(2, headRefOid="h2new"),
                                                            self.v(2, headRefOid="h2new"), self.v(2, state="MERGED")]})
-        res = self.cgp("merge-wait", "i2", "--interval", "0")
+        res = self.cgp("merge-wait", "i2", "--interval", "0", "--timeout", "5")
         self.assertEqual(res["state"], "merged")
         updates = self.read_db()["update_branch_calls"]
         self.assertEqual(len(updates), 1)
@@ -1720,6 +1720,47 @@ class TestMergeTrain(PRBase):
         res = self.cgp("merge-wait", "i2", "--interval", "0", "--timeout", "5")
         self.assertEqual(res["state"], "changed")
         self.assertEqual(self.calls("merge")[-1][-1], "--disable-auto")
+
+    def test_a_started_pr_that_is_conflicting_red_or_waiting_does_not_hold_the_line(self):
+        for started in ({"autoMergeRequest": {"enabledAt": "x"}}, {"headRefOid": "h2clean"}):
+            self.save_data(cleanRebase={"i2": ["h2clean"]})
+            self.set_prs({2: self.v(2, **started)})
+            self.assertEqual(self.numbers(self.wait("i1")), [2])  # started and ready: it keeps the head, however low the number
+            self.set_prs({2: self.v(2, mergeable="CONFLICTING", mergeStateStatus="DIRTY", **started)})
+            self.assertNotIn("ahead", self.wait("i1"))
+            self.set_prs({2: self.v(2, **started)})
+            self.db_set(checks=[{"name": "t", "bucket": "fail", "link": ""}])
+            self.assertNotIn("ahead", self.wait("i1"))
+            self.db_set(checks=[])
+            self.save_data(epicOrder={"i2": ["i5"]})  # waits for #5, which has not merged
+            self.assertNotIn("ahead", self.wait("i1"))
+            self.save_data(epicOrder={})
+
+    def test_a_red_pr_ahead_does_not_stall_an_independent_one(self):
+        self.db_set(checks=[{"name": "t", "bucket": "fail", "link": ""}])
+        self.assertNotIn("ahead", self.wait("i2"))
+        self.save_data(epicOrder={"i2": ["i1"]})
+        self.assertEqual(self.numbers(self.wait("i2")), [1])
+
+    def test_pr_checks_are_read_once_per_pr_in_a_scheduler_pass(self):
+        self.db_set(checks=[{"name": "t", "bucket": "pass", "link": ""}], checks_calls=0)
+        self.setting(concurrency=3)
+        self.cgp("list")
+        self.assertLessEqual(self.read_db()["checks_calls"], 2)  # #1 and #2 each once (not once per later story)
+
+    def test_a_pause_never_sleeps_past_the_deadline(self):
+        _, pr = train_module()
+        util = sys.modules["cgp_lib.util"]
+        start = time.time()
+        self.assertTrue(pr.pause(util.Poll(1, 100), factor=3))
+        self.assertLess(time.time() - start, 5)
+
+    def test_a_story_that_becomes_the_head_arms_auto_merge_with_the_pin(self):
+        self.set_prs({1: [self.v(1), self.v(1, state="MERGED")], 2: self.v(2, mergeStateStatus="BLOCKED")})
+        self.cgp("merge-wait", "i2", "--interval", "0", "--timeout", "5")
+        arms = [c for c in self.calls("merge") if "--auto" in c]
+        self.assertEqual(len(arms), 1)
+        self.assertEqual(arms[0][arms[0].index("--match-head-commit") + 1], "h2")
 
     def test_a_conflicting_pr_ahead_does_not_stall_an_independent_one_but_stalls_its_dependent(self):
         self.set_prs({1: self.v(1, mergeable="CONFLICTING", mergeStateStatus="DIRTY")})
@@ -1764,8 +1805,8 @@ class TestMergeTrain(PRBase):
         self.assertIn("merge train", self.data()["reasons"]["i5"])
 
     def test_with_a_merge_queue_the_pinned_enqueue_is_all_that_happens(self):
-        self.db_set(merge_queue=True)
-        self.set_prs({2: self.v(2, mergeStateStatus="BEHIND", isInMergeQueue=True)})
+        self.db_set(merge_queue=True, in_queue=["acme/app#2"])
+        self.set_prs({2: self.v(2, mergeStateStatus="BEHIND")})
         self.assertEqual(self.cgp("merge", "i2"), {"requested": True, "queue": True})
         merge = self.calls("merge")
         self.assertEqual(len(merge), 1)
@@ -1790,6 +1831,39 @@ class TestMergeTrain(PRBase):
             self.assertEqual(self.wait("i2")["state"], "dequeued")
         self.set_prs({2: self.v(2, autoMergeRequest={"enabledAt": "x"})})
         self.assertEqual(self.wait("i2")["state"], "pending")
+
+    def test_the_queue_state_comes_from_graphql_not_from_gh_pr_view(self):
+        self.db_set(merge_queue=True, in_queue=["acme/app#2"])
+        self.assertEqual(self.wait("i2")["state"], "pending")  # the fake gh refuses an unknown --json field such as isInMergeQueue
+        self.assertTrue(all("isInMergeQueue" not in " ".join(c) for c in self.calls("view")))
+        self.db_set(queue_state_rc=1)  # a failed lookup is unknown, not "dequeued"
+        self.assertEqual(self.wait("i2")["state"], "pending")
+
+    def test_the_fake_gh_rejects_an_unknown_json_field(self):
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "tests", "fakegh"), "pr", "view", "2", "-R", "acme/app", "--json", "state,isInMergeQueue"],
+                           capture_output=True, text=True, env=self.env)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("isInMergeQueue", p.stderr)
+
+    def test_a_queue_repo_still_holds_a_story_for_its_dependencies(self):
+        self.db_set(merge_queue=True, in_queue=["acme/app#2"])
+        self.save_data(epicOrder={"i2": ["i1"]})
+        res = self.cgp("merge", "i2")
+        self.assertFalse(res["requested"])
+        self.assertEqual(res["train"]["ahead"][0]["why"], "dependency")
+        self.assertEqual(self.calls("merge"), [])
+        res = self.wait("i2")
+        self.assertEqual((res["state"], self.numbers(res)), ("pending", [1]))
+        self.assertEqual(self.cgp("merge", "i1"), {"requested": True, "queue": True})  # no dependency: the queue orders it
+        self.assertEqual(self.cgp("merge", "i5"), {"requested": True, "queue": True})  # an earlier independent PR does not hold it
+
+    def test_a_queue_repo_holds_a_trailing_story_in_the_scheduler_for_its_dependencies(self):
+        self.db_set(merge_queue=True)
+        self.save_data(epicOrder={"i2": ["i1"]})
+        self.setting(concurrency=3)
+        res = self.cgp("list")
+        self.assertNotIn("i2", [i["item"] for i in res["batch"]])
+        self.assertIn("i5", [i["item"] for i in res["batch"]])
 
     def test_a_failing_queue_lookup_falls_back_to_the_train(self):
         self.db_set(merge_queue=True, no_merge_queue_field=True)

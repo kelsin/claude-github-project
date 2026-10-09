@@ -50,11 +50,13 @@ def eligible(x, v, base):
             and not (v["mergeStateStatus"] == "BLOCKED" and v["reviewDecision"] in ("CHANGES_REQUESTED", "REVIEW_REQUIRED")))
 
 
-def train_ahead(c, me, live, blocks, views):
+def train_ahead(c, me, live, blocks, views, checks, queue=False):
     """The stories whose PR merges before the story `me`: {"ahead": [...], "merged": [items whose PR is merged], "note": text or None}.
-    `live` are the board's live stories and `blocks` their effective_blocks; `views` caches PR views for the call. Fails closed: a PR
-    that cannot be read holds. A story holds for what it depends on; otherwise for the PR that already started, else for the first
-    earlier PR that is ready (conflicting, red, sent-back or itself held PRs do not stall independent ones)."""
+    `live` are the board's live stories and `blocks` their effective_blocks; `views` and `checks` cache PR views and check lists for the call.
+    A story whose own PR cannot be read holds; a candidate PR that cannot be read is not in the train. A story holds for what it depends
+    on; otherwise for a PR that already started, else for the first earlier PR that is ready. A PR that is conflicting, red, unresolved
+    (waiting on a dependency), sent back or not the train's does not stall independent ones, started or not. `queue`: the repo has a merge
+    queue, so only dependencies hold the story."""
     by_id, data, merged = {i["item"]: i for i in live}, load_data(), set()
 
     def view(x):
@@ -82,9 +84,17 @@ def train_ahead(c, me, live, blocks, views):
         return {"ahead": [{"item": me["item"], "number": me["number"], "title": me["title"], "pr": me["pr"], "why": "the PR could not be read"}],
                 "merged": sorted(merged), "note": note}
     ahead = [entry(b, "dependency") for b in unresolved(me)]
-    if ahead or mv["state"] != "OPEN" or started(data, me["item"], mv):
+    if ahead or queue or mv["state"] != "OPEN" or started(data, me["item"], mv):
         return {"ahead": ahead, "merged": sorted(merged), "note": note}
     repo, base = parse_pr_ref(c, me["pr"])[0], mv.get("baseRefName")
+    def stuck(x, v):  # cannot merge now, so it must not hold up an independent PR
+        if v["mergeable"] == "CONFLICTING" or v["mergeStateStatus"] == "DIRTY" or unresolved(x):
+            return True
+        ref = parse_pr_ref(c, x["pr"])
+        if ref not in checks:
+            checks[ref] = pr_checks(*ref)
+        return any(k["bucket"] in ("fail", "cancel") for k in (checks[ref] or []))
+
     cands = {}
     for x in live:
         ref = parse_pr_ref(c, x["pr"])
@@ -94,15 +104,13 @@ def train_ahead(c, me, live, blocks, views):
         if v and eligible(x, v, base) and me["item"] not in reach(blocks, x["item"])[0]:
             cands[x["item"]] = (x, v)
     for x, v in cands.values():
-        if started(data, x["item"], v):
+        if started(data, x["item"], v) and not stuck(x, v):
             ahead.append(entry(x, "already updating"))
     if not ahead:
         order = train_order([me] + [x for x, _ in cands.values()], blocks)
         for i in order[:order.index(me["item"])]:
             x, v = cands[i]
-            if v["mergeable"] == "CONFLICTING" or v["mergeStateStatus"] == "DIRTY" or unresolved(x):
-                continue
-            if any(k["bucket"] in ("fail", "cancel") for k in (pr_checks(repo, parse_pr_ref(c, x["pr"])[1]) or [])):
+            if stuck(x, v):
                 continue
             ahead.append(entry(x, "earlier in the train"))
             break
@@ -110,20 +118,21 @@ def train_ahead(c, me, live, blocks, views):
 
 
 def train_held(c, stories, live, blocks):
-    """Story -> its non-empty `ahead` list, for the pr_approved `stories` that wait for a PR ahead of theirs (none in a repo with a
-    merge queue). The scheduler dispatches only the head, so a trailing story cannot take a worker slot from it."""
-    views, queues, held = {}, {}, {}
+    """Story -> its non-empty `ahead` list, for the pr_approved `stories` that wait for a PR ahead of theirs (in a repo with a merge
+    queue, only for what they depend on). The scheduler dispatches only the head, so a trailing story cannot take a worker slot from it."""
+    views, checks, queues, held = {}, {}, {}, {}
     for s in stories:
         ref = parse_pr_ref(c, s["pr"]) if s["column"] == "pr_approved" else None
         if not ref:
             continue
-        v = views.setdefault(ref, pr_view(*ref, check=False))
+        if ref not in views:
+            views[ref] = pr_view(*ref, check=False)
+        v = views[ref]
         if not v or v["state"] != "OPEN":
             continue
         if (ref[0], v["baseRefName"]) not in queues:
             queues[ref[0], v["baseRefName"]] = merge_queue_enabled(ref[0], v["baseRefName"])
-        if not queues[ref[0], v["baseRefName"]]:
-            ahead = train_ahead(c, s, live, blocks, views)["ahead"]
-            if ahead:
-                held[s["item"]] = ahead
+        ahead = train_ahead(c, s, live, blocks, views, checks, queues[ref[0], v["baseRefName"]])["ahead"]
+        if ahead:
+            held[s["item"]] = ahead
     return held

@@ -346,7 +346,7 @@ def snapshot(c):
     queued = [i for i in actionable if i not in batch] if cap > 0 and not stop else []  # (stop: see held_back below)
     reasons = {i["item"]: "waits for " + ", ".join(i["blockedBy"]) for i in blocked}
     reasons.update({i["item"]: "overlaps with " + ", ".join(i["conflictsWith"]) for i in deferred if starting(i)})
-    reasons.update({k: "merges after " + ", ".join(f"#{e['number']}" for e in v if e.get("number")) + " (merge train)" for k, v in trailing.items()})
+    reasons.update({k: "merges after " + ", ".join(f"#{e['number']}" if e.get("number") else e.get("why", "?") for e in v) + " (merge train)" for k, v in trailing.items()})
     reasons.update({i["item"]: f"queued: all {cap} worker slots are busy" for i in queued})
     held_back = set() if stop else {i["item"] for i in deferred if starting(i)} | {i["item"] for i in queued} | set(trailing)
     sync_story_field(c, live, held_back, in_flight)

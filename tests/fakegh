@@ -47,6 +47,13 @@ for f in db.get("failures", []):
         sys.exit(f.get("stderr", "gh: HTTP 502"))
 
 
+# the fields `gh pr view --json` accepts (gh 2.x): anything else makes gh fail, so the fake must too
+PR_VIEW_FIELDS = set("""additions assignees author autoMergeRequest baseRefName body changedFiles closed closedAt closingIssuesReferences comments
+commits createdAt deletions files fullDatabaseId headRefName headRefOid headRepository headRepositoryOwner id isCrossRepository isDraft labels
+latestReviews maintainerCanModify mergeCommit mergeStateStatus mergeable mergedAt mergedBy milestone number potentialMergeCommit projectCards
+projectItems reactionGroups reviewDecision reviewRequests reviews state statusCheckRollup title updatedAt url""".split())
+
+
 def field(name):
     return next(f for f in db["fields"] if f["name"] == name)
 
@@ -94,11 +101,15 @@ elif args[0] == "pr" and args[1] in ("view", "merge", "checks", "update-branch",
         prs = db.get("prs")
         if prs is not None and key not in prs:
             sys.exit(f"fakegh: no pull request {key}")
+        fields = args[args.index("--json") + 1].split(",") if "--json" in args else []
+        bad = [f for f in fields if f not in PR_VIEW_FIELDS]
+        if bad:
+            sys.exit(f"Unknown JSON field: {bad[0]!r}")
         v = seq(prs[key]) if prs is not None else seq(db.get("pr_view", {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "isDraft": False, "headRefOid": "aaa111", "headRefName": f"cgp/{num}", "isCrossRepository": False, "baseRefName": "main"}))
         if db.get("auto_merge_stuck"):  # --disable-auto did not take: the view still shows auto-merge armed
             v = dict(v, autoMergeRequest={"enabledAt": "2026-01-01T00:00:00Z"})
         save()
-        print(json.dumps(v))
+        print(json.dumps({k: x for k, x in v.items() if k in fields} if fields else v))  # like gh: only what was asked for
     elif args[1] == "checks":
         r = seq(db["checks_seq"]) if "checks_seq" in db else db.get("checks", [])  # checks_seq: one response per call
         db["checks_calls"] = db.get("checks_calls", 0) + 1
@@ -166,6 +177,13 @@ elif args[:2] == ["api", "graphql"]:
             print(json.dumps({"errors": [{"type": "undefinedField", "message": "Field 'mergeQueue' doesn't exist on type 'Repository'"}]}))
             sys.exit(1)
         r = {"repository": {"mergeQueue": {"id": "MQ1"} if db.get("merge_queue") else None}}
+    elif "isInMergeQueue" in q:  # db["in_queue"]: ["acme/app#2"], the PRs the merge queue holds; db["queue_state_rc"]: the lookup fails
+        if db.get("queue_state_rc"):
+            print(json.dumps({"errors": [{"type": "FORBIDDEN", "message": "no access"}]}))
+            sys.exit(1)
+        key = f"{v['o']}/{v['n']}#{v['p']}"
+        held = key in db.get("in_queue", [])
+        r = {"repository": {"pullRequest": {"isInMergeQueue": held, "mergeQueueEntry": {"state": "QUEUED"} if held else None}}}
     elif "__type(" in q:
         r = {"__type": {"fields": [{"name": "number"}] + ([] if db.get("no_blocked_by_field") else [{"name": "blockedBy"}])}}
     elif "updateProjectV2Field(" in q:
