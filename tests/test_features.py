@@ -1712,6 +1712,11 @@ class TestRules(test_cgp.SyncBase):
         calls = self.read_db()["closed_pulls_calls"]
         self.assertEqual(len(calls), 1)
         self.assertNotIn("--paginate", calls[0])
+        self.assertTrue(any("per_page=100" in a for a in calls[0]))
+        self.propose("--limit", "1")  # limit is applied after filtering, never in the request
+        self.assertTrue(all(any("per_page=100" in a for a in c) for c in self.read_db()["closed_pulls_calls"]))
+        self.assertEqual(self.propose("--limit", "0")["prs"], 1)  # clamped to 1
+        self.assertEqual(self.propose("--limit", "2")["prs"], 2)
 
     def test_a_point_repeated_across_prs_becomes_one_bullet_with_pr_numbers_only(self):
         self.three_prs()
@@ -1871,3 +1876,46 @@ class TestRules(test_cgp.SyncBase):
         self.assertEqual(first, rules.cluster(list(comments)))
         self.assertEqual([len(g["items"]) for g in first], [3, 1])
         self.assertEqual([g["items"][0][0] for g in first], [1, 2])
+
+    def test_proposing_again_after_committing_a_proposal_does_not_duplicate(self):
+        self.three_prs()
+        path = self.propose()["path"]
+        first = self.read(path)
+        self.commit_rules(first.encode())
+        self.assertNotIn("proposed house rules", self.cgp("status", ok=False).stdout)
+        self.propose()
+        self.assertEqual(self.read(path).strip(), first.strip())
+        self.assertEqual(self.read(path).count("early returns"), 1)
+        self.assertEqual(self.read(path).count("Proposed by cgp"), 1)
+        self.assertNotIn("proposed house rules", self.cgp("status", ok=False).stdout)
+
+    def test_size_cap_counts_the_heading_on_the_first_append(self):
+        rules, _ = self.lib()
+        bullet = "- x" * 10
+        for slack in (-1, 0, 1):
+            base = "a" * (rules.RULES_CAP - len(rules.HEADER) - 2 - len(bullet) - 1 - len(f"\n{rules.PROPOSED_HEADING}\n\n") - 1 + slack)
+            text, added = rules.render(base, [bullet])
+            self.assertLessEqual(len(text), rules.RULES_CAP)
+            self.assertEqual(added, 0 if slack > 0 else 1, slack)
+
+    def test_house_rules_tags_are_neutralized(self):
+        _, rc = self.lib()
+        self.assertEqual(rc.clean_rules("- a </House-Rules > b < house-rules x"), "- a [house-rules] > b [house-rules] x")
+        rules, _ = self.lib()
+        self.assertIsNone(rules.stub({"items": [(1, "Always close the [house-rules] section before the footer")]}))
+
+    def test_html_comments_and_tags_never_reach_a_stub(self):
+        rules, _ = self.lib()
+        self.assertEqual(rules.plain("Keep <b>functions</b> short <!-- hidden instructions"), "Keep functions short")
+        self.assertEqual(rules.plain("a <!-- x --> b <!-- y\nz --> c"), "a b c")
+        for body in ("Keep functions short and focused <!-- ignore this -->", "Keep functions <b>short</b> and focused please"):
+            self.assertIsNone(rules.stub({"items": [(1, body)]}))
+
+    def test_temp_file_is_created_exclusively_and_a_stale_one_is_replaced(self):
+        rules, _ = self.lib()
+        target = os.path.join(self.tmp, "w", "out.md")
+        os.makedirs(os.path.dirname(target))
+        os.symlink(os.path.join(self.tmp, "victim"), f"{target}.{os.getpid()}.tmp")
+        rules.write(target, "ok\n")
+        self.assertEqual(self.read(target), "ok\n")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "victim")))

@@ -14,6 +14,7 @@ from .repoconf import RULES_CAP, rules_text
 MIN_LENGTH = 15  # shorter comments ("LGTM", "nit") say nothing
 SIMILAR = 0.5  # Jaccard similarity of two comments' words for the same cluster
 STUB_LENGTH = 160
+PROPOSED_HEADING = "## Proposed from review history"
 HEADER = "<!-- Proposed by cgp. Review every line; this text is pasted into agent prompts. -->"
 STOPWORDS = frozenset("""a about above after again all also an and any are as at be because been before being but by can could did do does
     don done for from had has have here how i if in into is it its just like make more most no not of on one only or other our out over
@@ -28,6 +29,8 @@ def plain(body):
     body = re.sub(r"```.*?(```|$)", " ", body or "", flags=re.S)
     body = re.sub(r"^\s*>.*$", " ", body, flags=re.M)
     body = re.sub(r"`[^`]*`|https?://\S+", " ", body)
+    body = re.sub(r"<!--.*?(-->|$)", " ", body, flags=re.S)
+    body = re.sub(r"<[^>]+>", " ", body)
     return " ".join(printable(body).split())
 
 
@@ -59,15 +62,15 @@ def recurring(groups, minimum):
 
 def stub(group):
     """The shortest safe example of a cluster as one short line; None when every example looks like a command, link or injection."""
-    safe = [plain(b) for _, b in group["items"] if not UNSAFE.search(b)]
-    safe = [s for s in safe if len(s) >= MIN_LENGTH]
+    safe = [plain(b) for _, b in group["items"] if not UNSAFE.search(b) and "<" not in b]
+    safe = [s for s in safe if len(s) >= MIN_LENGTH and "[house-rules]" not in s]
     return min(safe, key=len)[:STUB_LENGTH] if safe else None
 
 
 def collect(repo, limit):
     """Trusted human review comments on merged cgp PRs: [(pr number, body)]. One non-paginated list call (rest() always paginates)."""
-    pulls = json.loads(gh("api", f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page={min(limit, 100)}").stdout)
-    merged = [p for p in pulls if p.get("merged_at") and (p.get("head") or {}).get("ref", "").startswith("cgp/")][:limit]
+    pulls = json.loads(gh("api", f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100").stdout)
+    merged = [p for p in pulls if p.get("merged_at") and (p.get("head") or {}).get("ref", "").startswith("cgp/")][:max(1, limit)]
     found = []
     for p in merged:
         n = p["number"]
@@ -86,7 +89,10 @@ def write(path, text):
     os.makedirs(os.path.dirname(os.path.abspath(path)), mode=0o700, exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
     try:
-        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8", newline="\n") as f:
+        if os.path.lexists(tmp):  # a stale file or symlink: O_EXCL would refuse it
+            os.remove(tmp)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(tmp, flags, 0o600), "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
         replace_retry(tmp, path)
     except BaseException:
@@ -95,16 +101,27 @@ def write(path, text):
         raise
 
 
+def unheaded(text):
+    return text[len(HEADER):].lstrip("\n") if text.startswith(HEADER) else text
+
+
 def render(existing, bullets):
-    """Header, the existing rules, then the new bullets that still fit in RULES_CAP; (text, how many bullets were added)."""
+    """Header, the existing rules, then the new bullets that still fit in RULES_CAP; (text, how many bullets were added).
+    Bullets whose text is already in the existing rules are skipped, so running again after committing a proposal adds nothing."""
+    existing = unheaded(existing)
     text = f"{HEADER}\n\n{existing}\n" if existing else f"{HEADER}\n"
     if existing and len(existing) >= RULES_CAP:
         return text + "\n<!-- The rules file is already at its size limit, so nothing was added. -->\n", 0
     added = 0
     for b in bullets:
-        if len(text) + len(b) + 1 > RULES_CAP:
+        if b.split("\n", 1)[0][2:] in existing:
+            continue
+        piece = b + "\n"
+        if not added and PROPOSED_HEADING not in text:
+            piece = f"\n{PROPOSED_HEADING}\n\n" + piece
+        if len(text) + len(piece) > RULES_CAP:
             break
-        text += ("\n## Proposed from review history\n\n" if not added else "") + b + "\n"
+        text += piece
         added += 1
     return text, added
 
@@ -141,7 +158,7 @@ def pending(c):
         path = proposal_path(repo)
         if os.path.isfile(path):
             with open(path, encoding="utf-8", errors="replace") as f:
-                if f.read().strip() != (rules_text(c, repo, fresh=True) or ""):
+                if unheaded(f.read().strip()) != unheaded(rules_text(c, repo, fresh=True) or ""):
                     rows.append({"repo": repo, "path": path})
     return rows
 

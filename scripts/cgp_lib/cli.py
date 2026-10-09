@@ -100,7 +100,7 @@ COMMANDS = [
     ("gc", cmd_gc, "Delete state of dead sessions and worktrees of finished stories", [
         A("--days", type=int, default=7, help="age of session files to delete"), A("--dry-run", action="store_true")]),
     ("rules", cmd_rules, "House rules: propose rules from the review comments on merged cgp PRs (writes a file under the cgp home, never into the repo)", [
-        A("action", choices=["propose"]), A("--repo"), A("--limit", type=int, default=50, help="merged cgp PRs to read (at most 100)"),
+        A("action", choices=["propose"]), A("--repo"), A("--limit", type=int, default=50, help="merged cgp PRs to read, among the last 100 closed PRs"),
         A("--min", type=int, default=3, help="comments a point needs, across at least 2 PRs"), A("--out", help="write the proposal here instead"),
         A("--if-due", action="store_true", help="only when rulesProposeDays have passed since the last run")]),
 ]

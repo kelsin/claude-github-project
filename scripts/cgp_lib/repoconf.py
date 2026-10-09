@@ -71,6 +71,7 @@ def clean_rules(text):
     """The rules text as workers see it: BOM, CR and control or format (bidi) characters removed, cut to RULES_CAP characters."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = "".join(ch for ch in text if ch in "\n\t" or unicodedata.category(ch) not in ("Cc", "Cf"))
+    text = re.sub(r"(?i)</?\s*house-rules", "[house-rules]", text)
     return text.strip()[:RULES_CAP]
 
 
