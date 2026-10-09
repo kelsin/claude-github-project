@@ -20,6 +20,7 @@ from .sched import cmd_block, cmd_list, cmd_overlap, cmd_status, cmd_touches, cm
 from .unstick import cmd_unstick
 from .resume import cmd_resume
 from .stack import cmd_stack
+from .spec import cmd_spec
 from .session import cmd_release, cmd_session_title, cmd_stop, cmd_use, cmd_worker
 from .story import (cmd_answers, cmd_approve, cmd_ask, cmd_comment, cmd_feedback, cmd_move, cmd_prepare, cmd_preview, cmd_set)
 from .util import die
@@ -72,6 +73,9 @@ COMMANDS = [
     ("sync", cmd_sync, "Rebase the story's worktree onto its remote branch and the latest default branch", [A("item")]),
     ("stack", cmd_stack, "Show the stack a story is built on (stackedStories); --clear lifts it (you, in a terminal)", [
         A("item"), A("--clear", action="store_true")]),
+    ("spec", cmd_spec, "Speculative draft of a Plan Review story (setting speculative): start, finish, fail, status or resolve (--artifact-comments N)", [
+        A("action", choices=["start", "finish", "fail", "status", "resolve"]), A("item"),
+        A("--artifact-comments", type=int, help="start: comments on the plan artifact now; resolve: comments on it now (more than at start discards the draft)")]),
     ("touches", cmd_touches, "Record (or read) the files and directories a story changes", [A("item"), A("paths", nargs="*")]),
     ("overlap", cmd_overlap, "Find stories touching the same files", [A("item")]),
     ("block", cmd_block, "Make a story wait for another (or --unblock)", [A("item"), A("other", nargs="?"), A("--unblock", action="store_true")]),

@@ -16,7 +16,7 @@ from .repoconf import merged_globs
 
 LEVELS = ("never",) + RATINGS  # the highest rating a gate may be approved at
 GATE_KEYS = {"plan_approved": "plan", "pr_approved": "pr"}
-HUMAN_ONLY = ("autoApprove",)  # setting names (prefixes) only a person at a terminal may change
+HUMAN_ONLY = ("autoApprove", "speculative")  # setting names (prefixes) only a person at a terminal may change
 MAX_FILES = 3000  # GitHub lists at most this many files of a pull request: a list that long may be cut off
 # Never auto-approved, whatever the settings say: instructions to agents, the plugin's own prompts, docs build and deploy config.
 ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKILL.md", "skills/**", "**/columns/*.md",
@@ -79,18 +79,27 @@ def glob_match(glob, path):
     return go(0, 0)
 
 
+def forbidden(guarded, n):
+    """Why a path may never be touched without a person (None when it may): not a plain file path, on the always-deny list, or a guarded
+    file. `guarded` is the lower-cased guardFiles globs."""
+    if not n or n.startswith("/") or n.endswith("/") or any(s in ("", ".", "..") for s in n.split("/")):
+        return f"{n or '(no name)'} is not a plain file path"
+    if any(glob_match(g, n) for g in ALWAYS_DENY):
+        return f"{n} is never auto-approved"
+    low = n.lower()
+    if any(fnmatch.fnmatchcase(x, g) for g in guarded for x in (low, os.path.basename(low))):
+        return f"{n} is a guarded file"
+    return None
+
+
 def vet(c, repos, names, globs):
     """Why a changed path may not be auto-approved (None when every one may): it must be a plain file path inside `globs`, not on the
     always-deny list and not a guarded file (the guard ignores approvedTouches here: a guard hit is an absolute refusal)."""
     guarded = [g.lower() for g in merged_globs(c, "guardFiles", repos)]
     for n in names:
-        if not n or n.startswith("/") or n.endswith("/") or any(s in ("", ".", "..") for s in n.split("/")):
-            return f"{n or '(no name)'} is not a plain file path"
-        if any(glob_match(g, n) for g in ALWAYS_DENY):
-            return f"{n} is never auto-approved"
-        low = n.lower()
-        if any(fnmatch.fnmatchcase(x, g) for g in guarded for x in (low, os.path.basename(low))):
-            return f"{n} is a guarded file"
+        why = forbidden(guarded, n)
+        if why:
+            return why
         if not any(glob_match(g, n) for g in globs):
             return f"{n} is outside autoApproveFiles"
     return None

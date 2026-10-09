@@ -259,12 +259,14 @@ def record_outcome(item, column, outcome):
 def cmd_worker(a):
     """start / stop / clear / phase / agent. `start` takes the title (and, unless given, the column) from the board: an issue title is
     text anyone can write, so it must never travel through a shell command line."""
+    from .spec import is_spec, story_of, worker_stopped  # spec imports modules that import this one
     if a.action == "phase" and a.column not in PHASES:
         die(f"phase must be one of {list(PHASES)}")
     outcome = getattr(a, "outcome", None)  # internal callers build their own namespace
     if outcome and a.action != "stop":
         die("--outcome belongs to `worker stop`")
     strikes = None
+    drafting = is_spec(a.item or "")  # a speculative draft's row ("<item>:spec"): no strikes, no resume (see spec.py)
     row = next((w for w in load_json(state_path(), {}).get("workers", []) if w["item"] == a.item), None)
     if a.action == "agent":  # the loop reports the id of the Agent it spawned for this worker
         if not row:
@@ -274,12 +276,14 @@ def cmd_worker(a):
         update_state(lambda st: [w.__setitem__("agent", a.column) for w in st["workers"] if w["item"] == a.item])
         out(load_json(state_path(), {}).get("workers", []))
         return
-    if outcome:
+    if outcome and drafting:
+        worker_stopped(a.item, outcome)
+    elif outcome:
         strikes = record_outcome(a.item, row["column"] if row else get_item(cfg(), a.item)["column"], outcome)
         if outcome == "ok":
             record_resume(a.item, row)
     if a.action == "start":
-        it = get_item(cfg(), a.item)
+        it = get_item(cfg(), story_of(a.item))
         a.column, a.title = a.column or it["column"], it["title"]
 
     def upd(st):
@@ -291,8 +295,8 @@ def cmd_worker(a):
         st["workers"] = [w for w in st["workers"] if w["item"] != a.item]
         if a.action == "start":
             w = {"item": a.item, "column": a.column, "title": a.title, "startedAt": now_iso()}
-            if a.column in DEFAULT_PHASE:
-                w.update(phase=DEFAULT_PHASE[a.column], phaseAt=now_iso())
+            if a.column in DEFAULT_PHASE or drafting:
+                w.update(phase=DEFAULT_PHASE.get(a.column, "implementing"), phaseAt=now_iso())
             st["workers"].append(w)
     if a.action == "clear":
         update_state(lambda st: st.__setitem__("workers", []))
