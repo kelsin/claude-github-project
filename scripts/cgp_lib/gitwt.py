@@ -14,12 +14,6 @@ from .repoconf import merged_globs
 from .pr import allow_head, is_approved_head, pr_view
 
 
-def is_dirty(wt):
-    """True when the worktree has uncommitted work. Only that: unpushed commits are unsaved_work's business."""
-    p = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    return p.returncode != 0 or bool(p.stdout.strip())
-
-
 def cleanup_worktree(c, it, fetched=None):
     """Remove a finished story's worktree and branch unless that would lose work (see unsaved_work). None when it is gone,
     else why it was kept. `fetched` (repo clone -> fetch worked) lets one sweep fetch each repo once. Never prints, never raises."""
@@ -201,24 +195,84 @@ def cmd_guard(a):
         sys.exit(4)
 
 
-def unsaved_work(c, it, base, wt, fetched=None):
-    """Why removing the worktree would lose work (None when nothing would be): uncommitted changes, or commits origin/<branch> lacks.
-    A branch that is not on the remote is fine only once the story's PR is merged (the branch was deleted after the squash) and
-    HEAD is that PR's head, or when HEAD is already on the default branch. Local checks run before anything is fetched; an unknown
-    default branch or a failed fetch keeps the worktree. `fetched` caches fetches per clone."""
+def pr_view_of(c, it):
+    ref = parse_pr_ref(c, it["pr"])
+    return (pr_view(*ref, check=False) or {}) if ref else {}
+
+
+def dirty_summary(wt):
+    """Why `git status` is not clean, naming the files ("2 modified, 1 untracked files: a, b, c"); None when it is clean."""
     status = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if status.returncode:
         return "git cannot read its state"
-    if status.stdout.strip():
-        return "it has uncommitted changes"
+    lines = [line for line in status.stdout.splitlines() if line.strip()]
+    if not lines:
+        return None
+    untracked = [line[3:] for line in lines if line.startswith("??")]
+    modified = [line[3:] for line in lines if not line.startswith("??")]
+    names = [*modified, *untracked]
+    more = f", and {len(names) - 5} more" if len(names) > 5 else ""
+    return f"{len(modified)} modified, {len(untracked)} untracked files: {', '.join(names[:5])}{more}"
+
+
+def merged_contained(wt, it, view):
+    """The story's PR is merged and everything committed here is inside the PR's head: the local branch, and HEAD too (a detached HEAD, or
+    a stopped rebase, may hold commits the branch ref does not). A head object this clone lacks, an unreachable GitHub or anything
+    unclear is not contained."""
+    oid = view.get("headRefOid")
+    if view.get("state") != "MERGED" or not oid:
+        return False
+
+    def git_ok(*args):
+        p = subprocess.run(["git", "-C", wt, *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        return p.stdout.strip() if p.returncode == 0 else None
+    if git_ok("merge-base", "--is-ancestor", f"refs/heads/cgp/{it['number']}", oid) is None:
+        return False
+    try:
+        if not rebase_in_progress(wt):
+            return git_ok("merge-base", "--is-ancestor", "HEAD", oid) is not None
+        merge_dir = os.path.join(wt, git(wt, "rev-parse", "--git-path", "rebase-merge"))
+        if not os.path.isdir(merge_dir):  # rebase-apply: no record of what was replayed
+            return False
+        with open(os.path.join(merge_dir, "onto"), encoding="utf-8") as f:
+            onto = f.read().strip()
+        with open(os.path.join(merge_dir, "done"), encoding="utf-8") as f:
+            picks = sum(1 for line in f if line.split(" ", 1)[0] in ("pick", "p", "reword", "r", "edit", "e", "squash", "s", "fixup", "f"))
+        ahead = git_ok("rev-list", "--count", f"{onto}..HEAD")
+        return ahead is not None and int(ahead) <= picks
+    except (OSError, SystemExit, ValueError):
+        return False
+
+
+def uncommitted_work(wt):
+    """Why the worktree holds work that only exists there (None when it does not): a rebase left in progress (--autostash hides
+    changes from `git status` then), or a dirty tree. Read-only."""
+    if rebase_in_progress(wt):
+        return "a rebase is still in progress"
+    summary = dirty_summary(wt)
+    if summary and summary.startswith("git cannot"):
+        return summary
+    return f"it has uncommitted changes ({summary})" if summary else None
+
+
+def unsaved_work(c, it, base, wt, fetched=None):
+    """Why removing the worktree would lose work (None when nothing would be): uncommitted changes, a rebase in progress, or commits origin/<branch> lacks.
+    None at once when the story's PR is merged and the local branch is inside the PR's head (merged_contained).
+    A branch that is not on the remote is fine only once the story's PR is merged (the branch was deleted after the squash) and
+    HEAD is that PR's head, or when HEAD is already on the default branch. Local checks run before anything is fetched; an unknown
+    default branch or a failed fetch keeps the worktree. `fetched` caches fetches per clone."""
+    view = pr_view_of(c, it)
+    if merged_contained(wt, it, view):  # what is left (rebase debris, regenerated files) is not worth keeping
+        return None
+    merged = view.get("state") == "MERGED"
+    problem = uncommitted_work(wt)
+    if problem:
+        return problem
     def rev(name):
         return subprocess.run(["git", "-C", wt, "rev-parse", "--verify", "-q", name], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
     head = rev("HEAD")
     branch_tip = rev(f"refs/heads/cgp/{it['number']}")  # `branch -D` follows removal: a branch HEAD has left must be safe too
     tips = [head] + ([branch_tip] if branch_tip and branch_tip != head else [])
-    ref = parse_pr_ref(c, it["pr"])
-    view = (pr_view(*ref, check=False) or {}) if ref else {}
-    merged = view.get("state") == "MERGED"
     try:
         default = default_ref(base)
     except SystemExit:

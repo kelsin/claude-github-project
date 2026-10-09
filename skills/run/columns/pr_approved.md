@@ -2,7 +2,7 @@
 
 The user approved the diff as it stands. Run `CGP feedback <item>` (act on anything new as rule 1 says), and note `headRefOid` from `CGP pr-state <repo> <pr>` now.
 
-`CGP worker phase <item> merging` when you start.
+`CGP worker phase <item> merging` when you start. Before you stop, `git rebase --abort` any rebase you left in progress and leave `git status` clean in the worktree.
 
 1. If `pr-state` says `MERGED`, go to step 3. Otherwise run `CGP ci-wait <repo> <pr>` first; only when it is `green` or `none` and no code push is pending, `CGP merge <item>` (squash, auto-merge, falls back to a direct merge). If `requested` is false it often just means checks are still pending: go to step 2, which merges when the PR turns clean. Only act on the error text if `merge-wait` also reports a problem; if only the user can fix it (review required, no merge permission), `CGP ask` and stop.
 2. `CGP merge-wait <item>` (it also updates a behind branch itself) and handle its `state`:
