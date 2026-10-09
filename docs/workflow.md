@@ -31,6 +31,12 @@ When a PR's checks fail, the worker runs `cgp ci-triage <repo> <pr>` before touc
 
 Each snapshot of the loop (`cgp list` / `cgp wait`) can run an opt-in intake pass per repo (`intake` in `.cgp.json`, see [settings](settings.md)), at most every `intakeSeconds`. It files a Todo story when the default branch is red, and puts open Dependabot / Renovate PRs into PR Review as `Plan: Skip` stories for you to merge by hand; no worker is dispatched for them. A story it creates is picked up by the next cycle.
 
+## House rules
+
+A repo can carry a `.cgp-rules.md` at the root of its default branch: free-text house rules (style and conventions) that `cgp prepare` returns as `houseRules` and workers paste into planner, implementer and reviewer prompts (reviewers check the diff against it). Only the default branch is read, so a story cannot change its own rules, and a newly committed file shows up after the clone is synced (`origin/HEAD` is read locally). It is cut to 8,192 characters and stripped of control and bidi characters.
+
+`cgp rules propose [--repo owner/name] [--limit 50] [--min 3] [--out PATH]` writes a proposal from your review history: it reads comments and reviews on the last merged `cgp/<n>` PRs (one list call, at most 100 PRs), keeps only those from trusted people (you, owners, collaborators with write access; no bots, no agent comments), groups similar ones by shared words, and keeps points seen at least `--min` times in at least 2 PRs. The result goes to `proposals/<owner>__<repo>/cgp-rules.proposed.md` in the cgp home, never into the repo: your existing rules plus one bullet per new point with the PR numbers it came from. Diff it, edit it and commit `.cgp-rules.md` to the default branch yourself; cgp never commits, pushes or opens a PR for it. `cgp status` shows a line while a proposal differs from the default branch. The loop runs it for each repo in `rulesDue` every `rulesProposeDays` (default 7, 0 = off); every run counts, including ones that found nothing.
+
 ## Story fields
 
 **Review digest.** `scripts/cgp review` lists every story waiting on you (plan review, PR review, or a question), oldest wait first and smallest diff first within the same hour, with rating, files, CI state and links; `--html [PATH]` writes it as one self-contained page. It is read-only. The wait is counted from when the loop first saw the story in its column, so stories already there when the loop first ran are marked approximate (`~`) and listed last.
