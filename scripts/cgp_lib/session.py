@@ -110,7 +110,7 @@ def cmd_release(a):
         with locked():  # read and remove together: a session that claimed the board meanwhile keeps its lock
             if lock_mine(key):
                 os.remove(lock_file(key))
-        update_data(lambda d: d.pop("resume", None))  # the workers die with the session
+                update_data(lambda d: d.pop("resume", None))  # the workers die with the session
     update_state(lambda st: st.update(boardKey=None, workers=[], counts={}, waiting=[], updatedAt=None))
     out({"released": key})
 
@@ -189,7 +189,8 @@ def reset_strikes(d, item):
 
 
 AGENT_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
-RESUME_COLUMN = {"todo": "plan", "plan_approved": "implement"}  # the column a worker's work belongs to: Todo is planned, Plan Approved implemented
+# the column a worker's work belongs to: Todo and Plan Review are the plan's, everything from Plan Approved to PR Approved the implementation's
+RESUME_COLUMN = {"todo": "plan", "plan_review": "plan", "plan_approved": "implement", "pr_review": "implement", "pr_approved": "implement"}
 
 
 def resume_column(column):
@@ -219,14 +220,16 @@ def record_resume(item, row):
     resume; any other entry of the story is stale. Nothing is recorded without an agent id or a readable remote head."""
     entry = None
     if row and row.get("agent"):
+        column = row["column"]
         try:
             c = cfg()
             it = get_item(c, item)
+            column = it["column"]  # where the story is now: a skip-plan worker started in Todo ends in PR Review, having implemented
             head = remote_head(c, it) if it["kind"] == "issue" else None
         except SystemExit:
             head = None
         if head:
-            entry = (f"{item}|{resume_column(row['column'])}", {"agent": row["agent"], "head": head, "at": now_iso()})
+            entry = (f"{item}|{resume_column(column)}", {"agent": row["agent"], "head": head, "at": now_iso()})
 
     def upd(d):
         drop_resume(d, item)

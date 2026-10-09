@@ -107,9 +107,37 @@ class TestResume(test_cgp.SyncBase):
         self.assertNotEqual(self.cgp("worker", "agent", "i1", "x", ok=False).returncode, 0)
         self.cgp("worker", "start", "i1")
         for bad in ("a b", "x;y", "$(id)", "a" * 129):
-            self.assertNotEqual(self.cgp("worker", "agent", "i1", bad, ok=False).returncode, bad)
+            self.assertNotEqual(self.cgp("worker", "agent", "i1", bad, ok=False).returncode, 0, bad)
+            self.assertNotIn("agent", self.state()["workers"][0])
         self.cgp("worker", "agent", "i1", "ab12:c_d.e-f")
         self.assertEqual(self.state()["workers"][0]["agent"], "ab12:c_d.e-f")
+
+    def test_two_send_backs_in_a_row(self):
+        self.run_worker()
+        got = self.cgp("resume", "get", "i1")
+        self.assertTrue(got["resume"])
+        self.cgp("worker", "start", "i1")  # the loop resumes: new row, no id yet
+        self.cgp("worker", "agent", "i1", got["agent"])
+        self.cgp("resume", "clear", "i1")
+        self.cgp("worker", "stop", "i1", "--outcome", "ok")
+        self.assertEqual(self.cgp("resume", "get", "i1"), {"resume": True, "agent": "agent-1"})
+
+    def test_a_plain_stop_records_nothing(self):
+        self.cgp("worker", "start", "i1")
+        self.cgp("worker", "agent", "i1", "agent-1")
+        self.cgp("worker", "stop", "i1")
+        self.assertEqual(self.data().get("resume", {}), {})
+
+    def test_the_column_is_where_the_story_ended(self):
+        self.force("i1", "implement")
+        self.cgp("worker", "start", "i1")
+        self.cgp("worker", "agent", "i1", "agent-1")
+        self.force("i1", "pr_review")  # implemented, then handed to the user
+        self.cgp("worker", "stop", "i1", "--outcome", "ok")
+        self.assertEqual(list(self.data()["resume"]), ["i1|implement"])
+        self.force("i1", "implement")  # sent back
+        self.cgp("rate", "i1", "low")
+        self.assertTrue(self.cgp("resume", "get", "i1")["resume"])
 
     def test_release_and_use_takeover_clear_it(self):
         self.cgp("use")
