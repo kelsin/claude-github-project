@@ -61,6 +61,7 @@ STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a b
 # draftPRs 1: workers open PRs as drafts and `cgp move ... pr_review` marks them ready
 # plannerModel / reviewerModel / implementerModel: sonnet | opus | haiku | fable, or low:haiku,medium:sonnet,high:opus (see models.py)
 # notifyCommand: a command run when a story starts waiting on you, enters a review column, is Done or stalls (see notify.py)
+# nagAfterHours: fire the notify hook (event nag) again every N hours a story waits on you, while the loop runs (0 = never)
 # maxWorkerMinutes: a worker running longer is reported as stalled by `cgp list` (0 = never), so the loop can release its story
 # nativeDependencies 1: GitHub's own "blocked by" issue dependencies also hold a story back (0 = cgp's own blocks only)
 # intakeSeconds: at most one failing-main / dependency-PR scan per repo this often (a repo opts in with "intake" in its .cgp.json)
@@ -70,7 +71,7 @@ STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a b
 # these built-in ones always apply, the setting can only add to them
 OLD_POLL_SECONDS = 30  # the default before this change: setup stored it in every board config, so a stored 30 means "never changed"
 POLL_SECONDS = 15
-DEFAULTS = {"concurrency": 0, "pollSeconds": POLL_SECONDS, "remoteControl": 1, "notifyCommand": "", "previewProvider": "netlify", "draftPRs": 0,
+DEFAULTS = {"concurrency": 0, "pollSeconds": POLL_SECONDS, "remoteControl": 1, "notifyCommand": "", "nagAfterHours": 0, "previewProvider": "netlify", "draftPRs": 0,
             "plannerModel": "", "reviewerModel": "", "implementerModel": "", "maxWorkerMinutes": 240, "nativeDependencies": 1,
             "intakeSeconds": 300, "autoApprove": "plan:never,pr:never", "autoApproveFiles": ["docs/**/*.md", "*.md"],
             "guardFiles": [".github/*", "CODEOWNERS", "*/CODEOWNERS", ".husky/*", ".pre-commit-config.yaml", ".npmrc", ".yarnrc*",
