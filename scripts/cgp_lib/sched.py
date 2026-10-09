@@ -13,6 +13,7 @@ from .gitutil import wt_path
 from .gitwt import cleanup_worktree
 from .notify import check
 from .epics import close_finished, parent_edges
+from .auto_intake import run_intake
 from .repoconf import merged_globs
 from .policy import current_rating
 from .story import ask_user, process_replies
@@ -229,6 +230,11 @@ def snapshot(c):
     in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these
     file_closed()
     close_finished(c, items)  # a story split into sub-stories is closed once they are all done (see epics.py)
+    created = set()  # items intake added to the board just now: not in `items`, but their data must survive the prune below
+    try:  # opt-in failing-main and dependency-PR intake (see auto_intake.py); its stories are picked up by the next cycle
+        problems = run_intake(c, items, created)
+    except (SystemExit, Exception) as e:
+        problems = [str(e)]
     file_closed()
     sweep_done()
     live = [i for i in items if i["column"] != "done"]
@@ -285,7 +291,8 @@ def snapshot(c):
     reasons.update({i["item"]: f"queued: all {cap} worker slots are busy" for i in queued})
     held_back = set() if stop else {i["item"] for i in deferred if starting(i)} | {i["item"] for i in queued}
     sync_story_field(c, live, held_back, in_flight)
-    status = "done" if not live else "work" if batch else "idle"  # idle also when the cap is full
+    fresh = created - live_ids  # stories intake just filed: live work this cycle
+    status = "done" if not live and not fresh else "work" if batch else "idle"  # idle also when the cap is full
     stalled = stalled_workers(c)
     check(c, items, stalled)
     snap = {
@@ -293,7 +300,7 @@ def snapshot(c):
         "stopRequested": stop_requested(),
         "board": c["board"],
         "counts": counts,
-        "remaining": len(live),
+        "remaining": len(live) + len(fresh),
         "batch": batch,
         "inFlight": sorted(in_flight),
         "actionableTotal": len(actionable),
@@ -312,6 +319,10 @@ def snapshot(c):
         st["waiting"] = [{"title": i["title"], "url": i["url"], "column": i["column"]} for i in waiting]
         st["blockedCount"] = len(blocked)
         st["updatedAt"] = now_iso()
+        if problems:  # None = no scan this cycle: leave an earlier error in place
+            st["intakeError"] = "; ".join(problems)[:500]
+        elif problems is not None:
+            st.pop("intakeError", None)
     update_state(upd)
 
     def prune(d):
@@ -340,7 +351,7 @@ def snapshot(c):
         d["epicAsked"] = {k: v for k, v in d.get("epicAsked", {}).items() if k in live_ids}
         d["policyPlans"] = [i for i in d.get("policyPlans", []) if i in live_ids and by_id[i]["column"] not in ("todo", "plan", "plan_review")]
         for k in ("reviewed", "cleanRebase", "asked", "ratings", "policy"):
-            d[k] = {i: v for i, v in d.get(k, {}).items() if i in live_ids}
+            d[k] = {i: v for i, v in d.get(k, {}).items() if i in live_ids or (k == "ratings" and i in created)}
         d["tainted"] = [i for i in d.get("tainted", []) if i in live_ids]
     update_data(prune)
     return snap

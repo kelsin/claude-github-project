@@ -21,6 +21,7 @@ The plugin has three parts: skills (prompts), the `scripts/cgp` CLI that does ev
 | `doctor` | `doctor` and `gc` |
 | `intake` | `add` and `import` (stories onto the board) |
 | `deferred` | `defer`: files the merged PR's `## Deferred` section as Todo stories on hold |
+| `auto_intake` | the opt-in failing-main and dependency-PR intake run by `sched.snapshot` |
 | `notify` | the `notifyCommand` hook |
 | `repoconf` | a repo's `.cgp.json` (read from its default branch) |
 | `models` | the model per sub-agent role |

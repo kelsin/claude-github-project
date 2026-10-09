@@ -9,6 +9,7 @@ Show all with `scripts/cgp config`; set one with `scripts/cgp config <key> <valu
 | `remoteControl` | 1 | `/cgp:run` turns on Remote Control for its session when it runs in the Claude desktop app, so you can follow and steer the loop from claude.ai or the phone; 0 skips that |
 | `maxWorkerMinutes` | 240 | a worker running longer is reported as `stalled` by `cgp list` and released by the loop (0 = never) |
 | `nativeDependencies` | 1 | `on` / `off`: GitHub's own "blocked by" issue dependencies also hold a story back (see [architecture](architecture.md)); `off` leaves only cgp's blocks |
+| `intakeSeconds` | 300 | at most one failing-main / dependency-PR scan per repo this often (see `intake` below; 0 scans on every snapshot). Only repos that opted in are scanned |
 | `autoApprove` | `plan:never,pr:never` | the policy that lets agents pass a human gate for a low-risk story: `plan:low,pr:never` style, the highest rating the agent may give a story for that gate (`never`, `low`, `medium`, `high`; a gate not named stays `never`). Off by default. **Only you can change it**, in a terminal: `cgp config` refuses it inside a Claude session or without a terminal, notifies you when it changes, and `cgp status` and `cgp doctor` show it. See [safety](safety.md) for everything the policy also checks |
 | `autoApproveFiles` | `docs/**/*.md`, `*.md` | comma-separated globs every file of an auto-approved story must match. `*` and `?` stay inside one path segment (`*.md` is root-level files only), `**` is any number of segments, case is ignored. Tests are not in the default because CI runs them: add them only if you accept that. Same human-only rule as `autoApprove`; no `..` or absolute paths. A built-in list is always refused whatever you set (`CLAUDE.md`, `AGENTS.md`, `SKILL.md`, `skills/`, column prompts, docs build config), and so is every guarded file |
 | `sharedFiles` | lockfiles, `*.schema.json`, locales, snapshots, `*.md` | comma-separated fnmatch globs for files many stories edit; overlaps on them are reported under `shared` instead of blocking; empty disables |
@@ -29,7 +30,8 @@ A repo can carry a `.cgp.json` at the root of its default branch (never read fro
   "sharedFiles": ["src/registry.py"],
   "guardFiles": ["deploy/*"],
   "reviewers": ["security", "accessibility"],
-  "preview": { "provider": "vercel" }
+  "preview": { "provider": "vercel" },
+  "intake": { "redMain": true, "dependencies": true, "bots": ["dependabot[bot]"], "maxOpen": 10 }
 }
 ```
 
@@ -37,6 +39,8 @@ A repo can carry a `.cgp.json` at the root of its default branch (never read fro
 - `sharedFiles`, `guardFiles`: added to the board's lists; a repo can add to a guard, never remove from it.
 - `reviewers`: extra review lenses for the sub-agent reviewers.
 - `preview`: `{"provider": ...}`, or `{"bot": "<login>", "pattern": "<regex, {pr} = PR number>"}` for a provider cgp does not know.
+
+- `intake`: opt-in automatic intake, off by default. `redMain` files one High-priority Todo story ("Fix failing main: <workflow>") when the latest completed `push` / `schedule` run of an active workflow on the default branch failed or timed out (cancelled, skipped, neutral, action-required and running runs are ignored). While an intake story for that workflow is open nothing more is filed for it; once the story is Done, a later red run files a new one (a green run clears nothing). Only the latest 100 default-branch runs are read, so a rarely-run workflow can be missed. `dependencies` imports open, non-draft, same-repo PRs of the allowed `bots` (default `dependabot[bot]`, `renovate[bot]`; the author must also be of type Bot, and `github-actions[bot]` is refused) into **PR Review** with `Plan: Skip`, the PR linked and `Waiting On: You`; you review and merge the bot PR yourself, no worker touches it, and the story is closed (and filed under Done) once the PR is merged or closed. `maxOpen` (1 to 20, default 10) caps open intake stories per repo, and at most 3 are filed per scan. A PR that changes only real lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `*.lock`, `go.sum`) is rated `low` and any other PR (manifests included) `medium`; the rating is redone at a scan when the PR's head changed, and it stops counting when the story leaves PR Review. Stories filed or finished by a scan are visible to the loop from the next cycle, and one whose setup was cut short is finished at the next snapshot (at most once a minute). The repo needs a local clone (`cgp repo-path`). The file is re-read at each scan, so a change on the default branch takes effect within `intakeSeconds`. Enabling it on a repo whose main is already red files one story. A scan error shows as `intakeError` in the session state and never stops the loop.
 
 Unknown keys and values of the wrong type are ignored.
 

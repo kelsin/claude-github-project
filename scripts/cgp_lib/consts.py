@@ -15,7 +15,7 @@ STRIKES = 3  # failed or fruitless runs of one story in one column before the us
 STORY_STATE = {"answered": "list", "daemonStrikes": "pipe"}
 STORY_KEPT = ("asked", "cursors", "pending", "blocks", "epicOrder", "touches", "approvedTouches", "splits", "approvedSplits", "children",
               "parents", "epicAsked", "policyPlans", "policy", "ratings", "reviewed", "cleanRebase", "notified", "deferred", "reasons",
-              "tainted")  # tainted: a review safety gate (a conflicting rebase), not for unstick to lift
+              "tainted", "intake")  # tainted: a review safety gate (a conflicting rebase), not for unstick to lift
 MARK = "<!-- cgp -->"
 QMARK = "<!-- cgp:question -->"
 # key, name, emoji, color. plan_review and pr_review are the user's columns (the gates in cmd_move and cmd_merge are built on them).
@@ -63,6 +63,7 @@ STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a b
 # notifyCommand: a command run when a story starts waiting on you, enters a review column, is Done or stalls (see notify.py)
 # maxWorkerMinutes: a worker running longer is reported as stalled by `cgp list` (0 = never), so the loop can release its story
 # nativeDependencies 1: GitHub's own "blocked by" issue dependencies also hold a story back (0 = cgp's own blocks only)
+# intakeSeconds: at most one failing-main / dependency-PR scan per repo this often (a repo opts in with "intake" in its .cgp.json)
 # autoApprove: plan:low,pr:never style, the highest risk rating at which the agent may pass that human gate itself (default never); only a person
 # at a terminal may change it. autoApproveFiles: segment globs (`*` stays in one path segment, `**` spans segments) every changed file must match
 # guardFiles: fnmatch globs (tried on the path and on its file name, ignoring case) for files an agent may only change when the approved plan lists them;
@@ -71,12 +72,16 @@ OLD_POLL_SECONDS = 30  # the default before this change: setup stored it in ever
 POLL_SECONDS = 15
 DEFAULTS = {"concurrency": 0, "pollSeconds": POLL_SECONDS, "remoteControl": 1, "notifyCommand": "", "previewProvider": "netlify", "draftPRs": 0,
             "plannerModel": "", "reviewerModel": "", "implementerModel": "", "maxWorkerMinutes": 240, "nativeDependencies": 1,
-            "autoApprove": "plan:never,pr:never", "autoApproveFiles": ["docs/**/*.md", "*.md"],
+            "intakeSeconds": 300, "autoApprove": "plan:never,pr:never", "autoApproveFiles": ["docs/**/*.md", "*.md"],
             "guardFiles": [".github/*", "CODEOWNERS", "*/CODEOWNERS", ".husky/*", ".pre-commit-config.yaml", ".npmrc", ".yarnrc*",
                            "Makefile", "GNUmakefile", "Dockerfile*", ".gitmodules", ".claude/*", ".mcp.json", ".cgp.json", ".envrc",
                            ".gitlab-ci.yml", "Jenkinsfile", "lefthook.yml", ".githooks/*"],
             "sharedFiles": ["*package-lock.json", "*yarn.lock", "*pnpm-lock.yaml", "*.schema.json", "*locales/*",
                             "*__snapshots__/*", "*.md"]}
+INTAKE_BOTS = ("dependabot[bot]", "renovate[bot]")  # default allowlist of dependency-PR authors (a repo's .cgp.json can name its own)
+INTAKE_MAX_OPEN = 10  # default and cap (20) of open intake stories per repo
+INTAKE_PER_CYCLE = 3  # new intake stories per repo per scan
+INTAKE_KEEP_SECONDS = 90 * 86400  # incident keys older than this are forgotten
 BOOL_SETTINGS = ("nativeDependencies",)  # on / off on the command line, stored as 1 / 0
 LIST_SETTINGS = ("sharedFiles", "guardFiles", "autoApproveFiles")
 STRING_SETTINGS = ("notifyCommand", "previewProvider", "plannerModel", "reviewerModel", "implementerModel")

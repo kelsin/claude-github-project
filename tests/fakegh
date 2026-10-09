@@ -208,6 +208,24 @@ elif args[:2] == ["api", "graphql"]:
     save()
     print(json.dumps({"data": r, **({"errors": errors} if errors else {})}))
     sys.exit(1 if errors else 0)  # like gh: any GraphQL error, even next to usable data, is exit 1
+elif args[0] == "api" and re.fullmatch(r"repos/[^/]+/[^/]+(/actions/(runs|workflows)|/pulls|/pulls/\d+)?(\?.*)?", next((a for a in args if a.startswith("repos/")), "")):
+    # intake: db["default_branch"]; db["workflow_runs"][repo] and db["workflows"][repo] (the actions API, served as one page);
+    # db["pulls"][repo] (open pull requests) and db["pull_states"]["acme/app#5"] (a pull request's state, "open" when unset)
+    path = next(a for a in args if a.startswith("repos/"))
+    m = re.match(r"repos/([^/]+/[^/]+?)(/actions/runs|/actions/workflows|/pulls/(\d+)|/pulls)?(\?.*)?$", path)
+    repo, kind, num = m.group(1), m.group(2), m.group(3)
+    if kind == "/actions/runs":
+        db["runs_calls"] = db.get("runs_calls", 0) + 1
+        save()
+        print(json.dumps({"workflow_runs": db.get("workflow_runs", {}).get(repo, [])}))
+    elif kind == "/actions/workflows":
+        print(json.dumps({"workflows": db.get("workflows", {}).get(repo, [])}))
+    elif kind == "/pulls":
+        print(json.dumps(db.get("pulls", {}).get(repo, [])))
+    elif kind:
+        print(json.dumps({"number": int(num), "state": db.get("pull_states", {}).get(f"{repo}#{num}", "open")}))
+    else:
+        print(json.dumps({"default_branch": db.get("default_branch", "main")}))
 elif args[0] == "api" and any(re.match(r"repos/[^/]+/[^/]+/pulls/\d+/files", a) for a in args):
     m = re.match(r"repos/([^/]+/[^/]+)/pulls/(\d+)/files", next(a for a in args if a.startswith("repos/")))
     # db["pr_files"]["acme/app#1"]: names, or {"filename", "status", "previous_filename"}; served 100 to a page like `gh api --paginate`
@@ -241,8 +259,10 @@ elif args[0] == "api" and re.match(r"repos/[^/]+/[^/]+/issues(\?|$)", next((a fo
         print(json.dumps(issue))
     else:
         want = re.search(r"labels=([^&]+)", path)
+        creator = re.search(r"creator=([^&]+)", path)
         print(json.dumps([{"user": {"login": "kelsin"}, "author_association": "OWNER", **i}
-                          for i in lst if not want or want.group(1) in [l["name"] for l in i["labels"]]]))
+                          for i in lst if (not want or want.group(1) in [l["name"] for l in i["labels"]])
+                          and (not creator or creator.group(1) == (i.get("user") or {"login": "kelsin"})["login"])]))
 elif args[0] == "api" and any(re.fullmatch(r"repos/[^/]+/[^/]+/issues/\d+/dependencies/blocked_by", a) for a in args):
     path = next(a for a in args if a.startswith("repos/"))
     m = re.match(r"repos/([^/]+/[^/]+)/issues/(\d+)/", path)
@@ -271,7 +291,8 @@ elif args[0] == "api":
             db.setdefault("issue_bodies", {})[key] = args[args.index("-f") + 1][len("body="):]
             save()
         who = db.get("issue_authors", {}).get(key, {"login": "kelsin", "author_association": "OWNER"})
-        print(json.dumps({"id": issue_id(key), "body": db.get("issue_bodies", {}).get(key, ""), "user": {"login": who["login"]},
+        print(json.dumps({"id": issue_id(key), "body": db.get("issue_bodies", {}).get(key) if key in db.get("issue_bodies", {}) else next(
+            (i["body"] for i in db.get("repo_issues", {}).get(mi.group(1), []) if i["number"] == int(mi.group(2))), ""), "user": {"login": who["login"]},
                           "author_association": who["author_association"]}))
         sys.exit(0)
     m = re.match(r"repos/([^/]+/[^/]+)/issues/(\d+)/comments", path)
