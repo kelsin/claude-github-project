@@ -24,7 +24,8 @@ The plugin has three parts: skills (prompts), the `scripts/cgp` CLI that does ev
 | `auto_intake` | the opt-in failing-main and dependency-PR intake run by `sched.snapshot` |
 | `notify` | the `notifyCommand` hook |
 | `review` | `review`: the digest of stories waiting on you (JSON or one HTML page) |
-| `repoconf` | a repo's `.cgp.json` (read from its default branch) |
+| `repoconf` | a repo's `.cgp.json` and `.cgp-rules.md` (read from its default branch) |
+| `rules` | `rules propose`: house rules proposed from review comments on merged cgp PRs (the repo's `.cgp-rules.md` itself is read by `repoconf`) |
 | `models` | the model per sub-agent role |
 | `gitutil` | plain git helpers |
 | `cli` | the command table (`COMMANDS`) and argument parsing |

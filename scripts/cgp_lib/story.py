@@ -10,7 +10,7 @@ from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
 from .store import cfg, load_data, update_data, update_state
 from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, set_single, set_text
 from .session import clear_phase, reset_strikes, set_phase, worker_pr
-from .repoconf import repo_config, safe_pattern
+from .repoconf import repo_config, rules_text, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
 from .pr import cancel_auto_merge, changed_since_review, cmd_pr_state, pr_view, record_reviewed
 from .policy import GATE_KEYS, current_rating, evaluate, public, record_decision, require_human
@@ -454,6 +454,7 @@ def cmd_prepare(a):
         worker_pr(a.item, ref)
         res["prState"] = call(cmd_pr_state, repo=ref[0], pr=ref[1])
     res["repoConfig"] = repo_config(c, it["issueRepo"])  # test / lint commands, reviewers, ... from the repo's .cgp.json
+    res["houseRules"] = rules_text(c, it["issueRepo"])  # the default branch's .cgp-rules.md, or null
     res["settings"] = {"draftPRs": bool(c["settings"].get("draftPRs"))}
     res["worktree"] = call(cmd_worktree, item=a.item)
     if "error" not in res["worktree"]:

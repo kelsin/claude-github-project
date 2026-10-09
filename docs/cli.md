@@ -52,3 +52,4 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `unstick` | `item` `--dry-run` `--kill` | Clear one story's operational state (worker, strikes, answered, Waiting On); you only, not agents |
 | `doctor` | `--board` `--deep` | Check the installation: gh, token scopes, board, clones, stale files |
 | `gc` | `--days` `--dry-run` | Delete state of dead sessions and worktrees of finished stories |
+| `rules` | `action` `--repo` `--limit` `--min` `--out` `--if-due` | House rules: propose rules from the review comments on merged cgp PRs (writes a file under the cgp home, never into the repo) |

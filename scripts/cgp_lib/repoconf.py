@@ -2,6 +2,7 @@
 otherwise loosen its own guard). Unknown keys and wrong types are ignored."""
 import json
 import re
+import unicodedata
 from .consts import DEFAULTS
 from .util import die, out
 from .store import cfg
@@ -9,10 +10,13 @@ from .board import get_item, require_repo
 from .gitutil import default_ref, git
 
 FILE = ".cgp.json"
+RULES_FILE = ".cgp-rules.md"  # house rules: free text for worker prompts, read from the default branch only
+RULES_CAP = 8192  # characters
 STR, LIST, MAP, INTAKE = "string", "list", "map", "intake"
 KNOWN = {"test": STR, "lint": STR, "sharedFiles": LIST, "guardFiles": LIST, "reviewers": LIST, "preview": MAP, "intake": INTAKE}
 NEVER_BOT = "github-actions[bot]"  # its PRs and its token are the workflows' own: never a dependency source
 _cache = {}
+_rules_cache = {}  # its own dict: repo_config's _cache is keyed by the bare repo
 
 
 def clean_intake(v):
@@ -63,6 +67,29 @@ def repo_config(c, repo, fresh=False):
     return cfg_
 
 
+def clean_rules(text):
+    """The rules text as workers see it: BOM, CR and control or format (bidi) characters removed, cut to RULES_CAP characters."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = "".join(ch for ch in text if ch in "\n\t" or unicodedata.category(ch) not in ("Cc", "Cf"))
+    text = re.sub(r"(?i)</?\s*house-rules", "[house-rules]", text)
+    return text.strip()[:RULES_CAP]
+
+
+def rules_text(c, repo, fresh=False):
+    """The cleaned .cgp-rules.md of a linked repo's default branch; None when there is none or no clone. Cached like repo_config."""
+    if repo in _rules_cache and not fresh:
+        return _rules_cache[repo]
+    rules = None
+    path = c["repos"].get(repo)
+    if path:
+        try:
+            rules = clean_rules(git(path, "show", f"{default_ref(path)}:{RULES_FILE}", check=False)) or None
+        except SystemExit:
+            rules = None
+    _rules_cache[repo] = rules
+    return rules
+
+
 def merged_globs(c, key, repos=()):
     """The board setting `key` plus the same key from each repo's .cgp.json (a repo can only add to a guard, never remove).
     The built-in guardFiles are always included: a worker that empties the setting must not switch the guard off."""
@@ -78,7 +105,7 @@ def cmd_repo_config(a):
     repo = require_repo(c, a.target) if "/" in a.target else get_item(c, a.target)["issueRepo"]
     if not repo:
         die("that story has no repo yet")
-    out({"repo": repo, "file": FILE, "config": repo_config(c, repo)})
+    out({"repo": repo, "file": FILE, "config": repo_config(c, repo), "rules": rules_text(c, repo)})
 
 
 def safe_pattern(pattern, pr):

@@ -67,6 +67,7 @@ STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a b
 # intakeSeconds: at most one failing-main / dependency-PR scan per repo this often (a repo opts in with "intake" in its .cgp.json)
 # autoApprove: plan:low,pr:never style, the highest risk rating at which the agent may pass that human gate itself (default never); only a person
 # at a terminal may change it. autoApproveFiles: segment globs (`*` stays in one path segment, `**` spans segments) every changed file must match
+# rulesProposeDays: `cgp rules propose --if-due` runs this often per repo (0 = never; see rules.py)
 # guardFiles: fnmatch globs (tried on the path and on its file name, ignoring case) for files an agent may only change when the approved plan lists them;
 # these built-in ones always apply, the setting can only add to them
 OLD_POLL_SECONDS = 30  # the default before this change: setup stored it in every board config, so a stored 30 means "never changed"
@@ -76,9 +77,9 @@ DEFAULTS = {"concurrency": 0, "pollSeconds": POLL_SECONDS, "remoteControl": 1, "
             "intakeSeconds": 300, "autoApprove": "plan:never,pr:never", "autoApproveFiles": ["docs/**/*.md", "*.md"],
             "guardFiles": [".github/*", "CODEOWNERS", "*/CODEOWNERS", ".husky/*", ".pre-commit-config.yaml", ".npmrc", ".yarnrc*",
                            "Makefile", "GNUmakefile", "Dockerfile*", ".gitmodules", ".claude/*", ".mcp.json", ".cgp.json", ".envrc",
-                           ".gitlab-ci.yml", "Jenkinsfile", "lefthook.yml", ".githooks/*"],
+                           ".gitlab-ci.yml", "Jenkinsfile", "lefthook.yml", ".githooks/*", ".cgp-rules.md"],
             "sharedFiles": ["*package-lock.json", "*yarn.lock", "*pnpm-lock.yaml", "*.schema.json", "*locales/*",
-                            "*__snapshots__/*", "*.md"]}
+                            "*__snapshots__/*", "*.md"], "rulesProposeDays": 7}
 INTAKE_BOTS = ("dependabot[bot]", "renovate[bot]")  # default allowlist of dependency-PR authors (a repo's .cgp.json can name its own)
 INTAKE_MAX_OPEN = 10  # default and cap (20) of open intake stories per repo
 INTAKE_PER_CYCLE = 3  # new intake stories per repo per scan

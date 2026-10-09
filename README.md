@@ -33,6 +33,8 @@ Then restart Claude Code (or reload plugins). Your `gh` token needs the `project
 | 🚀 PR Approved | agents merge |
 | 🎉 Done | |
 
+A repo's `.cgp-rules.md` holds house rules for the agents; `cgp rules propose` drafts them from your review comments for you to commit.
+
 Agents ask questions as comments on the story and wait for your reply. Per-story fields (`Priority`, `Plan: Skip`, `Auto Approve`) adjust the flow. See [Workflow](docs/workflow.md).
 
 ## Docs

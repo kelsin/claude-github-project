@@ -10,6 +10,7 @@ from .doctor import cmd_doctor, cmd_gc
 from .models import RATINGS, cmd_models
 from .policy import cmd_rate
 from .review import cmd_review
+from .rules import cmd_rules
 from .repoconf import cmd_repo_config
 from .intake import cmd_add, cmd_import
 from .gitwt import cmd_guard, cmd_sync, cmd_worktree, cmd_worktree_remove
@@ -98,6 +99,10 @@ COMMANDS = [
         A("--deep", action="store_true", help="also read the board: worker rows of stories that are gone")]),
     ("gc", cmd_gc, "Delete state of dead sessions and worktrees of finished stories", [
         A("--days", type=int, default=7, help="age of session files to delete"), A("--dry-run", action="store_true")]),
+    ("rules", cmd_rules, "House rules: propose rules from the review comments on merged cgp PRs (writes a file under the cgp home, never into the repo)", [
+        A("action", choices=["propose"]), A("--repo"), A("--limit", type=int, default=50, help="merged cgp PRs to read, among the last 100 closed PRs"),
+        A("--min", type=int, default=3, help="comments a point needs, across at least 2 PRs"), A("--out", help="write the proposal here instead"),
+        A("--if-due", action="store_true", help="only when rulesProposeDays have passed since the last run")]),
 ]
 
 
