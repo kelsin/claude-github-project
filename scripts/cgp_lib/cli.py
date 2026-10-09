@@ -83,9 +83,9 @@ COMMANDS = [
         A("repo"), A("pr", type=int), A("--timeout", type=int, default=540), A("--interval", type=int, default=20),
         A("--sha", help="refuse (verdict stale) unless the PR head is this commit")]),
     ("pr-state", cmd_pr_state, "State of a PR on a linked repo", [A("repo"), A("pr", type=int)]),
-    ("merge", cmd_merge, "Squash-merge (auto-merge) the story's PR; only from PR Approved", [
+    ("merge", cmd_merge, "Squash-merge (auto-merge) the story's PR; only from PR Approved, and only when it is first in the merge train (otherwise requested:false with train info; in a merge queue repo it enqueues, queue:true)", [
         A("item"), A("--cancel", action="store_true", help="disable auto-merge on the story's PR instead of merging")]),
-    ("merge-wait", cmd_merge_wait, "Wait for the story's PR to merge, keeping it up to date", [
+    ("merge-wait", cmd_merge_wait, "Wait for the story's PR to merge, keeping it up to date; behind the merge train it only waits (pending with ahead), in a merge queue repo it only watches (dequeued when the queue drops it)", [
         A("item"), A("--timeout", type=int, default=540), A("--interval", type=int, default=20)]),
     ("add", cmd_add, "Create an issue and put it on the board in Todo (body on stdin with --body -)", [
         A("title"), A("--repo"), A("--body"), A("--priority", help="High, Medium, Low or Hold")]),
