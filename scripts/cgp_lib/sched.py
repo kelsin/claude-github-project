@@ -22,6 +22,7 @@ from .stack import blocker_ref, pr_files, stackable
 from .pr import pr_view
 from .train import train_held
 from .rules import pending, rules_due
+from .spec import candidates as spec_candidates, prune as spec_prune, sweep as spec_sweep
 
 
 def sync_story_field(c, live, held_back=frozenset(), in_flight=frozenset()):
@@ -266,7 +267,8 @@ def snapshot(c):
                 seen[i["item"]] = {"at": now, "reason": reason}
         if seen != kept:
             update_state(lambda st: st.__setitem__("worktreeKept", seen))
-    in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these
+    spec_sweep(c, items)  # drafts of stories that went on or changed are stopped and reset (see spec.py)
+    in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these ("<item>:spec" rows are drafts: they use a slot but own no story)
     file_closed()
     close_finished(c, items)  # a story split into sub-stories is closed once they are all done (see epics.py)
     created = set()  # items intake added to the board just now: not in `items`, but their data must survive the prune below
@@ -341,6 +343,7 @@ def snapshot(c):
     waiting = [i for i in live if i["waiting"]]
     if stop:
         batch = []  # a stop request dispatches nothing new
+    speculative = [] if stop else spec_candidates(c, live, batch, in_flight, free)  # drafts use only the slots real work left
     # why a story is not starting: it overlaps a rival, or it waits for a free worker slot (a stop makes the batch empty on purpose,
     # so it queues nothing)
     queued = [i for i in actionable if i not in batch] if cap > 0 and not stop else []  # (stop: see held_back below)
@@ -351,7 +354,7 @@ def snapshot(c):
     held_back = set() if stop else {i["item"] for i in deferred if starting(i)} | {i["item"] for i in queued} | set(trailing)
     sync_story_field(c, live, held_back, in_flight)
     fresh = created - live_ids  # stories intake just filed: live work this cycle
-    status = "done" if not live and not fresh else "work" if batch else "idle"  # idle also when the cap is full
+    status = "done" if not live and not fresh else "work" if batch or speculative else "idle"  # idle also when the cap is full
     stalled = stalled_workers(c)
     check(c, items, stalled)
     snap = {
@@ -361,6 +364,7 @@ def snapshot(c):
         "counts": counts,
         "remaining": len(live) + len(fresh),
         "batch": batch,
+        "speculative": speculative,
         "inFlight": sorted(in_flight),
         "actionableTotal": len(actionable),
         "waitingOnYou": waiting,
@@ -418,6 +422,7 @@ def snapshot(c):
         d["resume"] = {k: v for k, v in d.get("resume", {}).items() if k.split("|")[0] in live_ids}
         d["stack"] = {k: v for k, v in d.get("stack", {}).items() if k in live_ids}  # live_ids: every story on the board, workers' too
         prune_flakes(d)
+        spec_prune(d, live_ids)
     update_data(prune)
     return snap
 

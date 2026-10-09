@@ -35,6 +35,7 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `worktree-remove` | `item` `--discard` | Remove the story's worktree and branch; refuses uncommitted or unpushed work |
 | `sync` | `item` | Rebase the story's worktree onto its remote branch and the latest default branch |
 | `stack` | `item` `--clear` | Show the stack a story is built on (stackedStories); --clear lifts it (you, in a terminal) |
+| `spec` | `action` `item` `--artifact-comments` | Speculative draft of a Plan Review story (setting speculative): start, finish, fail, status or resolve (--artifact-comments N) |
 | `touches` | `item` `paths` | Record (or read) the files and directories a story changes |
 | `overlap` | `item` | Find stories touching the same files |
 | `block` | `item` `other` `--unblock` | Make a story wait for another (or --unblock) |

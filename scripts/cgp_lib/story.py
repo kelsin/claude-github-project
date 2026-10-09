@@ -15,6 +15,7 @@ from .repoconf import repo_config, rules_text, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
 from .pr import cancel_auto_merge, changed_since_review, cmd_pr_state, default_branch, forget_review, pr_view, record_reviewed, stack_gate, stack_of
 from .stack import prepare_stack, stale as stack_stale
+from .spec import prepare_hook, refuse_while_drafting
 from .policy import GATE_KEYS, current_rating, evaluate, public, record_decision, require_human
 
 
@@ -250,6 +251,7 @@ def cmd_set(a):
         ref = parse_pr_ref(c, value)
         if not ref:
             die("PR must be https://github.com/<linked repo>/pull/<n> on a repo linked to this board")
+        refuse_while_drafting(a.item, "opening a PR")
         it = get_item(c, a.item)
         if it["column"] in ("pr_review", "pr_approved") and (it["pr"] or "").strip() != value:
             die(f"the story is in {it['column']}: the PR the user reviews cannot be replaced. Only the user can fix this: ask them "
@@ -501,6 +503,7 @@ def cmd_prepare(a):
     res["repoConfig"] = repo_config(c, it["issueRepo"])  # test / lint commands, reviewers, ... from the repo's .cgp.json
     res["houseRules"] = rules_text(c, it["issueRepo"])  # the default branch's .cgp-rules.md, or null
     res["settings"] = {"draftPRs": bool(c["settings"].get("draftPRs"))}
+    res.update(prepare_hook(c, it))  # an approved story's speculative draft is adopted or discarded before the worktree is synced (see spec.py)
     res["stack"], stack_wait = prepare_stack(c, it)  # the blocker's branch the worktree is cut from (stackedStories), else null
     res["worktree"] = {"error": stack_wait} if stack_wait else call(cmd_worktree, item=a.item)
     if "error" not in res["worktree"]:

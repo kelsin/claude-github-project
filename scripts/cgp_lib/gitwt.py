@@ -252,6 +252,8 @@ def cmd_sync(a):
     """
     c = cfg()
     it = issue_item(c, a.item)
+    from .spec import refuse_while_drafting  # spec imports this module
+    refuse_while_drafting(a.item, "syncing")
     wt = wt_path(it)
     if not os.path.isdir(wt):
         die("no worktree for this story; run: cgp worktree <item>")
