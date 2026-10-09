@@ -13,7 +13,7 @@ from .review import cmd_review
 from .repoconf import cmd_repo_config
 from .intake import cmd_add, cmd_import
 from .gitwt import cmd_guard, cmd_sync, cmd_worktree, cmd_worktree_remove
-from .pr import cmd_ci_wait, cmd_merge, cmd_merge_wait, cmd_pr_state
+from .pr import cmd_ci_triage, cmd_ci_wait, cmd_merge, cmd_merge_wait, cmd_pr_state
 from .sched import cmd_block, cmd_list, cmd_overlap, cmd_status, cmd_touches, cmd_wait
 from .unstick import cmd_unstick
 from .session import cmd_release, cmd_session_title, cmd_stop, cmd_use, cmd_worker
@@ -71,6 +71,9 @@ COMMANDS = [
     ("ci-wait", cmd_ci_wait, "Wait for a PR's checks: green, red (with logs), none or pending", [
         A("repo"), A("pr", type=int), A("--timeout", type=int, default=540), A("--interval", type=int, default=20),
         A("--grace", type=int, default=120), A("--sha", help="first wait until the PR head is this commit (the one just pushed)")]),
+    ("ci-triage", cmd_ci_triage, "After ci-wait says red: flaky (green after one rerun; files it once as a story on hold), main-broken or real", [
+        A("repo"), A("pr", type=int), A("--timeout", type=int, default=540), A("--interval", type=int, default=20),
+        A("--sha", help="refuse (verdict stale) unless the PR head is this commit")]),
     ("pr-state", cmd_pr_state, "State of a PR on a linked repo", [A("repo"), A("pr", type=int)]),
     ("merge", cmd_merge, "Squash-merge (auto-merge) the story's PR; only from PR Approved", [
         A("item"), A("--cancel", action="store_true", help="disable auto-merge on the story's PR instead of merging")]),

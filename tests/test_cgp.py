@@ -1645,6 +1645,314 @@ class TestCiWait(PRBase):
         self.assertGreaterEqual(self.read_db()["checks_calls"], 5)  # waited a full grace after gh recovered
 
 
+class TestCiTriage(PRBase):
+    RUN = "https://github.com/acme/app/actions/runs/%s/job/1"
+
+    def chk(self, name="t", bucket="fail", run="77"):
+        return {"name": name, "bucket": bucket, "link": self.RUN % run if run else "", "workflow": "CI"}
+
+    def tri(self, *extra, ok=True):
+        return self.cgp("ci-triage", "acme/app", "1", "--interval", "0", "--timeout", "30", *extra, ok=ok)
+
+    def reruns(self):
+        return [c[2] for c in self.read_db().get("rerun_calls", [])]
+
+    def head(self, sha):
+        """A new PR head; the per-PR cap of 2 reruns is not what the caller is about, so those are forgotten."""
+        self.prs(self.view(headRefOid=sha))
+        self.save_data(reruns={})
+
+    def flakes(self):
+        return self.data().get("flakes", {}).get("acme/app", {})
+
+    def stories(self):
+        return [i for i in self.read_db().get("repo_issues", {}).get("acme/app", []) if i["title"].startswith("Flaky:")]
+
+    def flaky_run(self, *jobs, log=None):
+        """Red, rerun, green: the checks answer once with the failures, then pending, then green."""
+        red = [self.chk(*j) if isinstance(j, tuple) else self.chk(j) for j in jobs]
+        green = [dict(c, bucket="pass") for c in red]
+        pend = [dict(c, bucket="pending") for c in red]
+        extra = {} if log is None else {"run_log": log}
+        self.db_set(checks_seq=[red, pend, green], **extra)
+        return self.tri()
+
+    def test_flaky_reruns_once_and_a_repeat_on_the_same_sha_does_not_rerun(self):
+        r = self.flaky_run("unit")
+        self.assertEqual(r["verdict"], "flaky")
+        self.assertEqual(r["jobs"][0]["rerun"], "pass")
+        self.assertEqual(self.reruns(), ["77"])
+        self.assertIn("--failed", self.read_db()["rerun_calls"][0])
+        self.db_set(checks_seq=[[self.chk("unit", "pass")]])
+        self.assertEqual(self.tri()["verdict"], "flaky")
+        self.assertEqual(self.reruns(), ["77"])
+        self.assertEqual(self.flakes()[r["flakes"][0]["key"]]["count"], 1)  # not counted twice
+
+    def test_real_when_still_red_after_the_rerun_and_names_tests(self):
+        log = "x\tFAILED tests/test_a.py::test_one - boom\nFAIL: test_two (pkg.mod.Case)\n--- FAIL: TestGo (0.00s)"
+        self.db_set(checks_seq=[[self.chk()], [self.chk("t", "pending")], [self.chk()]], run_log=log)
+        r = self.tri()
+        self.assertEqual(r["verdict"], "real")
+        self.assertEqual(r["jobs"][0]["tests"], ["tests/test_a.py::test_one", "test_two (pkg.mod.Case)", "TestGo"])
+        self.assertEqual(r["jobs"][0]["rerun"], "fail")
+        self.assertEqual(self.reruns(), ["77"])
+        self.assertEqual(self.flakes(), {})  # only flaky verdicts record anything
+        self.assertEqual(self.tri()["verdict"], "real")  # recorded: no second rerun
+        self.assertEqual(self.reruns(), ["77"])
+
+    def test_main_broken_reruns_nothing(self):
+        self.db_set(checks=[self.chk("unit")], main_checks=[{"name": "unit", "conclusion": "failure"}])
+        r = self.tri()
+        self.assertEqual(r["verdict"], "main-broken")
+        self.assertEqual(self.reruns(), [])
+        self.assertEqual(self.stories(), [])
+
+    def test_cancelled_on_main_is_not_broken(self):
+        self.db_set(checks_seq=[[self.chk("unit")], [self.chk("unit", "pending")], [self.chk("unit", "pass")]],
+                    main_checks=[{"name": "unit", "conclusion": "cancelled"}])
+        self.assertEqual(self.tri()["verdict"], "flaky")
+
+    def test_mixed_reruns_only_the_job_main_does_not_fail(self):
+        a, b = self.chk("lint", run="70"), self.chk("unit", run="71")
+        self.db_set(checks_seq=[[a, b], [a, dict(b, bucket="pending")], [a, dict(b, bucket="pass")]],
+                    main_checks=[{"name": "lint", "conclusion": "timed_out"}])
+        r = self.tri()
+        self.assertEqual(r["verdict"], "flaky")
+        self.assertEqual(self.reruns(), ["71"])
+        self.assertEqual([j["mainRed"] for j in r["jobs"]], [True, False])
+        self.assertEqual([f["job"] for f in r["flakes"]], ["unit"])  # the main-red job is not a flake
+
+    def test_none_unknown_and_stale(self):
+        self.db_set(checks=[self.chk("t", "pass")])
+        self.assertEqual(self.tri()["verdict"], "none")
+        self.assertEqual(self.tri("--sha", "bbb222")["verdict"], "stale")
+        self.assertEqual(self.reruns(), [])
+        self.db_set(checks_seq=[{"rc": 1, "stderr": "boom"}])
+        self.assertEqual(self.cgp("ci-triage", "acme/app", "1", "--interval", "0", "--timeout", "0")["verdict"], "unknown")
+        self.db_set(prs={"other/pr#9": self.view()})  # the PR cannot be read at all
+        self.assertEqual(self.cgp("ci-triage", "acme/app", "1", "--timeout", "0")["verdict"], "unknown")
+
+    def test_pending_checks_are_waited_for_not_rerun(self):
+        self.db_set(checks=[self.chk(), self.chk("slow", "pending", "78")])
+        r = self.cgp("ci-triage", "acme/app", "1", "--interval", "0", "--timeout", "0")
+        self.assertEqual(r["verdict"], "pending")
+        self.assertEqual(self.reruns(), [])
+
+    def test_a_new_head_gets_a_fresh_allowance_but_a_pr_gets_two(self):
+        for sha in ("s1", "s2", "s3"):
+            self.prs(self.view(headRefOid=sha))
+            self.db_set(checks_seq=[[self.chk()], [self.chk("t", "pending")], [self.chk()]])
+            r = self.tri()
+            self.assertEqual(r["verdict"], "real")
+        self.assertEqual(self.reruns(), ["77", "77"])  # the third head: cap of 2 per PR
+        self.assertIn("2 reruns", r["note"])
+
+    def test_a_failed_rerun_is_surfaced_and_not_recorded(self):
+        self.db_set(checks=[self.chk()], rerun_rc=1, rerun_stderr="gh: HTTP 500")
+        r = self.tri()
+        self.assertEqual(r["verdict"], "unknown")
+        self.assertEqual(len(self.reruns()), 1)  # attempted once, never retried
+        self.assertEqual(self.data().get("reruns", {}).get("acme/app#1", {}), {})
+        self.db_set(rerun_stderr="HTTP 409 run in progress")
+        self.assertEqual(self.tri()["verdict"], "pending")
+
+    def test_a_check_without_a_run_cannot_be_rerun(self):
+        self.db_set(checks=[self.chk("external", run=None)])
+        r = self.tri()
+        self.assertEqual(r["verdict"], "real")
+        self.assertEqual(self.reruns(), [])
+
+    def test_extract_tests_formats_and_caps(self):
+        sys.path.insert(0, os.path.join(ROOT, "scripts"))
+        try:
+            from cgp_lib.pr import extract_tests
+        finally:
+            sys.path.remove(os.path.join(ROOT, "scripts"))
+        log = "FAILED a/b.py::t[1] - x\nFAIL: test_x (m.C)\n  ● Suite › case\n--- FAIL: TestG (1s)\ntest m::t ... FAILED\nFAILED a/b.py::t[1] - x"
+        self.assertEqual(extract_tests(log), ["a/b.py::t[1]", "test_x (m.C)", "Suite › case", "TestG", "m::t"])
+        many = "\n".join(f"FAILED f.py::t{n}" for n in range(30))
+        self.assertEqual(len(extract_tests(many)), 20)
+        self.assertEqual(len(extract_tests("FAILED f.py::" + "x" * 500)[0]), 200)
+        self.assertEqual(extract_tests("FAILED f.py::a\x1b[31mb\x07"), ["f.py::ab"])
+
+    def test_failed_logs_reads_every_failed_run_without_a_limit(self):
+        sys.path.insert(0, os.path.join(ROOT, "scripts"))
+        try:
+            from cgp_lib.pr import failed_logs
+        finally:
+            sys.path.remove(os.path.join(ROOT, "scripts"))
+        failed = [self.chk(f"j{n}", run=str(n)) for n in range(5)]
+        with mock.patch("cgp_lib.pr.gh") as g:
+            g.return_value.stdout = "log"
+            failed_logs("acme/app", failed)
+            self.assertEqual(g.call_count, 3)
+            failed_logs("acme/app", failed, limit=None)
+            self.assertEqual(g.call_count, 8)
+
+    # flaky capture
+
+    def test_a_story_per_job_on_hold_with_tests_and_no_pr_reference(self):
+        r = self.flaky_run("unit", "lint", log="FAILED t.py::test_a[1]\nFAILED t.py::test_b")
+        self.assertEqual(len(r["filed"]), 2)
+        s = self.stories()
+        self.assertEqual(sorted(i["title"] for i in s), ["Flaky: lint", "Flaky: unit"])
+        self.assertEqual(s[0]["labels"], [{"name": "cgp-flaky"}])
+        self.assertIn("`t.py::test_a`", s[0]["body"])
+        for word in ("#1", "Closes", "Claude", "log line"):
+            self.assertNotIn(word, s[0]["body"])
+        self.assertIn("cgp-flake:" + r["flakes"][0]["key"], s[0]["body"])
+        items = {i["content"]["number"]: i for i in self.read_db()["items"] if i["content"].get("number", 0) > 100}
+        self.assertEqual(len(items), 2)
+        for i in items.values():
+            self.assertEqual(i["values"]["Priority"], {"optionId": "o_Hold"})
+
+    def test_matrix_legs_and_parametrized_tests_share_a_story(self):
+        self.flaky_run(("unit (3.11)", "fail", "77"))
+        self.head("bbb222")
+        self.flaky_run(("unit (3.12)", "fail", "78"))
+        self.assertEqual(len(self.stories()), 1)
+        (e,) = self.flakes().values()
+        self.assertEqual(e["count"], 2)
+
+    def test_repeats_count_and_comment_at_2_5_10_only(self):
+        for n in range(1, 11):
+            self.head(f"sha{n}")
+            self.flaky_run("unit")
+        self.assertEqual(len(self.stories()), 1)
+        (e,) = self.flakes().values()
+        self.assertEqual((e["count"], e["lastSha"]), (10, "sha10"))
+        comments = [c for cs in self.read_db()["comments"].values() for c in cs]
+        self.assertEqual(len(comments), 3)  # at 2, 5 and 10
+        self.assertIn("2 observations", comments[0]["body"])
+
+    def test_a_closed_story_gets_no_comment_and_no_refile(self):
+        self.flaky_run("unit")
+        number = self.stories()[0]["number"]
+        self.db_set(issue_states={f"acme/app#{number}": "closed"})
+        self.head("bbb222")
+        self.flaky_run("unit")
+        self.assertEqual(len(self.stories()), 1)
+        self.assertEqual(self.read_db().get("comments", {}), {})
+        self.assertEqual(list(self.flakes().values())[0]["count"], 2)
+
+    def test_a_fresh_claim_is_left_alone_and_a_stale_one_is_retaken(self):
+        key = self.flaky_run("unit")["flakes"][0]["key"]
+        d = self.data(); e = d["flakes"]["acme/app"][key]
+        e.update(issue="pending", claimedAt=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), lastSha="old")
+        self.save_data(flakes=d["flakes"])
+        d = self.read_db(); d["repo_issues"]["acme/app"] = []; self.write_db(d)
+        self.head("s2")
+        r = self.flaky_run("unit")
+        self.assertEqual(r["filed"], [])
+        self.assertEqual(self.stories(), [])
+        e.update(claimedAt="2020-01-01T00:00:00Z", lastSha="old")
+        self.save_data(flakes={"acme/app": {key: e}})
+        self.head("s3")
+        r = self.flaky_run("unit")
+        self.assertEqual(len(r["filed"]), 1)
+
+    def test_an_own_marked_issue_missing_from_state_is_adopted_and_a_foreign_one_ignored(self):
+        self.flaky_run("unit")
+        self.save_data(flakes={})
+        d = self.read_db()
+        d["items"] = [i for i in d["items"] if i["content"].get("number", 0) < 100]
+        self.write_db(d)
+        self.head("bbb222")
+        r = self.flaky_run("unit")
+        self.assertEqual(len(self.stories()), 1)  # adopted, nothing new
+        self.assertEqual(r["filed"], [self.stories()[0]["html_url"]])
+        self.assertTrue(any(i["content"].get("number") == self.stories()[0]["number"] for i in self.read_db()["items"]))  # put on the board
+        d = self.read_db(); d["repo_issues"]["acme/app"][-1]["user"] = {"login": "mallory"}; self.write_db(d)
+        self.save_data(flakes={})
+        self.head("ccc333")
+        self.flaky_run("unit")
+        self.assertEqual(len(self.stories()), 2)  # mallory's marker is ignored
+
+    def test_board_failure_after_creation_keeps_the_url_and_is_adopted_next_time(self):
+        self.db_set(failures=[{"match": "addProjectV2ItemById", "times": 9, "stderr": "gh: HTTP 400"}])
+        r = self.flaky_run("unit")
+        self.assertEqual(r["verdict"], "flaky")
+        self.assertIn("fileError", r)
+        (e,) = self.flakes().values()
+        self.assertTrue(e["issue"].endswith(f"/issues/{self.stories()[0]['number']}"))
+        self.db_set(failures=[])
+        self.head("bbb222")
+        r = self.flaky_run("unit")
+        self.assertEqual(len(self.stories()), 1)
+
+    def test_filing_failures_never_change_the_verdict_and_release_the_claim(self):
+        self.db_set(fail_create=True)
+        r = self.flaky_run("unit")
+        self.assertEqual(r["verdict"], "flaky")
+        self.assertIn("fileError", r)
+        (e,) = self.flakes().values()
+        self.assertFalse(e["issue"])
+        self.db_set(fail_create=False)
+        self.head("bbb222")
+        self.assertEqual(len(self.flaky_run("unit")["filed"]), 1)  # the next flake retries
+
+    def test_saved_jobs_are_filed_when_the_second_call_judges_green(self):
+        self.db_set(checks_seq=[[self.chk("unit")], [self.chk("unit", "pending")]], run_log="FAILED t.py::test_a")
+        r = self.cgp("ci-triage", "acme/app", "1", "--interval", "0", "--timeout", "0")
+        self.assertEqual(r["verdict"], "pending")
+        self.assertEqual(self.stories(), [])
+        self.db_set(checks_seq=[[self.chk("unit", "pass")]])
+        r = self.tri()
+        self.assertEqual(r["verdict"], "flaky")
+        self.assertEqual(self.reruns(), ["77"])
+        self.assertIn("t.py::test_a", self.stories()[0]["body"])
+
+    def test_more_than_three_flaked_jobs_files_nothing(self):
+        r = self.flaky_run(*[f"job{n}" for n in range(4)])
+        self.assertEqual((r["verdict"], r["skipped"]), ("flaky", "many"))
+        self.assertEqual(self.stories(), [])
+        self.assertEqual(self.flakes(), {})
+
+    def test_hostile_names_are_stripped_and_capped(self):
+        name = "evil\n`x` @user <b>#1</b> \x1b[31m" + "z" * 500
+        self.flaky_run((name, "fail", "77"), log="FAILED t.py::a`b@c<d>\\n\x1b[0m")
+        s = self.stories()[0]
+        for text in (s["title"], s["body"]):
+            for bad in ("@user", "<b>", "\x1b", "`x`"):
+                self.assertNotIn(bad, text)
+        self.assertLessEqual(len(s["title"]), len("Flaky: ") + 100)
+        self.assertNotIn("\n", s["title"])
+
+    def test_threshold_above_the_count_records_without_filing(self):
+        code = ("import sys; sys.path.insert(0, %r); import cgp_lib.flakes as f; f.FLAKY_FILE_AT = 3; from cgp_lib.cli import main; "
+                "sys.argv = ['cgp', 'ci-triage', 'acme/app', '1', '--interval', '0', '--timeout', '30']; main()" % os.path.join(ROOT, "scripts"))
+        red = [self.chk("unit")]
+        self.db_set(checks_seq=[red, [dict(red[0], bucket="pending")], [dict(red[0], bucket="pass")]])
+        p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=self.env, cwd=self.tmp)
+        self.assertEqual(json.loads(p.stdout)["verdict"], "flaky", p.stderr)
+        self.assertEqual(self.stories(), [])
+        self.assertEqual(list(self.flakes().values())[0]["count"], 1)
+
+    def test_prune_keeps_stories_and_live_claims_and_trims_the_rest(self):
+        sys.path.insert(0, os.path.join(ROOT, "scripts"))
+        try:
+            from cgp_lib.flakes import prune, KEEP
+        finally:
+            sys.path.remove(os.path.join(ROOT, "scripts"))
+        old = "2020-01-01T00:00:00Z"
+        entries = {f"k{n}": {"issue": None, "lastSeen": f"2026-01-01T00:{n // 60:02d}:{n % 60:02d}Z"} for n in range(KEEP + 5)}
+        entries["story"] = {"issue": "https://github.com/acme/app/issues/5", "lastSeen": old}
+        entries["claim"] = {"issue": "pending", "claimedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "lastSeen": old}
+        entries["dead"] = {"issue": "pending", "claimedAt": old, "lastSeen": old}
+        d = {"flakes": {"acme/app": entries}}
+        prune(d)
+        kept = d["flakes"]["acme/app"]
+        self.assertEqual(len(kept), KEEP + 2)
+        self.assertIn("story", kept)
+        self.assertIn("claim", kept)
+        self.assertNotIn("dead", kept)
+        self.assertNotIn("k0", kept)
+        self.assertIn(f"k{KEEP + 4}", kept)
+
+    def test_docs_mention_the_command(self):
+        self.assertIn("ci-triage", read_text("docs", "cli.md"))
+
+
 class TestCleanErrors(Base):
     def fails(self, *args):
         p = self.cgp(*args, ok=False)

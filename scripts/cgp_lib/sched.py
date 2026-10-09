@@ -16,6 +16,7 @@ from .epics import close_finished, parent_edges
 from .auto_intake import run_intake
 from .repoconf import merged_globs
 from .policy import current_rating
+from .flakes import prune as prune_flakes
 from .story import ask_user, process_replies
 
 
@@ -353,6 +354,9 @@ def snapshot(c):
         for k in ("reviewed", "cleanRebase", "asked", "ratings", "policy"):
             d[k] = {i: v for i, v in d.get(k, {}).items() if i in live_ids or (k == "ratings" and i in created)}
         d["tainted"] = [i for i in d.get("tainted", []) if i in live_ids]
+        live_prs = {f"{r[0]}#{r[1]}" for r in (parse_pr_ref(c, i.get("pr")) for i in live) if r}
+        d["reruns"] = {k: v for k, v in d.get("reruns", {}).items() if k in live_prs}
+        prune_flakes(d)
     update_data(prune)
     return snap
 

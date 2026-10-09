@@ -4,11 +4,13 @@ import os
 import re
 import time
 from .util import Poll, die, out
-from .gh import gh
+from urllib.parse import quote
+from .gh import gh, rest
 from .store import cfg, load_data, update_data
 from .board import get_item, parse_pr_ref, require_repo
 from .gitutil import default_ref
 from .session import set_phase
+from .flakes import capture, clean
 
 
 def checks_green(checks):
@@ -36,15 +38,36 @@ def pr_checks(repo, pr):
     return [] if "no checks reported" in (p.stderr + p.stdout) else None
 
 
-def failed_logs(repo, failed):
+def run_id(link):
+    m = re.search(r"/runs/(\d+)", link or "")
+    return m.group(1) if m else None
+
+
+def failed_logs(repo, failed, limit=3):
+    """Attach the last 60 log lines of each failed run (once per run) to the first `limit` failed checks (all when None)."""
     seen = set()
-    for f in failed[:3]:
-        m = re.search(r"/runs/(\d+)", f.get("link") or "")
-        if m and m.group(1) not in seen:
-            seen.add(m.group(1))
-            log = gh("run", "view", m.group(1), "-R", repo, "--log-failed", check=False).stdout
+    for f in failed[:limit]:
+        rid = run_id(f.get("link"))
+        if rid and rid not in seen:
+            seen.add(rid)
+            log = gh("run", "view", rid, "-R", repo, "--log-failed", check=False).stdout
             f["log"] = "\n".join(log.strip().splitlines()[-60:])
     return failed
+
+
+TEST_FORMATS = (re.compile(r"FAILED (\S+::[^\s]+)"), re.compile(r"(?<!--- )FAIL: (\w+ \([\w.]+\))"), re.compile(r"● (.+?)\s*$", re.M),
+                re.compile(r"--- FAIL: (\S+)"), re.compile(r"test (\S+) \.\.\. FAILED"))
+
+
+def extract_tests(log):
+    """Names of failing tests found in a CI log (pytest, unittest, jest, go, cargo): at most 20, 200 characters each. Labels only."""
+    found = []
+    for rx in TEST_FORMATS:
+        for name in rx.findall(log or ""):
+            name = clean(name, 200)
+            if name and name not in found:
+                found.append(name)
+    return found[:20]
 
 
 def cmd_ci_wait(a):
@@ -93,6 +116,124 @@ def ci_wait(a):
         if not poll.wait():
             out({"state": "pending", "pending": [x["name"] for x in pending]})
             return
+
+
+RERUNS_PER_PR = 2
+
+
+def main_failures(repo, base):
+    """Names of the jobs whose latest check run on the PR's base branch failed or timed out (cancelled is concurrency, not breakage).
+    Matching is by name only. An unreadable or pending main counts as green."""
+    try:
+        runs = [r for chunk in rest(f"repos/{repo}/commits/{quote(base, safe='')}/check-runs") for r in chunk.get("check_runs", [])]
+    except SystemExit:
+        return set()
+    return {r["name"] for r in runs if r.get("conclusion") in ("failure", "timed_out")}
+
+
+def settled(a, poll, names=None):
+    """Poll until none of the checks (those named `names`, else all) is pending: (checks, "ok"), or (None, "pending"/"unknown") at the deadline."""
+    seen_gh = False
+    while True:
+        checks = pr_checks(a.repo, a.pr)
+        seen_gh = seen_gh or checks is not None
+        if checks is not None and not any(x["bucket"] == "pending" and (names is None or x["name"] in names) for x in checks):
+            return checks, "ok"
+        if not poll.wait():
+            return None, "pending" if seen_gh else "unknown"
+
+
+def named_red(checks, names):
+    return any(x["bucket"] in ("fail", "cancel") for x in checks if x["name"] in names)
+
+
+def reserve_rerun(prk, head, runs, jobs):
+    """Record the rerun BEFORE making it (a crash can then never allow a second one); None when it is allowed, else why not."""
+    res = []
+
+    def upd(d):
+        recs = d.setdefault("reruns", {}).setdefault(prk, {})
+        if head in recs or len(recs) >= RERUNS_PER_PR:
+            res.append("this commit was rerun already" if head in recs else f"{RERUNS_PER_PR} reruns used on this PR")
+        else:
+            recs[head] = {"runs": runs, "jobs": jobs}
+    update_data(upd)
+    return res[0] if res else None
+
+
+def cmd_ci_triage(a):
+    a.repo = require_repo(cfg(), a.repo)
+    pr = f"{a.repo}#{a.pr}"
+    before = set_phase("ci", pr=pr)
+    try:
+        ci_triage(a)
+    finally:
+        if before is not False:
+            set_phase(*before, pr=pr)
+
+
+def ci_triage(a):
+    """After ci-wait said red: flaky (green after one rerun), main-broken (the base branch fails the same jobs) or real. Only the
+    check results and the rerun decide; log text is never read for a verdict."""
+    poll, prk = Poll(a.timeout, a.interval), f"{a.repo}#{a.pr}"
+    v = pr_view(a.repo, a.pr, check=False)
+    head = (v or {}).get("headRefOid")
+    if not head:
+        return out({"verdict": "unknown", "note": "gh could not read the PR"})
+    if a.sha and a.sha != head:
+        return out({"verdict": "stale", "head": head, "note": f"PR head is not {a.sha}"})
+    checks, state = settled(a, poll)
+    if checks is None:
+        return out({"verdict": state, "head": head})
+    rec = load_data().get("reruns", {}).get(prk, {}).get(head)
+    failed = [x for x in checks if x["bucket"] in ("fail", "cancel")]
+    if rec and not named_red(checks, {j["name"] for j in rec["jobs"]}):  # a rerun of this commit is recorded and came out green
+        return flaky(a, head, rec["jobs"], [dict(j, rerun="pass", mainRed=False) for j in rec["jobs"]])
+    if not failed:
+        return out({"verdict": "none", "head": head, "note": "no failed checks"})
+    failed_logs(a.repo, failed, limit=None)
+    logs = {run_id(f.get("link")): f["log"] for f in failed if "log" in f}
+    red = main_failures(a.repo, v.get("baseRefName") or "main")
+    jobs = [{"name": f["name"], "workflow": f.get("workflow") or "", "runId": run_id(f.get("link")), "link": f.get("link") or "",
+             "mainRed": f["name"] in red, "rerun": "skipped", "tests": extract_tests(logs.get(run_id(f.get("link")))),
+             **({"log": f["log"]} if "log" in f else {})} for f in failed]
+    todo = [j for j in jobs if not j["mainRed"]]
+    if not todo:
+        return out({"verdict": "main-broken", "head": head, "jobs": jobs})
+    if rec or any(not j["runId"] for j in todo):  # a recorded rerun that is still red, or a status no one can rerun
+        return out({"verdict": "real", "head": head, "jobs": jobs, "note": "still red after the rerun" if rec else "a failed check has no workflow run to rerun"})
+    saved = [{k: j[k] for k in ("name", "workflow", "runId", "link", "tests")} for j in todo]
+    ids = sorted({j["runId"] for j in todo})
+    why = reserve_rerun(prk, head, ids, saved)
+    if why:
+        return out({"verdict": "real", "head": head, "jobs": jobs, "note": f"not rerun: {why}"})
+    done = 0
+    for rid in ids:
+        p = gh("run", "rerun", rid, "-R", a.repo, "--failed", check=False)  # never retried; this is the only rerun
+        if p.returncode:
+            if not done:
+                update_data(lambda d: d["reruns"][prk].pop(head, None))
+            err = (p.stderr or p.stdout).strip()[:300]
+            return out({"verdict": "pending" if "409" in err else "unknown", "head": head, "jobs": jobs, "note": f"gh run rerun {rid} failed: {err}"})
+        done += 1
+    names, seen_pending = {j["name"] for j in todo}, False
+    while True:  # right after the rerun gh may still show the old failure: red counts only once a pending state was seen
+        checks = pr_checks(a.repo, a.pr)
+        if checks is not None:
+            running = any(x["bucket"] == "pending" and x["name"] in names for x in checks)
+            seen_pending = seen_pending or running
+            if not running and not named_red(checks, names):
+                return flaky(a, head, saved, [dict(j, rerun="pass" if not j["mainRed"] else "skipped") for j in jobs])
+            if not running and seen_pending:
+                return out({"verdict": "real", "head": head, "jobs": [dict(j, rerun="fail" if not j["mainRed"] else "skipped") for j in jobs]})
+        if not poll.wait():
+            return out({"verdict": "pending", "head": head, "jobs": jobs, "note": "rerun still running; run ci-triage again"})
+
+
+def flaky(a, head, saved, jobs):
+    res = {"verdict": "flaky", "head": head, "jobs": jobs}
+    res.update(capture(a.repo, a.pr, head, saved))
+    out(res)
 
 
 def pr_view(repo, pr, check=True):
