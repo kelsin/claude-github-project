@@ -4,7 +4,7 @@ import json
 import os
 import sys
 import time
-from .consts import ACTIONABLE, ALL_KEYS, COLUMNS, HOME, STORY_OPTION, WAITING_FIELD
+from .consts import ACTIONABLE, ALL_KEYS, COLUMNS, HOME, SPEC_SUFFIX, STORY_OPTION, WAITING_FIELD
 from .util import Poll, age_seconds, printable, strip_id, covers, die, norm_path, now_iso, out
 from .gh import gh
 from .store import cfg, load_data, load_json, lock_file, lock_holder, state_path, stop_requested, update_board, update_data, update_state
@@ -267,8 +267,8 @@ def snapshot(c):
                 seen[i["item"]] = {"at": now, "reason": reason}
         if seen != kept:
             update_state(lambda st: st.__setitem__("worktreeKept", seen))
-    spec_sweep(c, items)  # drafts of stories that went on or changed are stopped and reset (see spec.py)
-    in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these ("<item>:spec" rows are drafts: they use a slot but own no story)
+    stop_drafts = spec_sweep(c, items)  # drafts of stories that went on or changed are stopped and reset (see spec.py)
+    in_flight = {w["item"] for w in load_json(state_path(), {}).get("workers", [])}  # a worker already owns these ("<item>:spec" rows are drafts: they own no story and take no slot from real work)
     file_closed()
     close_finished(c, items)  # a story split into sub-stories is closed once they are all done (see epics.py)
     created = set()  # items intake added to the board just now: not in `items`, but their data must survive the prune below
@@ -323,7 +323,7 @@ def snapshot(c):
     actionable = [i for i in actionable if i["item"] not in trailing]
     actionable.sort(key=lambda i: (ACTIONABLE.index(i["column"]), i["priorityRank"], -i["unlocks"]))  # stable: board order breaks remaining ties
     cap = c["settings"]["concurrency"]
-    free = max(cap - len(in_flight), 0)
+    free = max(cap - sum(1 for k in in_flight if not k.endswith(SPEC_SUFFIX)), 0)  # a running draft never takes a slot real work needs
     # Todo and Plan stories would starve behind the later columns, which are re-dispatched every cycle: while one is actionable and no
     # planning worker runs, later-column stories (in flight and new) may use at most cap-1 slots. A cap of 1 reserves nothing.
     planning = [i for i in actionable if i["column"] == "plan" or (i["column"] == "todo" and not i["skipPlan"])]
@@ -343,7 +343,7 @@ def snapshot(c):
     waiting = [i for i in live if i["waiting"]]
     if stop:
         batch = []  # a stop request dispatches nothing new
-    speculative = [] if stop else spec_candidates(c, live, batch, in_flight, free)  # drafts use only the slots real work left
+    speculative = [] if stop else spec_candidates(c, live, batch, in_flight, stop_drafts)  # drafts use only the slots real work left (and the batch is chosen first)
     # why a story is not starting: it overlaps a rival, or it waits for a free worker slot (a stop makes the batch empty on purpose,
     # so it queues nothing)
     queued = [i for i in actionable if i not in batch] if cap > 0 and not stop else []  # (stop: see held_back below)
@@ -365,6 +365,7 @@ def snapshot(c):
         "remaining": len(live) + len(fresh),
         "batch": batch,
         "speculative": speculative,
+        "stopDrafts": sorted(set(stop_drafts)),
         "inFlight": sorted(in_flight),
         "actionableTotal": len(actionable),
         "waitingOnYou": waiting,

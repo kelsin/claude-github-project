@@ -5,6 +5,7 @@ branch is reset to where the draft started. State per story is data["spec"][item
 startedAt, trusted, artifactComments}, state one of running, ready, failed, discarded, adopted. The draft's worker row is keyed
 "<item>:spec" (consts.SPEC_SUFFIX) so it never replaces the story's own row."""
 import os
+import re
 import hashlib
 import subprocess
 from .consts import SPEC_SUFFIX
@@ -14,7 +15,7 @@ from .store import cfg, load_data, load_json, state_path, update_data, update_st
 from .board import fetch_items, issue_item, parse_item
 from .gitutil import default_ref, git, wt_path
 from .gitwt import cmd_sync, cmd_worktree, is_ancestor, uncommitted_work
-from .policy import forbidden
+from .policy import ALWAYS_DENY, forbidden
 from .repoconf import merged_globs, repo_config, rules_text
 
 LIVE = ("running", "ready")  # states in which the branch holds (or is getting) commits nobody has reviewed
@@ -58,10 +59,18 @@ def local_problem(c, data, it):
     return None
 
 
+def probes(guarded, n):
+    """The paths to test for one declared or changed path: itself, a file below it (a directory touch) and the shape of every deny or
+    guard glob that lives below it (`docs/conf.py`, `docs/*.md` -> `docs/x.md`)."""
+    n = n.rstrip("/")
+    return [n, n + "/x"] + [re.sub(r"[*?\[\]]+", "x", g) for g in [*ALWAYS_DENY, *guarded] if g.lower().startswith(n.lower() + "/")]
+
+
 def bad_touches(c, it, names):
-    """Why a declared or changed path is off limits to a draft (None when none is): the always-deny list and guardFiles only."""
+    """Why a declared or changed path is off limits to a draft (None when none is): the always-deny list and guardFiles only. A directory
+    is off limits when a glob of either list could match a file beneath it."""
     guarded = [g.lower() for g in merged_globs(c, "guardFiles", [it["issueRepo"]])]
-    return next((why for why in (forbidden(guarded, n.rstrip("/")) for n in names) if why), None)
+    return next((why for n in names for why in (forbidden(guarded, p) for p in probes(guarded, n)) if why), None)
 
 
 def fingerprint(it, touches):
@@ -84,26 +93,32 @@ def diff_problem(c, it, wt, spec):
     return f"{extra} is not in the plan's files" if extra else None
 
 
-def drop_row(key):
+def drop_row(key, stopped=None):
+    """Remove the draft's worker row; the key goes on `stopped` (when given) if the row existed: its agent may still be running."""
+    if stopped is not None and any(w["item"] == key + SPEC_SUFFIX for w in load_json(state_path(), {}).get("workers", [])):
+        stopped.append(key + SPEC_SUFFIX)
     update_state(lambda st: st.__setitem__("workers", [w for w in st["workers"] if w["item"] != key + SPEC_SUFFIX]))
 
 
-def discard(it, state, why, forget=False):
-    """Stop the draft's worker row, put the branch back at where the draft started and record why (or forget the story's entry, so a
-    changed plan may be drafted again)."""
-    key = it["item"]
-    drop_row(key)
-    spec = load_data().get("spec", {}).get(key)
+def restore(it, base):
+    """Put the story's worktree back at `base`, with no untracked files. False when git failed (the draft's commits may still be there)."""
     wt = wt_path(it)
-    if spec and spec["state"] in LIVE and spec.get("base") and os.path.isdir(wt):
-        subprocess.run(["git", "-C", wt, "reset", "--hard", spec["base"]], capture_output=True)
+    if not os.path.isdir(wt):
+        return True
+    return all(subprocess.run(["git", "-C", wt, *args], capture_output=True).returncode == 0 for args in (["reset", "--hard", base], ["clean", "-fd"]))
 
-    def upd(d):
-        if forget:
-            d.get("spec", {}).pop(key, None)
-        elif key in d.get("spec", {}):
-            d["spec"][key].update(state=state, reason=why)
-    update_data(upd)
+
+def discard(it, state, why, forget=False, stopped=None):
+    """Stop the draft's worker row, put the branch back at where the draft started and record why. The entry keeps its `base` until
+    `prepare` has made sure no late commit of the draft agent survived (`backstop`); `forget` marks it as no obstacle to a new draft.
+    Returns False, changing nothing, when the reset failed: the draft stays live, so sync and publishing keep refusing."""
+    key = it["item"]
+    drop_row(key, stopped)
+    spec = load_data().get("spec", {}).get(key)
+    if spec and spec["state"] in LIVE and spec.get("base") and not restore(it, spec["base"]):
+        return False
+    update_data(lambda d: d["spec"][key].update(state=state, reason=why, forgotten=forget) if key in d.get("spec", {}) else None)
+    return True
 
 
 def record(it, entry):
@@ -118,6 +133,9 @@ def start(c, it, a):
     old = data.get("spec", {}).get(it["item"])
     if old and old["state"] in LIVE:
         die(f"the story already has a draft ({old['state']})")
+    problem = backstop(it)
+    if problem:
+        die(problem)
     wt = call(cmd_worktree, item=a.item)
     synced = call(cmd_sync, item=a.item) if "error" not in wt else wt
     if "error" in synced or synced.get("state") not in ("clean", "rebased"):
@@ -125,7 +143,7 @@ def start(c, it, a):
     wt = wt["path"]
     touches = touches_of(data, it["item"])
     fp, human = fingerprint(it, touches)
-    if old and old.get("fingerprint") == fp:
+    if old and not old.get("forgotten") and old.get("fingerprint") == fp:
         die(f"a draft of this plan was already tried ({old['state']})")
     from .story import author_trusted  # story imports this module
     raw = next((r for r in fetch_items(c["board"]["id"], True) if r["id"] == it["item"]), None)  # get_item does not read GitHub's blockedBy
@@ -134,13 +152,16 @@ def start(c, it, a):
     entry = {"base": None, "head": None, "fingerprint": fp, "plan": it["plan"], "touches": touches, "state": "failed", "startedAt": now_iso(),
              "trusted": False, "artifactComments": a.artifact_comments or 0}
     refused = (bad_touches(c, it, touches) or ("the story is blocked on GitHub" if blockers or native["nativeOverflow"] else None)
-               or (None if author_trusted(it) and all(trusted(it["issueRepo"], cm) for cm in human) else "the story or its feedback is not from people you trust")
-               or uncommitted_work(wt))
+               or (None if author_trusted(it) and all(trusted(it["issueRepo"], cm) for cm in human) else "the story or its feedback is not from people you trust"))
+    if refused:  # (permanent for this plan: recorded, so it is not offered again)
+        record(it, {**entry, "reason": refused})
+        out({"started": False, "reason": refused})
+        return
     base = git(wt, "rev-parse", "HEAD")
+    refused = uncommitted_work(wt)
     if not refused and not is_ancestor(wt, base, default_ref(wt)):
         refused = "the branch already holds commits that are not on the default branch"
-    if refused:
-        record(it, {**entry, "reason": refused})
+    if refused:  # (transient, e.g. a rebase in progress: not recorded)
         out({"started": False, "reason": refused})
         return
     record(it, {**entry, "base": base, "state": "running", "trusted": True})
@@ -163,12 +184,12 @@ def finish(c, it, a):
     if why:
         die(f"commit everything first: {why}")
     if head == spec["base"]:
-        discard(it, "failed", "the draft made no commits")
+        discard(it, "failed", "the draft made no commits") or die("could not reset the worktree to where the draft started")
         out({"state": "failed", "reason": "the draft made no commits"})
         return
     why = diff_problem(c, it, wt, {**spec, "head": head})
     if why:
-        discard(it, "failed", why)
+        discard(it, "failed", why) or die("could not reset the worktree to where the draft started")
         out({"state": "failed", "reason": why})
         return
     update_data(lambda d: d["spec"][it["item"]].update(head=head, state="ready", finishedAt=now_iso()))
@@ -178,7 +199,7 @@ def finish(c, it, a):
 
 def fail(c, it, a):
     current(it, LIVE)
-    discard(it, "failed", "the worker gave up")
+    discard(it, "failed", "the worker gave up") or die("could not reset the worktree to where the draft started")
     out({"state": "failed"})
 
 
@@ -207,32 +228,62 @@ def why_not(c, it, spec, artifact):
     return diff_problem(c, it, wt, spec)
 
 
+def adopted(spec, confirmed):
+    return {"speculative": {"adopted": True, "base": spec["base"], "head": spec["head"], "confirmed": confirmed}}
+
+
+def thrown_away(c, it, why):
+    return {"speculative": {"discarded": True, "reason": why}} if discard(it, "discarded", why) else \
+        {"speculative": {"discarded": False, "error": f"could not reset the worktree to where the draft started ({why}); the draft stays until it can"}}
+
+
 def resolve(c, it, artifact=None):
     """Adopt the ready draft of an approved story, or discard it. {} when the story has no draft in play. Adopting keeps the entry (state
-    adopted) until the worker confirms the artifact's comments with `cgp spec resolve --artifact-comments N` (it clears the entry)."""
+    adopted) and `prepare` keeps reporting it as unconfirmed until the worker confirms the artifact's comments with `cgp spec resolve
+    --artifact-comments N` (it clears the entry)."""
     spec = load_data().get("spec", {}).get(it["item"])
     if not spec or spec["state"] not in LIVE + ("adopted",):
         return {}
     if spec["state"] == "adopted":
         if artifact is None:
-            return {}
+            return adopted(spec, False)
         if artifact > spec["artifactComments"]:
             update_data(lambda d: d["spec"][it["item"]].update(state="ready"))
-            discard(it, "discarded", "the plan artifact got a new comment")
-            return {"speculative": {"discarded": True, "reason": "the plan artifact got a new comment"}}
+            return thrown_away(c, it, "the plan artifact got a new comment")
         update_data(lambda d: d.get("spec", {}).pop(it["item"], None))
         return {"speculative": {"adopted": True, "confirmed": True}}
     why = why_not(c, it, spec, artifact)
     if why:
-        discard(it, "discarded", why)
-        return {"speculative": {"discarded": True, "reason": why}}
+        return thrown_away(c, it, why)
     update_data(lambda d: d["spec"][it["item"]].update(state="adopted") if artifact is None else d["spec"].pop(it["item"], None))
-    return {"speculative": {"adopted": True, "base": spec["base"], "head": spec["head"], "confirmed": artifact is not None}}
+    return adopted(spec, artifact is not None)
+
+
+def backstop(it):
+    """A discarded draft's agent may have committed after the reset (nothing but the loop stops it): before a real worker uses the branch,
+    put it back at the draft's base unless it was pushed meanwhile. None when the branch is fine, else why it is not (the draft is then
+    live again, so sync and publishing keep refusing and the next snapshot retries)."""
+    key = it["item"]
+    spec = load_data().get("spec", {}).get(key)
+    if not spec or spec["state"] in LIVE + ("adopted",) or not spec.get("base"):
+        return None
+    wt = wt_path(it)
+    if os.path.isdir(wt) and git(wt, "rev-parse", "HEAD", check=False) != spec["base"] \
+            and not git(wt, "rev-parse", "--verify", "-q", f"refs/remotes/origin/cgp/{it['number']}", check=False):
+        if not restore(it, spec["base"]):
+            update_data(lambda d: d["spec"][key].update(state="running", reason="the worktree could not be reset"))
+            return "could not reset the worktree to where the speculative draft started"
+    update_data(lambda d: d["spec"][key].update(base=None))
+    return None
 
 
 def prepare_hook(c, it):
     """`cgp prepare` calls this before it syncs the worktree: an approved story's draft is adopted or discarded here."""
-    return resolve(c, it) if it["column"] in ("plan_approved", "implement") else {}
+    if it["column"] not in ("plan_approved", "implement"):
+        return {}
+    res = resolve(c, it)
+    problem = backstop(it)
+    return {"speculative": {**res.get("speculative", {}), "error": problem}} if problem else res
 
 
 def cmd_spec(a):
@@ -262,31 +313,36 @@ def worker_stopped(key, outcome):
 def sweep(c, items):
     """First thing in a snapshot: stop and discard drafts whose story went on or changed. A story that left Plan Review for anything but
     approval, was put on hold or closed, or whose plan or files changed loses its draft; a draft still running when the plan was approved
-    is never adopted half done. A ready draft of an approved story is left for `prepare` to adopt or discard."""
+    is never adopted half done, and a running draft with no worker row is dead. A ready draft of an approved story is left for `prepare`
+    to adopt or discard. Returns the worker keys (`<item>:spec`) whose rows were dropped: the loop stops those agents."""
     data = load_data()
+    stopped = []
     by_id = {i["item"]: i for i in items if i["column"] != "done" and not i["closed"]}
     rows = {story_of(w["item"]) for w in load_json(state_path(), {}).get("workers", []) if is_spec(w["item"])}
     for key in sorted(set(data.get("spec", {})) | rows):
         it, spec = by_id.get(key), data.get("spec", {}).get(key)
         live_spec = bool(spec) and spec["state"] in LIVE
         if not it or it["kind"] != "issue":
-            drop_row(key)  # the story is gone: its entry is pruned
+            drop_row(key, stopped)  # the story is gone: its entry is pruned
         elif it["column"] not in COLUMNS:
-            discard(it, "discarded", f"the story is in {it['column']}", forget=True)
+            discard(it, "discarded", f"the story is in {it['column']}", forget=True, stopped=stopped)
         elif it["held"] and (live_spec or key in rows):
-            discard(it, "discarded", "the story is on hold")
+            discard(it, "discarded", "the story is on hold", stopped=stopped)
         elif it["column"] == "plan_review" and spec and (spec["plan"] != it["plan"] or spec["touches"] != touches_of(data, key)):
-            discard(it, "discarded", "the plan or its files changed", forget=True)
+            discard(it, "discarded", "the plan or its files changed", forget=True, stopped=stopped)
         elif it["column"] == "plan_review" and live_spec and local_problem(c, data, it):
-            discard(it, "discarded", local_problem(c, data, it))
+            discard(it, "discarded", local_problem(c, data, it), stopped=stopped)
         elif it["column"] != "plan_review" and (spec or {}).get("state") == "running":
-            discard(it, "discarded", "the plan was approved before the draft finished")
+            discard(it, "discarded", "the plan was approved before the draft finished", stopped=stopped)
         elif it["column"] != "plan_review" and key in rows:
-            drop_row(key)
+            drop_row(key, stopped)
+        elif spec and spec["state"] == "running" and key not in rows:
+            discard(it, "discarded", "the draft's worker is gone", stopped=stopped)
+    return stopped
 
 
-def candidates(c, live, batch, in_flight, free):
-    """Stories to draft this cycle, from local state only: the slots the batch left, up to speculativeMax. A draft never defers real work:
+def candidates(c, live, batch, in_flight, stopped=None):
+    """Stories to draft this cycle, from local state only: the slots the batch left, up to speculativeMax. A draft never defers real work (it does not count in the batch's free slots):
     real work is chosen first, a draft that would clash with it is discarded and a story that would clash is not started."""
     from .sched import hard_conflict  # sched imports this module
     data = load_data()
@@ -298,18 +354,19 @@ def candidates(c, live, batch, in_flight, free):
         spec = data.get("spec", {}).get(i["item"])
         hit = next((r for r in batch if clash(i, r)), None) if spec and spec["state"] in LIVE else None
         if hit:
-            discard(i, "discarded", f"it clashes with {hit['title']}, which is starting")
+            discard(i, "discarded", f"it clashes with {hit['title']}, which is starting", stopped=stopped)
     if not c["settings"].get("speculative"):
         return []
     room = c["settings"]["speculativeMax"] - sum(1 for k in in_flight if is_spec(k))
     if cap > 0:
-        room = min(room, free - len(batch))
+        room = min(room, cap - len(in_flight) - len(batch))  # a new draft needs a slot nobody uses (running drafts do hold one)
     picked = []
     for i in sorted(live, key=lambda i: (i["priorityRank"], -i["unlocks"])):
         spec = data.get("spec", {}).get(i["item"])
         if len(picked) >= room:
             break
-        if local_problem(c, data, i) or i["item"] + SPEC_SUFFIX in in_flight or (spec and spec["plan"] == i["plan"] and spec["touches"] == touches_of(data, i["item"])):
+        if local_problem(c, data, i) or i.get("blockedBy") or i["item"] + SPEC_SUFFIX in in_flight \
+                or (spec and not spec.get("forgotten") and spec["plan"] == i["plan"] and spec["touches"] == touches_of(data, i["item"])):
             continue  # (an entry for this very plan: tried, running, ready, failed or discarded)
         if not any(clash(i, r) for r in real):
             picked.append(i)

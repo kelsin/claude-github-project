@@ -178,7 +178,8 @@ class TestSpecSnapshot(SpecBase):
         self.cgp("worker", "stop", "i1")
         self.setting(concurrency=1)
         snap = self.cgp("list")
-        self.assertEqual((snap["batch"], snap["speculative"]), ([], []))  # the draft's row holds the only slot
+        self.assertTrue(snap["batch"])  # real work is not held back by the draft's row...
+        self.assertEqual(snap["speculative"], [])  # ...but no further draft starts while the only slot is in use
         self.cgp("worker", "stop", "i1:spec", "--outcome", "fail")
         self.assertNotIn("daemonStrikes", self.data())
         self.assertEqual(self.spec()["state"], "failed")
@@ -208,13 +209,35 @@ class TestSpecSnapshot(SpecBase):
         self.edit_db(lambda d: self.item_values(d).pop("Priority"))
         self.force("i1", "plan")
         self.cgp("list")
-        self.assertIsNone(self.spec())
+        self.assertEqual((self.spec()["state"], self.spec()["forgotten"], self.head()), ("discarded", True, self.base))
 
     def test_a_rating_above_low_discards_it(self):
         self.ready()
         self.set_data(ratings={"i1": {"rating": "medium", "column": "plan"}})
         self.cgp("list")
         self.assertEqual((self.spec()["state"], self.head()), ("discarded", self.base))
+
+    def test_a_blocked_story_is_not_offered(self):
+        self.force("i2", "plan_approved")
+        self.set_data(blocks={"i1": ["i2"]})
+        self.assertEqual(self.offered(), [])
+        self.set_data(blocks={})
+        self.assertEqual(self.offered(), ["i1"])
+
+    def test_the_snapshot_names_the_draft_rows_it_dropped_so_their_agents_can_be_stopped(self):
+        self.start()
+        self.cgp("worker", "start", "i1:spec")
+        self.assertEqual(self.cgp("list")["stopDrafts"], [])
+        self.approve()
+        self.assertEqual(self.cgp("list")["stopDrafts"], ["i1:spec"])
+        self.assertEqual(self.cgp("list")["stopDrafts"], [])
+
+    def test_a_running_draft_without_a_worker_row_is_discarded(self):
+        self.start()
+        base = self.head()
+        self.commit()
+        self.cgp("list")
+        self.assertEqual((self.spec()["state"], self.head()), ("discarded", base))
 
     def test_entries_of_stories_that_are_gone_are_pruned(self):
         self.ready()
@@ -273,6 +296,22 @@ class TestSpecCommands(SpecBase):
         self.set_data(touches={"i1": ["skills/run/columns/plan.md"]})
         refused("never auto-approved")
 
+    def test_a_directory_touch_over_guarded_files_is_refused(self):
+        for touch in (".github", ".github/", "skills", "skills/run", "docs/"):
+            self.set_data(touches={"i1": [touch]}, spec={})
+            res = self.cgp("spec", "start", "i1")
+            self.assertFalse(res["started"], touch)
+
+    def test_a_transient_refusal_is_not_recorded(self):
+        with open(os.path.join(self.wt, "dirty.txt"), "w") as f:
+            f.write("x")
+        self.git(self.wt, "add", "dirty.txt")
+        res = self.cgp("spec", "start", "i1")
+        self.assertFalse(res["started"])
+        self.assertIn("uncommitted", res["reason"])
+        self.assertIsNone(self.spec())
+        self.assertEqual(self.offered(), ["i1"])
+
     def test_start_refuses_a_story_that_does_not_qualify_and_a_second_draft(self):
         self.start()
         self.assertNotEqual(self.cgp("spec", "start", "i1", ok=False).returncode, 0)
@@ -324,6 +363,16 @@ class TestSpecResolve(SpecBase):
         self.assertIsNone(self.spec())
         self.assertNotIn("speculative", self.cgp("prepare", "i1"))
         self.assertEqual(self.cgp("sync", "i1")["state"], "clean")
+
+    def test_prepare_keeps_reporting_the_adoption_until_it_is_confirmed(self):
+        self.ready()
+        self.approve()
+        first = self.cgp("prepare", "i1")["speculative"]
+        second = self.cgp("prepare", "i1")["speculative"]
+        self.assertEqual((first["adopted"], first["confirmed"]), (True, False))
+        self.assertEqual(first, second)
+        self.assertEqual(self.cgp("spec", "resolve", "i1", "--artifact-comments", "0")["confirmed"], True)
+        self.assertNotIn("speculative", self.cgp("prepare", "i1"))
 
     def test_a_new_artifact_comment_discards_it_before_or_after_prepare(self):
         self.start(n=1)
@@ -392,6 +441,64 @@ class TestSpecResolve(SpecBase):
         res = self.cgp("prepare", "i1")["speculative"]
         self.assertTrue(res["discarded"])
         self.assertIn("default branch", res["reason"])
+
+
+class TestSpecDiscardBackstop(SpecBase):
+    def test_late_draft_commits_after_a_discard_are_reset_when_the_real_worker_prepares(self):
+        self.start()
+        self.cgp("worker", "start", "i1:spec")
+        base = self.head()
+        self.approve()
+        self.cgp("list")  # discards the running draft
+        self.assertEqual((self.spec()["state"], self.head()), ("discarded", base))
+        self.commit()  # the draft agent was not stopped and commits late
+        self.commit("g.txt")
+        res = self.cgp("prepare", "i1")
+        self.assertEqual((self.head(), res["sync"]["state"]), (base, "clean"))
+        self.assertIsNone(self.spec()["base"])
+        self.commit("h.txt")  # the real worker's own work is left alone by later prepares
+        mine = self.head()
+        self.cgp("prepare", "i1")
+        self.assertEqual(self.head(), mine)
+
+    def test_a_branch_the_real_worker_already_pushed_is_not_reset(self):
+        self.start()
+        base = self.head()
+        self.approve()
+        self.cgp("list")
+        self.commit()
+        self.git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/cgp/1")
+        self.git(self.wt, "fetch", "-q", "origin")
+        mine = self.head()
+        self.cgp("prepare", "i1")
+        self.assertNotEqual(mine, base)
+        self.assertEqual(self.head(), mine)
+
+    def test_untracked_files_of_a_discarded_draft_are_removed(self):
+        self.start()
+        base = self.head()
+        self.commit()
+        with open(os.path.join(self.wt, "junk.txt"), "w") as f:
+            f.write("x")
+        os.makedirs(os.path.join(self.wt, "newdir"))
+        with open(os.path.join(self.wt, "newdir", "y.txt"), "w") as f:
+            f.write("y")
+        self.approve()
+        self.cgp("list")
+        self.assertEqual(self.head(), base)
+        self.assertFalse(os.path.exists(os.path.join(self.wt, "junk.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.wt, "newdir")))
+
+    def test_a_failed_reset_leaves_the_draft_live_so_sync_keeps_refusing(self):
+        self.ready()
+        self.edit_spec(base="0" * 40)  # git cannot reset to it
+        self.approve()
+        self.edit_spec(base="0" * 40, head=self.head(), state="running")
+        res = self.cgp("prepare", "i1")["speculative"]
+        self.assertFalse(res["discarded"])
+        self.assertEqual(self.spec()["state"], "running")
+        p = self.cgp("sync", "i1", ok=False)
+        self.assertIn("speculative draft", p.stderr)
 
 
 class TestSpecDocs(unittest.TestCase):
