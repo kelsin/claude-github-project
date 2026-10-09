@@ -397,9 +397,9 @@ def cmd_prepare(a):
         return
     res["authorTrusted"] = author_trusted(it)
     d = load_data()
-    snap = d.get("approvedTouches", {}).get(a.item) or []  # [] when the story has no approved snapshot
+    snap = d.get("approvedTouches", {}).get(a.item)  # None when the story has no approved snapshot
     res["plan"] = {"rating": (d.get("ratings") or {}).get(a.item, {}).get("rating"),  # the last rating, whatever column it was given in
-                   "declared": [norm_path(t) for t in d.get("touches", {}).get(a.item, [])], "approved": [norm_path(t) for t in snap]}
+                   "declared": [norm_path(t) for t in d.get("touches", {}).get(a.item, [])], "approved": None if snap is None else [norm_path(t) for t in snap]}
     from .epics import state  # epics imports this module
     split = state(load_data(), a.item)
     if split:
