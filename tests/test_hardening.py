@@ -703,6 +703,15 @@ class TestWorktreeCleanup(test_cgp.SyncBase):
         self.cgp("list", "--brief")
         self.assertFalse(os.path.isdir(self.wt))
 
+    def test_a_merged_pr_keeps_commits_made_on_a_detached_head(self):
+        self.commit()
+        self.set_pr("MERGED")
+        self.git(self.wt, "checkout", "-q", "--detach")
+        self.commit("extra.txt")
+        self.finish()
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+
     def test_a_merged_pr_that_lacks_a_local_commit_keeps_a_dirty_worktree(self):
         self.commit()
         first = self.head()

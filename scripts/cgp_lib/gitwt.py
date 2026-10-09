@@ -216,10 +216,32 @@ def dirty_summary(wt):
 
 
 def merged_contained(wt, it, view):
-    """The story's PR is merged and its local branch (not a detached HEAD) is inside the PR's head: nothing the PR lacks is committed here.
-    A head object this clone lacks, or an unreachable GitHub, is not contained."""
-    return view.get("state") == "MERGED" and bool(view.get("headRefOid")) and subprocess.run(
-        ["git", "-C", wt, "merge-base", "--is-ancestor", f"refs/heads/cgp/{it['number']}", view["headRefOid"]], capture_output=True).returncode == 0
+    """The story's PR is merged and everything committed here is inside the PR's head: the local branch, and HEAD too (a detached HEAD, or
+    a stopped rebase, may hold commits the branch ref does not). A head object this clone lacks, an unreachable GitHub or anything
+    unclear is not contained."""
+    oid = view.get("headRefOid")
+    if view.get("state") != "MERGED" or not oid:
+        return False
+
+    def git_ok(*args):
+        p = subprocess.run(["git", "-C", wt, *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        return p.stdout.strip() if p.returncode == 0 else None
+    if git_ok("merge-base", "--is-ancestor", f"refs/heads/cgp/{it['number']}", oid) is None:
+        return False
+    try:
+        if not rebase_in_progress(wt):
+            return git_ok("merge-base", "--is-ancestor", "HEAD", oid) is not None
+        merge_dir = os.path.join(wt, git(wt, "rev-parse", "--git-path", "rebase-merge"))
+        if not os.path.isdir(merge_dir):  # rebase-apply: no record of what was replayed
+            return False
+        with open(os.path.join(merge_dir, "onto"), encoding="utf-8") as f:
+            onto = f.read().strip()
+        with open(os.path.join(merge_dir, "done"), encoding="utf-8") as f:
+            picks = sum(1 for line in f if line.split(" ", 1)[0] in ("pick", "p", "reword", "r", "edit", "e", "squash", "s", "fixup", "f"))
+        ahead = git_ok("rev-list", "--count", f"{onto}..HEAD")
+        return ahead is not None and int(ahead) <= picks
+    except (OSError, SystemExit, ValueError):
+        return False
 
 
 def uncommitted_work(wt):
@@ -228,6 +250,8 @@ def uncommitted_work(wt):
     if rebase_in_progress(wt):
         return "a rebase is still in progress"
     summary = dirty_summary(wt)
+    if summary and summary.startswith("git cannot"):
+        return summary
     return f"it has uncommitted changes ({summary})" if summary else None
 
 
