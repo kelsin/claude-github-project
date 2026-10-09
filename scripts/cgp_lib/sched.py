@@ -291,7 +291,8 @@ def snapshot(c):
     reasons.update({i["item"]: f"queued: all {cap} worker slots are busy" for i in queued})
     held_back = set() if stop else {i["item"] for i in deferred if starting(i)} | {i["item"] for i in queued}
     sync_story_field(c, live, held_back, in_flight)
-    status = "done" if not live else "work" if batch else "idle"  # idle also when the cap is full
+    fresh = created - live_ids  # stories intake just filed: live work this cycle
+    status = "done" if not live and not fresh else "work" if batch else "idle"  # idle also when the cap is full
     stalled = stalled_workers(c)
     check(c, items, stalled)
     snap = {
@@ -299,7 +300,7 @@ def snapshot(c):
         "stopRequested": stop_requested(),
         "board": c["board"],
         "counts": counts,
-        "remaining": len(live),
+        "remaining": len(live) + len(fresh),
         "batch": batch,
         "inFlight": sorted(in_flight),
         "actionableTotal": len(actionable),

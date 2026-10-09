@@ -259,8 +259,10 @@ elif args[0] == "api" and re.match(r"repos/[^/]+/[^/]+/issues(\?|$)", next((a fo
         print(json.dumps(issue))
     else:
         want = re.search(r"labels=([^&]+)", path)
+        creator = re.search(r"creator=([^&]+)", path)
         print(json.dumps([{"user": {"login": "kelsin"}, "author_association": "OWNER", **i}
-                          for i in lst if not want or want.group(1) in [l["name"] for l in i["labels"]]]))
+                          for i in lst if (not want or want.group(1) in [l["name"] for l in i["labels"]])
+                          and (not creator or creator.group(1) == (i.get("user") or {"login": "kelsin"})["login"])]))
 elif args[0] == "api" and any(re.fullmatch(r"repos/[^/]+/[^/]+/issues/\d+/dependencies/blocked_by", a) for a in args):
     path = next(a for a in args if a.startswith("repos/"))
     m = re.match(r"repos/([^/]+/[^/]+)/issues/(\d+)/", path)

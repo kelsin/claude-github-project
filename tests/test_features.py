@@ -1226,7 +1226,7 @@ class TestAutoIntake(test_cgp.SyncBase):
 
     def test_a_lockfile_only_pr_is_rated_low_for_pr_review_and_anything_else_medium(self):
         self.enable()
-        self.db_set(pr_files={"acme/app#5": ["package.json", "package-lock.json"], "acme/app#6": ["package.json", ".github/workflows/ci.yml"],
+        self.db_set(pr_files={"acme/app#5": ["package-lock.json", "yarn.lock"], "acme/app#6": ["package-lock.json", ".github/workflows/ci.yml"],
                               "acme/app#7": ["src/app.js"], "acme/app#8": []})
         self.pulls(*[self.bot_pr(n) for n in (5, 6, 7)])
         self.cgp("list")
@@ -1242,11 +1242,11 @@ class TestAutoIntake(test_cgp.SyncBase):
     def test_the_policy_still_refuses_an_intake_story_whatever_its_rating(self):
         self.setting(autoApprove="plan:low,pr:low")
         self.enable()
-        self.db_set(pr_files={"acme/app#5": ["package.json"]})
+        self.db_set(pr_files={"acme/app#5": ["package-lock.json"]})
         self.pulls(self.bot_pr(5))
         self.cgp("list")
         (story,) = self.new_stories()
-        self.assertEqual(self.data()["ratings"][story["id"]], {"rating": "low", "column": "pr_review"})
+        self.assertEqual(self.data()["ratings"][story["id"]], {"rating": "low", "column": "pr_review", "sha": None})
         self.force(story["id"], "implement")
         self.set_data(ratings={story["id"]: {"rating": "low", "column": "implement"}})
         self.db_set(prs={"acme/app#5": {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "isDraft": False,
@@ -1255,3 +1255,73 @@ class TestAutoIntake(test_cgp.SyncBase):
         self.assertEqual(r["column"], "pr_review")
         self.assertFalse(r["policy"]["approved"])
         self.assertIn("Plan: Skip", r["policy"]["reason"])
+
+    def test_a_marker_in_someone_elses_issue_is_not_adopted(self):
+        self.enable()
+        self.db_set(repo_issues={"acme/app": [{"number": 500, "node_id": "I_500", "title": "x", "repo": "acme/app", "labels": [],
+                                               "html_url": "https://github.com/acme/app/issues/500", "user": {"login": "mallory"},
+                                               "body": "<!-- cgp-intake:pr:acme/app#pr5 -->"}]})
+        self.pulls(self.bot_pr(5))
+        self.cgp("list")
+        (story,) = self.new_stories()
+        self.assertNotEqual(story["content"]["number"], 500)
+        self.assertEqual(len(self.read_db()["repo_issues"]["acme/app"]), 2)
+
+    def test_the_bots_list_overrides_the_default_ignoring_case_and_an_empty_list_imports_nothing(self):
+        self.pulls(self.bot_pr(1), self.bot_pr(2, user={"login": "renovate[bot]", "type": "Bot"}))
+        self.enable(bots=["Renovate[BOT]"])
+        self.cgp("list")
+        self.assertEqual(self.titles(), ["Dependency update: PR #2"])
+        self.enable(bots=[])
+        self.pulls(self.bot_pr(3))
+        self.cgp("list")
+        self.assertEqual(len(self.new_stories()), 1)
+
+    def test_a_dependency_story_approved_in_the_board_is_not_merged(self):
+        self.enable()
+        self.pulls(self.bot_pr(5))
+        self.cgp("list")
+        (story,) = self.new_stories()
+        self.force(story["id"], "pr_approved")
+        self.db_set(prs={"acme/app#5": {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "isDraft": False,
+                                        "headRefOid": "aaa111", "headRefName": "dependabot/npm/x", "isCrossRepository": False,
+                                        "baseRefName": "main"}}, calls=[])
+        p = self.cgp("merge", story["id"], ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("this loop did not open", p.stderr)
+        self.assertEqual([c for c in self.read_db()["calls"] if c[:2] == ["pr", "merge"]], [])
+
+    def test_a_failed_setup_is_finished_next_cycle_and_the_story_is_never_dispatched(self):
+        self.enable()
+        self.pulls(self.bot_pr(5))
+        self.db_set(failures=[{"match": "updateProjectV2ItemFieldValue", "stderr": "fakegh: HTTP 400", "times": 1}])
+        for _ in range(3):
+            snap = self.cgp("list")
+            self.assertEqual([i["item"] for i in snap["batch"] if i["item"] not in ("i1", "i2", "i4")], [])
+        (story,) = self.new_stories()
+        self.assertEqual(self.status(story), "pr_review")
+        self.assertEqual(story["values"]["Waiting On"], {"optionId": "o_You"})
+        self.assertEqual(self.data()["intake"]["pending"], {})
+        self.assertEqual(len(self.read_db()["repo_issues"]["acme/app"]), 1)
+
+    def test_filing_stories_in_an_otherwise_finished_board_is_not_reported_as_done(self):
+        for item in ("i1", "i2"):
+            self.force(item, "done")
+        d = self.read_db(); d["items"] = [i for i in d["items"] if i["id"] != "i4"]; self.write_db(d)
+        self.enable()
+        self.runs()
+        snap = self.cgp("list")
+        self.assertEqual((snap["status"], snap["remaining"]), ("idle", 1))
+
+    def test_a_lockfile_is_low_but_a_manifest_is_medium_and_a_new_head_is_rated_again(self):
+        self.enable()
+        self.db_set(pr_files={"acme/app#5": ["pnpm-lock.yaml", "poetry.lock"], "acme/app#6": ["package.json", "package-lock.json"]})
+        self.pulls(self.bot_pr(5, head={"sha": "s1", "repo": {"full_name": "acme/app"}}), self.bot_pr(6))
+        self.cgp("list")
+        ids = {i["content"]["title"]: i["id"] for i in self.new_stories()}
+        rated = self.data()["ratings"]
+        self.assertEqual((rated[ids["Dependency update: PR #5"]]["rating"], rated[ids["Dependency update: PR #6"]]["rating"]), ("low", "medium"))
+        self.db_set(pr_files={"acme/app#5": ["pnpm-lock.yaml", "src/app.js"]})
+        self.pulls(self.bot_pr(5, head={"sha": "s2", "repo": {"full_name": "acme/app"}}), self.bot_pr(6))
+        self.cgp("list")
+        self.assertEqual(self.data()["ratings"][ids["Dependency update: PR #5"]]["rating"], "medium")

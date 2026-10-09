@@ -16,14 +16,14 @@ from .util import printable
 from .gh import gh, rest, viewer
 from .store import load_data, update_data
 from .board import set_single, set_text
-from .intake import priority_option, put_on_board
+from .intake import add_item, priority_option, put_on_board
 from .policy import MAX_FILES, vet
 from .repoconf import repo_config
 from .story import sync_links
 
-LOCKFILES = ("package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "*.lock", "go.mod", "go.sum",
-             "requirements*.txt", "pyproject.toml")
+LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "*.lock", "go.sum")  # real lockfiles; manifests are rated medium
 _checked = {}  # board id -> when this process last looked at the repos' config
+_repaired = {}  # pending key -> when this process last tried to finish it
 
 
 def sanitize(text, limit=120):
@@ -44,7 +44,7 @@ def open_story(by_item, entry):
 def find_marked(repo, marker):
     """An issue this account already created for the marker (its creation succeeded but the board add did not), else None."""
     me = viewer()
-    for issue in api(f"repos/{repo}/issues?state=all&creator={quote(me, safe='')}&per_page=100"):
+    for issue in rest(f"repos/{repo}/issues?state=all&creator={quote(me, safe='')}"):
         if "pull_request" not in issue and (issue.get("user") or {}).get("login") == me and marker in (issue.get("body") or ""):
             return issue
     return None
@@ -55,15 +55,18 @@ def file_story(c, items, repo, key, kind, title, body, finish, extra):
     in its body is searched for before one is created, so a crash between creating the issue and adding it to the board (or a wiped
     state file) finds the issue again instead of filing a second one."""
     marker = f"<!-- cgp-intake:{kind}:{key} -->"
-    update_data(lambda d: d.setdefault("intake", {}).setdefault("pending", {}).setdefault(key, {"at": time.time()}))
+    update_data(lambda d: d.setdefault("intake", {}).setdefault("pending", {}).setdefault(key, {"at": time.time(), "kind": kind, "repo": repo, **extra}))
     issue = find_marked(repo, marker)
     if not issue:
         issue = json.loads(gh("api", f"repos/{repo}/issues", "-f", f"title={title}", "-f", f"body={body}\n\n{marker}").stdout)
     item = next((i["item"] for i in items if i["issueRepo"] == repo and i["number"] == issue["number"]), None) \
-        or put_on_board(c, issue["node_id"])
+        or (put_on_board(c, issue["node_id"]) if kind == "run" else add_item(c, issue["node_id"]))
     finish(item, issue["number"])
-    entry = {"at": time.time(), "repo": repo, "item": item, "number": issue["number"], **extra}
+    return complete(key, kind, {"at": time.time(), "repo": repo, "item": item, "number": issue["number"], **extra})
 
+
+def complete(key, kind, entry):
+    """Turn the pending claim into a permanent entry."""
     def done(d):
         sec = d.setdefault("intake", {})
         sec.setdefault("pending", {}).pop(key, None)
@@ -128,33 +131,65 @@ def rate_pr(c, repo, number):
     return "low" if plain and vet(c, [repo], names, ["**"]) is None else "medium"
 
 
+def dep_finish(c, items, repo, n, item, sha):
+    """Everything a dependency story needs, each step safe to repeat. The in-memory item is updated first and Waiting On is set before the
+    Status, so a failure half way never leaves a story that a worker could be dispatched for (an empty Status reads as Todo)."""
+    fields, url = c["fields"], f"https://github.com/{repo}/pull/{n}"
+    for i in items:
+        if i["item"] == item:
+            i.update(column="pr_review", waiting=True, waitingOn="You", skipPlan=True, plan="Skip", pr=url)
+    if fields["waiting"].get("you"):
+        set_single(c, item, fields["waiting"]["id"], fields["waiting"]["you"])
+    set_single(c, item, fields["status"]["id"], fields["status"]["options"]["pr_review"])
+    if fields.get("plan"):
+        set_text(c, item, fields["plan"], "Skip")
+    set_text(c, item, fields["pr"], url)
+    sync_links(c, item)
+    rate_and_store(c, repo, n, item, sha)
+
+
+def rate_and_store(c, repo, n, item, sha):
+    rating = {"rating": rate_pr(c, repo, n), "column": "pr_review", "sha": sha}
+    update_data(lambda d: d.setdefault("ratings", {}).__setitem__(item, rating))
+    update_data(lambda d: d.get("intake", {}).get("prs", {}).get(f"{repo}#pr{n}", {}).__setitem__("sha", sha))
+
+
+def repair(c, items):
+    """Finish a dependency story whose creation was cut short (it is on the board, maybe still looking like Todo). Not throttled by
+    intakeSeconds, but tried at most once a minute per story."""
+    for key, p in list(load_data().get("intake", {}).get("pending", {}).items()):
+        if p.get("kind") != "pr" or time.time() - _repaired.get(key, 0) < 60:
+            continue
+        _repaired[key] = time.time()
+        issue = find_marked(p["repo"], f"<!-- cgp-intake:pr:{key} -->")
+        item = next((i["item"] for i in items if issue and i["issueRepo"] == p["repo"] and i["number"] == issue["number"]), None)
+        if item:
+            dep_finish(c, items, p["repo"], p["pr"], item, p.get("sha"))
+            complete(key, "pr", {"at": time.time(), "repo": p["repo"], "item": item, "number": issue["number"], "pr": p["pr"], "sha": p.get("sha")})
+
+
 def scan_deps(c, items, repo, conf, state, by_item, budget, created):
     bots = {b.lower() for b in conf.get("bots", INTAKE_BOTS)}
     pulls = api(f"repos/{repo}/pulls?state=open&sort=created&direction=asc&per_page=100")
     made = 0
-    fields = c["fields"]
     for p in pulls:
         user, head, base = p.get("user") or {}, (p.get("head") or {}).get("repo") or {}, (p.get("base") or {}).get("repo") or {}
-        n = p["number"]
+        n, sha = p["number"], (p.get("head") or {}).get("sha")
         key = f"{repo}#pr{n}"
-        if key in state.get("prs", {}) or made >= budget or p.get("draft") or user.get("type") != "Bot" \
+        known = state.get("prs", {}).get(key)
+        if known:  # a new head: the rating of the files it had no longer holds
+            if sha and known.get("sha") != sha and open_story(by_item, known):
+                rate_and_store(c, repo, n, known["item"], sha)
+                known["sha"] = sha
+            continue
+        if made >= budget or p.get("draft") or user.get("type") != "Bot" \
                 or (user.get("login") or "").lower() not in bots or not head.get("full_name") \
                 or head.get("full_name") != base.get("full_name"):
             continue
         url = f"https://github.com/{repo}/pull/{n}"
-
-        def finish(item, number, n=n, url=url):
-            set_single(c, item, fields["status"]["id"], fields["status"]["options"]["pr_review"])
-            if fields.get("plan"):
-                set_text(c, item, fields["plan"], "Skip")
-            set_text(c, item, fields["pr"], url)
-            sync_links(c, item)
-            if fields["waiting"].get("you"):
-                set_single(c, item, fields["waiting"]["id"], fields["waiting"]["you"])
-            rating = {"rating": rate_pr(c, repo, n), "column": "pr_review"}
-            update_data(lambda d: d.setdefault("ratings", {}).__setitem__(item, rating))
         entry = file_story(c, items, repo, key, "pr", f"Dependency update: PR #{n}",
-                           f"A bot opened {url}. Review and merge it there; this story is Done once it is merged or closed.", finish, {"pr": n})
+                           f"A bot opened {url}. Review and merge it there; this story is Done once it is merged or closed.",
+                           lambda item, number, n=n, sha=sha: dep_finish(c, items, repo, n, item, sha), {"pr": n, "sha": sha})
         by_item[entry["item"]] = {"closed": False, "column": "pr_review"}
         created.add(entry["item"])
         state.setdefault("prs", {})[key] = entry
@@ -178,15 +213,28 @@ def room(opts, repo, state, by_item):
 def run_intake(c, items, created=None):
     """One intake pass (the ids of the board items it creates are added to `created`). None when nothing was scanned (not due, or no
     repo opted in), else the list of per-repo errors."""
+    created = set() if created is None else created
+    by_item = {i["item"]: i for i in items}
+    errors = []
+    try:
+        repair(c, items)
+    except (SystemExit, Exception) as e:
+        errors.append(f"repair: {e if isinstance(e, Exception) else 'a gh call failed (see stderr)'}")
+    scanned = scan(c, items, by_item, created, errors)
+    return errors if errors or scanned else None
+
+
+def scan(c, items, by_item, created, errors):
+    """The throttled part of run_intake; whether anything was scanned."""
     interval, now = c["settings"]["intakeSeconds"], time.time()
     key = c["board"]["id"]
     if now - _checked.get(key, 0) < interval:
-        return None
+        return False
     _checked[key] = now
     conf = {r: (repo_config(c, r, fresh=True).get("intake") or {}) for r in c["repos"]}  # fresh: a long-lived process sees config changes
     conf = {r: v for r, v in conf.items() if v.get("redMain") or v.get("dependencies")}
     if not conf:
-        return None
+        return False
     due = []
 
     def claim(d):  # compare-and-set: of several snapshots in the same window only one scans
@@ -195,15 +243,12 @@ def run_intake(c, items, created=None):
         due.extend(r for r in conf if t - at.get(r, 0) >= interval)
         at.update({r: t for r in due})
         for kind in ("runs", "prs"):
-            sec[kind] = {k: v for k, v in sec.get(kind, {}).items() if t - v.get("at", t) < INTAKE_KEEP_SECONDS}
+            sec[kind] = {k: v for k, v in sec.get(kind, {}).items() if t - v.get("at", t) < INTAKE_KEEP_SECONDS or open_story(by_item, v)}
         sec["pending"] = {k: v for k, v in sec.get("pending", {}).items() if t - v.get("at", t) < INTAKE_KEEP_SECONDS}
     update_data(claim)
     if not due:
-        return None
+        return False
     state = load_data().get("intake", {})
-    by_item = {i["item"]: i for i in items}
-    errors = []
-    created = set() if created is None else created
     for repo in due:
         try:
             opts = conf[repo]
@@ -215,4 +260,4 @@ def run_intake(c, items, created=None):
                 scan_deps(c, items, repo, opts, state, by_item, room(opts, repo, state, by_item), created)
         except (SystemExit, Exception) as e:  # one repo's failure (a gh error, an unexpected answer) must not stop the others or the loop
             errors.append(f"{repo}: {e if isinstance(e, Exception) else 'a gh call failed (see stderr)'}")
-    return errors
+    return True
