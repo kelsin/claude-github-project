@@ -23,7 +23,7 @@ ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKI
                "mkdocs.yml", "**/mkdocs.yml", "book.toml", "**/book.toml", "docusaurus.config.*", "**/docusaurus.config.*",
                "docs/conf.py", "docs/_config.yml", "docs/package.json", "**/.vitepress/**", "**/.docusaurus/**", ".readthedocs.y*ml",
                "**/CLAUDE*.md", "**/GEMINI.md", ".cursor/**", ".windsurf/**", ".agents/**", "**/.claude/**", "**/*.mdc", "**/CONTRIBUTING.md",
-               ".github/**"]
+               ".github/**", ".cgp-rules.md"]
 
 
 def parse(value):
