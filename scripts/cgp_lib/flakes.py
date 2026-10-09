@@ -16,7 +16,8 @@ MAX_FLAKED = 3  # more flaked jobs than this in one run look like an infrastruct
 CLAIM_TTL = 600  # seconds after which a claim of a caller that never finished can be retaken
 KEEP = 200  # entries kept per repo that hold no story and no live claim
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩]")
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]")
+_LINK = re.compile(r"https://github\.com/[A-Za-z0-9_./-]+")
 _MARKUP = re.compile(r"[`@#<>]")
 _MATRIX = re.compile(r"\s*\([^()]*\)\s*$")
 _PARAM = re.compile(r"\[[^\[\]]*\]\s*$")
@@ -36,7 +37,7 @@ def flake_body(job, workflow, tests, link, count, key):
     lines = [f"The CI job `{clean(job, 100)}` (workflow `{clean(workflow, 100)}`) failed and then passed on a rerun without a code change.", ""]
     if tests:
         lines += ["Failing tests:"] + [f"- `{_PARAM.sub('', clean(t, 200))}`" for t in tests] + [""]
-    if re.fullmatch(r"https://github\.com/[\w./-]+", link or ""):
+    if _LINK.fullmatch(link or ""):
         lines.append(f"Failed run: {link}")
     lines += [f"Flaky observations so far: {count}", "", f"<!-- cgp-flake:{key} -->"]
     return "\n".join(lines)
@@ -50,6 +51,10 @@ def capture(repo, pr, head, jobs):
     """Count and file the flaky jobs of one triage; returns the fields ci-triage adds to its output."""
     res = {"flakes": [], "filed": []}
     errors = []
+    by_key = {}
+    for j in jobs:  # one per key: matrix legs are one flake
+        by_key.setdefault(flake_key(repo, j["name"]), j)
+    jobs = list(by_key.values())
     if len(jobs) > MAX_FLAKED:
         res["skipped"] = "many"
         return res
@@ -57,7 +62,7 @@ def capture(repo, pr, head, jobs):
         c = cfg()
         hold = priority_option(c, "Hold")
     except (SystemExit, Exception) as e:
-        return dict(res, fileError=str(e) or "no Hold priority")
+        return dict(res, fileError=fail_text(e, "no Hold priority"))
     for j in jobs:
         key = flake_key(repo, j["name"])
         entry = {"key": key, "job": clean(j["name"], 100), "tests": [clean(t, 200) for t in j.get("tests", [])]}
@@ -69,11 +74,15 @@ def capture(repo, pr, head, jobs):
             elif mine.get("comment"):
                 comment(repo, entry["issue"], j, mine["count"])
         except (SystemExit, Exception) as e:
-            errors.append(str(e) or "gh failed")
+            errors.append(fail_text(e, "gh failed"))
         res["flakes"].append(entry)
     if errors:
         res["fileError"] = "; ".join(errors)[:300]
     return res
+
+
+def fail_text(e, default):
+    return "gh failed (see stderr)" if isinstance(e, SystemExit) else str(e) or default
 
 
 def note_observation(repo, pr, head, key, entry, mine):
@@ -85,7 +94,9 @@ def note_observation(repo, pr, head, key, entry, mine):
             e.update(count=e["count"] + 1, lastSha=head, lastPr=pr, lastSeen=now_iso(), job=entry["job"], tests=entry["tests"])
             mine["fresh"] = True
         mine["count"] = e["count"]
-        if e["count"] >= FLAKY_FILE_AT and (not e["issue"] or (e["issue"] == "pending" and age_seconds(e.get("claimedAt")) > CLAIM_TTL)):
+        stale = age_seconds(e.get("claimedAt")) > CLAIM_TTL
+        unboarded = e["issue"] and e["issue"] != "pending" and not e.get("onBoard")  # created, but putting it on the board failed
+        if e["count"] >= FLAKY_FILE_AT and (not e["issue"] or (e["issue"] == "pending" and stale) or (unboarded and (stale or not e.get("claimedAt")))):
             e.update(issue="pending", claimedAt=now_iso())
             mine["claimed"] = True
         elif e["issue"] and e["issue"] != "pending":
@@ -99,22 +110,25 @@ def file_story(c, repo, key, j, entry, hold, count, res):
     def store(number):  # as soon as the issue exists, before it goes on the board: a partial failure is adopted next time
         url = f"https://github.com/{repo}/issues/{number}"
         entry["issue"] = url
-        update_data(lambda d: d["flakes"][repo][key].update(issue=url, claimedAt=None))
+        update_data(lambda d: d["flakes"][repo][key].update(issue=url, claimedAt=now_iso()))  # still claimed until it is on the board
     try:
         story = create_story(c, repo, f"Flaky: {entry['job']}", flake_body(j["name"], j.get("workflow"), entry["tests"], j.get("link"), count, key),
                              hold, on_issue=store, labels=[LABEL], marker=f"<!-- cgp-flake:{key} -->")
+        update_data(lambda d: d["flakes"][repo][key].update(onBoard=True, claimedAt=None))
         res["filed"].append(story["url"])
     finally:
         if not entry["issue"] or entry["issue"] == "pending":  # nothing was created: let the next flake retry
             entry["issue"] = None
             update_data(lambda d: d["flakes"][repo][key].update(issue=None, claimedAt=None))
+        else:  # created but maybe not on the board: the next observation adopts it
+            update_data(lambda d: d["flakes"][repo][key].update(claimedAt=None) if not d["flakes"][repo][key].get("onBoard") else None)
 
 
 def comment(repo, url, j, count):
     number = url.rsplit("/", 1)[-1]
     if json.loads(gh("api", f"repos/{repo}/issues/{number}").stdout).get("state") == "closed":
         return  # a closed story is not refiled or nagged: reopen it by hand if the flake is back
-    link = j.get("link") if re.fullmatch(r"https://github\.com/[\w./-]+", j.get("link") or "") else ""
+    link = j.get("link") if _LINK.fullmatch(j.get("link") or "") else ""
     post_comment(repo, number, f"Flaked again ({count} observations so far)." + (f" Failed run: {link}" if link else ""))
 
 

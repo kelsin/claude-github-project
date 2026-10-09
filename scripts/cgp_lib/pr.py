@@ -55,7 +55,7 @@ def failed_logs(repo, failed, limit=3):
     return failed
 
 
-TEST_FORMATS = (re.compile(r"FAILED (\S+::[^\s]+)"), re.compile(r"(?<!--- )FAIL: (\w+ \([\w.]+\))"), re.compile(r"● (.+?)\s*$", re.M),
+TEST_FORMATS = (re.compile(r"FAILED (\S+::[^\s]+)"), re.compile(r"(?<!--- )FAIL: (\w+ \([\w.]+\))"), re.compile(r"^[^\t\n]*\t[^\t\n]*\t\S+ +● ([\w .›/:-]{1,200}?) *$", re.M),
                 re.compile(r"--- FAIL: (\S+)"), re.compile(r"test (\S+) \.\.\. FAILED"))
 
 
@@ -119,6 +119,7 @@ def ci_wait(a):
 
 
 RERUNS_PER_PR = 2
+RERUN_MARGIN = 15  # seconds a triage needs left, once the checks settled, to reserve a rerun, make it and look at it
 
 
 def main_failures(repo, base):
@@ -174,7 +175,7 @@ def cmd_ci_triage(a):
 
 def ci_triage(a):
     """After ci-wait said red: flaky (green after one rerun), main-broken (the base branch fails the same jobs) or real. Only the
-    check results and the rerun decide; log text is never read for a verdict."""
+    check results and the rerun decide; log text is never read for a verdict. Every failed check counts, not just the rerun ones."""
     poll, prk = Poll(a.timeout, a.interval), f"{a.repo}#{a.pr}"
     v = pr_view(a.repo, a.pr, check=False)
     head = (v or {}).get("headRefOid")
@@ -186,52 +187,102 @@ def ci_triage(a):
     if checks is None:
         return out({"verdict": state, "head": head})
     rec = load_data().get("reruns", {}).get(prk, {}).get(head)
+    done = rec["jobs"] if rec else []
+    left = rec.get("pendingJobs", []) if rec else []  # failed runs an earlier call did not manage to rerun
+    base = v.get("baseRefName") or "main"
     failed = [x for x in checks if x["bucket"] in ("fail", "cancel")]
-    if rec and not named_red(checks, {j["name"] for j in rec["jobs"]}):  # a rerun of this commit is recorded and came out green
-        return flaky(a, head, rec["jobs"], [dict(j, rerun="pass", mainRed=False) for j in rec["jobs"]])
+    red_names = {x["name"] for x in failed}
+    if rec and not named_red(checks, {j["name"] for j in done}) and not any(j["name"] in red_names for j in left):
+        return settle(a, head, done, done_jobs(done, "pass"), failed, base)  # a rerun of this commit is recorded and came out green
     if not failed:
         return out({"verdict": "none", "head": head, "note": "no failed checks"})
+    if poll.deadline - time.time() < min(RERUN_MARGIN, a.timeout / 2):  # too little time left to rerun and look at it once: a kill would leave a reservation without a rerun
+        return out({"verdict": "pending", "head": head, "note": "too little time left to rerun; run ci-triage again"})
     failed_logs(a.repo, failed, limit=None)
     logs = {run_id(f.get("link")): f["log"] for f in failed if "log" in f}
-    red = main_failures(a.repo, v.get("baseRefName") or "main")
+    red = main_failures(a.repo, base)
     jobs = [{"name": f["name"], "workflow": f.get("workflow") or "", "runId": run_id(f.get("link")), "link": f.get("link") or "",
              "mainRed": f["name"] in red, "rerun": "skipped", "tests": extract_tests(logs.get(run_id(f.get("link")))),
              **({"log": f["log"]} if "log" in f else {})} for f in failed]
     todo = [j for j in jobs if not j["mainRed"]]
     if not todo:
         return out({"verdict": "main-broken", "head": head, "jobs": jobs})
-    if rec or any(not j["runId"] for j in todo):  # a recorded rerun that is still red, or a status no one can rerun
-        return out({"verdict": "real", "head": head, "jobs": jobs, "note": "still red after the rerun" if rec else "a failed check has no workflow run to rerun"})
-    saved = [{k: j[k] for k in ("name", "workflow", "runId", "link", "tests")} for j in todo]
-    ids = sorted({j["runId"] for j in todo})
-    why = reserve_rerun(prk, head, ids, saved)
-    if why:
-        return out({"verdict": "real", "head": head, "jobs": jobs, "note": f"not rerun: {why}"})
-    done = 0
-    for rid in ids:
-        p = gh("run", "rerun", rid, "-R", a.repo, "--failed", check=False)  # never retried; this is the only rerun
-        if p.returncode:
-            if not done:
-                update_data(lambda d: d["reruns"][prk].pop(head, None))
-            err = (p.stderr or p.stdout).strip()[:300]
-            return out({"verdict": "pending" if "409" in err else "unknown", "head": head, "jobs": jobs, "note": f"gh run rerun {rid} failed: {err}"})
-        done += 1
-    names, seen_pending = {j["name"] for j in todo}, False
+    if rec and named_red(checks, {j["name"] for j in done}):
+        return out({"verdict": "real", "head": head, "jobs": jobs, "note": "still red after the rerun"})
+    if rec:  # a recorded rerun was partial: only its remaining runs are rerun now, under the reservation already made
+        saved = [j for j in left if j["name"] in red_names]
+        if not saved:
+            return out({"verdict": "real", "head": head, "jobs": jobs, "note": "still red after the rerun"})
+        done_saved, resume = done, True
+    else:
+        if any(not j["runId"] for j in todo):  # a status no one can rerun
+            return out({"verdict": "real", "head": head, "jobs": jobs, "note": "a failed check has no workflow run to rerun"})
+        saved = [{k: j[k] for k in ("name", "workflow", "runId", "link", "tests")} for j in todo]
+        why = reserve_rerun(prk, head, sorted({j["runId"] for j in todo}), saved)
+        if why:
+            return out({"verdict": "real", "head": head, "jobs": jobs, "note": f"not rerun: {why}"})
+        done_saved, resume = [], False
+    err = rerun_runs(a, prk, head, saved, done_saved, resume)
+    if err:
+        return out(dict(err, head=head, jobs=jobs))
+    saved = done_saved + saved
+    names, seen_pending = {j["name"] for j in saved}, False
     while True:  # right after the rerun gh may still show the old failure: red counts only once a pending state was seen
         checks = pr_checks(a.repo, a.pr)
         if checks is not None:
-            running = any(x["bucket"] == "pending" and x["name"] in names for x in checks)
+            running = any(x["bucket"] == "pending" for x in checks)
             seen_pending = seen_pending or running
             if not running and not named_red(checks, names):
-                return flaky(a, head, saved, [dict(j, rerun="pass" if not j["mainRed"] else "skipped") for j in jobs])
+                return settle(a, head, saved, [dict(j, rerun="pass" if not j["mainRed"] else "skipped") for j in jobs],
+                              [x for x in checks if x["bucket"] in ("fail", "cancel")], base)
             if not running and seen_pending:
                 return out({"verdict": "real", "head": head, "jobs": [dict(j, rerun="fail" if not j["mainRed"] else "skipped") for j in jobs]})
         if not poll.wait():
             return out({"verdict": "pending", "head": head, "jobs": jobs, "note": "rerun still running; run ci-triage again"})
 
 
-def flaky(a, head, saved, jobs):
+def done_jobs(saved, rerun):
+    return [dict(j, rerun=rerun, mainRed=False) for j in saved]
+
+
+def record_reran(prk, head, reran, left):
+    """Rewrite the rerun record to the jobs actually rerun, plus the jobs still to rerun."""
+    update_data(lambda d: d["reruns"][prk][head].update(runs=sorted({j["runId"] for j in reran}), jobs=reran, pendingJobs=left))
+
+
+def rerun_runs(a, prk, head, saved, done_saved, resume):
+    """Rerun the failed jobs of every run of `saved`, once each, never retried. A failure leaves the record listing exactly the
+    runs rerun so far (`done_saved` plus these) and the rest as pendingJobs for a later call; None when all went through."""
+    ok = []
+    for rid in sorted({j["runId"] for j in saved}):
+        p = gh("run", "rerun", rid, "-R", a.repo, "--failed", check=False)
+        if p.returncode:
+            reran = done_saved + [j for j in saved if j["runId"] in ok]
+            if reran:
+                record_reran(prk, head, reran, [j for j in saved if j["runId"] not in ok])
+            elif not resume:
+                update_data(lambda d: d["reruns"][prk].pop(head, None))
+            err = (p.stderr or p.stdout).strip()[:300]
+            return {"verdict": "pending" if "409" in err or reran else "unknown", "note": f"gh run rerun {rid} failed: {err}"}
+        ok.append(rid)
+    if resume:
+        record_reran(prk, head, done_saved + saved, [])
+    return None
+
+
+def settle(a, head, saved, jobs, others, base):
+    """The rerun jobs passed. Any other failed check decides over the flake: all of them red on the base branch is main-broken, else
+    real. The flake is captured either way."""
+    names = {j["name"] for j in saved}
+    others = [x for x in others if x["name"] not in names]
     res = {"verdict": "flaky", "head": head, "jobs": jobs}
+    if others:
+        red = main_failures(a.repo, base)
+        known = {j["name"] for j in jobs}
+        res["jobs"] = jobs + [{"name": x["name"], "workflow": x.get("workflow") or "", "runId": run_id(x.get("link")), "link": x.get("link") or "",
+                               "mainRed": x["name"] in red, "rerun": "skipped", "tests": []} for x in others if x["name"] not in known]
+        res["verdict"] = "main-broken" if all(x["name"] in red for x in others) else "real"
+        res["note"] = "other failed checks remain after the rerun"
     res.update(capture(a.repo, a.pr, head, saved))
     out(res)
 

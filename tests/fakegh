@@ -125,7 +125,7 @@ elif args[:2] == ["run", "view"]:
 elif args[:2] == ["run", "rerun"]:
     db.setdefault("rerun_calls", []).append(args)  # db["rerun_rc"]: exit code, with db["rerun_stderr"]
     save()
-    if db.get("rerun_rc"):
+    if db.get("rerun_rc") or args[2] in db.get("rerun_fail_ids", []):  # db["rerun_fail_ids"]: only these run ids fail
         sys.exit(db.get("rerun_stderr", "gh: HTTP 500"))
 elif args[:2] == ["api", "graphql"]:
     body = json.loads(stdin)
@@ -159,6 +159,12 @@ elif args[:2] == ["api", "graphql"]:
         r = {}
     elif "addProjectV2ItemById" in q:
         issue = next(i for lst in db.get("repo_issues", {}).values() for i in lst if i["node_id"] == v["c"])
+        again = next((i for i in db["items"] if i["content"].get("number") == issue["number"]
+                      and i["content"].get("repository", {}).get("nameWithOwner") == issue["repo"]), None)
+        if again:  # like GitHub: adding what is on the board returns the item
+            save()
+            print(json.dumps({"data": {"addProjectV2ItemById": {"item": {"id": again["id"]}}}}))
+            sys.exit(0)
         item = {"id": f"item{len(db['items']) + 1}", "values": {}, "content": {
             "__typename": "Issue", "number": issue["number"], "title": issue["title"], "state": "OPEN", "url": issue["html_url"],
             "repository": {"nameWithOwner": issue["repo"]}}}

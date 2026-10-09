@@ -1717,10 +1717,45 @@ class TestCiTriage(PRBase):
         self.db_set(checks_seq=[[a, b], [a, dict(b, bucket="pending")], [a, dict(b, bucket="pass")]],
                     main_checks=[{"name": "lint", "conclusion": "timed_out"}])
         r = self.tri()
-        self.assertEqual(r["verdict"], "flaky")
+        self.assertEqual(r["verdict"], "main-broken")  # the main-red job is still red: not flaky
         self.assertEqual(self.reruns(), ["71"])
         self.assertEqual([j["mainRed"] for j in r["jobs"]], [True, False])
-        self.assertEqual([f["job"] for f in r["flakes"]], ["unit"])  # the main-red job is not a flake
+        self.assertEqual([f["job"] for f in r["flakes"]], ["unit"])  # the main-red job is not a flake, the rerun one is captured
+        self.db_set(checks_seq=[[a, dict(b, bucket="pass")]])  # the next call: still main-broken, nothing rerun or counted again
+        self.assertEqual(self.tri()["verdict"], "main-broken")
+        self.assertEqual(self.reruns(), ["71"])
+        self.assertEqual(list(self.flakes().values())[0]["count"], 1)
+
+    def test_other_red_checks_after_the_rerun_make_it_real(self):
+        b, dep = self.chk("unit", run="71"), self.chk("deploy", "skipping", run="72")
+        self.db_set(checks_seq=[[b, dep], [dict(b, bucket="pending"), dep], [dict(b, bucket="pass"), dict(dep, bucket="fail")]])
+        self.assertEqual(self.tri()["verdict"], "real")  # a dependent job newly failing is not a flake
+        self.db_set(checks_seq=[[dict(b, bucket="pass"), dict(dep, bucket="fail")]])
+        self.assertEqual(self.tri()["verdict"], "real")
+        self.assertEqual(self.reruns(), ["71"])
+
+    def test_a_partial_multi_run_rerun_is_retried_not_judged_real(self):
+        a, b = self.chk("a", run="70"), self.chk("b", run="71")
+        self.db_set(checks_seq=[[a, b]], rerun_fail_ids=["71"])
+        r = self.tri()
+        self.assertNotEqual(r["verdict"], "real")
+        rec = self.data()["reruns"]["acme/app#1"]["aaa111"]
+        self.assertEqual((rec["runs"], [j["name"] for j in rec["jobs"]]), (["70"], ["a"]))  # only what was rerun
+        self.db_set(checks_seq=[[dict(a, bucket="pass"), b]])
+        r = self.tri()  # the first run came out green but b was never rerun: not real
+        self.assertNotEqual(r["verdict"], "real")
+        self.assertEqual(self.reruns(), ["70", "71", "71"])  # b retried
+        pa = dict(a, bucket="pass")
+        self.db_set(checks_seq=[[pa, b], [pa, dict(b, bucket="pending")], [pa, dict(b, bucket="pass")]], rerun_fail_ids=[])
+        self.assertEqual(self.tri()["verdict"], "flaky")
+        self.assertEqual(self.reruns(), ["70", "71", "71", "71"])
+
+    def test_too_little_time_left_is_pending_before_any_reservation(self):
+        self.db_set(checks=[self.chk()])
+        r = self.cgp("ci-triage", "acme/app", "1", "--interval", "0", "--timeout", "0")
+        self.assertEqual(r["verdict"], "pending")
+        self.assertEqual(self.reruns(), [])
+        self.assertEqual(self.data().get("reruns", {}).get("acme/app#1", {}), {})
 
     def test_none_unknown_and_stale(self):
         self.db_set(checks=[self.chk("t", "pass")])
@@ -1768,12 +1803,14 @@ class TestCiTriage(PRBase):
             from cgp_lib.pr import extract_tests
         finally:
             sys.path.remove(os.path.join(ROOT, "scripts"))
-        log = "FAILED a/b.py::t[1] - x\nFAIL: test_x (m.C)\n  ● Suite › case\n--- FAIL: TestG (1s)\ntest m::t ... FAILED\nFAILED a/b.py::t[1] - x"
+        log = "FAILED a/b.py::t[1] - x\nFAIL: test_x (m.C)\njob\tstep\t2026-01-01T00:00:00Z   ● Suite › case\n--- FAIL: TestG (1s)\ntest m::t ... FAILED\nFAILED a/b.py::t[1] - x"
         self.assertEqual(extract_tests(log), ["a/b.py::t[1]", "test_x (m.C)", "Suite › case", "TestG", "m::t"])
         many = "\n".join(f"FAILED f.py::t{n}" for n in range(30))
         self.assertEqual(len(extract_tests(many)), 20)
         self.assertEqual(len(extract_tests("FAILED f.py::" + "x" * 500)[0]), 200)
         self.assertEqual(extract_tests("FAILED f.py::a\x1b[31mb\x07"), ["f.py::ab"])
+        echo = "job\tstep\t2026-01-01T00:00:00Z ● token=abc `x` @user <img src=x>\n  ● raw text without a prefix\njob\tstep\t2026-01-01T00:00:00Z ● " + "w" * 300
+        self.assertEqual(extract_tests(echo), [])
 
     def test_failed_logs_reads_every_failed_run_without_a_limit(self):
         sys.path.insert(0, os.path.join(ROOT, "scripts"))
@@ -1876,9 +1913,13 @@ class TestCiTriage(PRBase):
         (e,) = self.flakes().values()
         self.assertTrue(e["issue"].endswith(f"/issues/{self.stories()[0]['number']}"))
         self.db_set(failures=[])
+        self.assertFalse(e.get("onBoard"))
         self.head("bbb222")
         r = self.flaky_run("unit")
         self.assertEqual(len(self.stories()), 1)
+        number = self.stories()[0]["number"]
+        self.assertTrue(any(i["content"].get("number") == number for i in self.read_db()["items"]))  # now on the board
+        self.assertTrue(list(self.flakes().values())[0]["onBoard"])
 
     def test_filing_failures_never_change_the_verdict_and_release_the_claim(self):
         self.db_set(fail_create=True)
@@ -1893,7 +1934,7 @@ class TestCiTriage(PRBase):
 
     def test_saved_jobs_are_filed_when_the_second_call_judges_green(self):
         self.db_set(checks_seq=[[self.chk("unit")], [self.chk("unit", "pending")]], run_log="FAILED t.py::test_a")
-        r = self.cgp("ci-triage", "acme/app", "1", "--interval", "0", "--timeout", "0")
+        r = self.cgp("ci-triage", "acme/app", "1", "--interval", "0", "--timeout", "2")
         self.assertEqual(r["verdict"], "pending")
         self.assertEqual(self.stories(), [])
         self.db_set(checks_seq=[[self.chk("unit", "pass")]])
@@ -1910,13 +1951,59 @@ class TestCiTriage(PRBase):
 
     def test_hostile_names_are_stripped_and_capped(self):
         name = "evil\n`x` @user <b>#1</b> \x1b[31m" + "z" * 500
-        self.flaky_run((name, "fail", "77"), log="FAILED t.py::a`b@c<d>\\n\x1b[0m")
+        self.flaky_run((name, "fail", "77"), log="FAILED t.py::a`b@c<d>\\n\x1b[0m\nFAILED t.py::x\u202eevil\u200b@u<i>")
         s = self.stories()[0]
         for text in (s["title"], s["body"]):
-            for bad in ("@user", "<b>", "\x1b", "`x`"):
+            for bad in ("@user", "<b>", "\x1b", "`x`", "@u", "<i>", "\u202e", "\u200b"):
                 self.assertNotIn(bad, text)
         self.assertLessEqual(len(s["title"]), len("Flaky: ") + 100)
         self.assertNotIn("\n", s["title"])
+
+    def test_hostile_workflow_and_links_never_reach_the_issue(self):
+        red = [dict(self.chk("unit"), workflow="wf `x` @user <b> \u202e\u200b\ufeff\u2028end", link="https://github.com/acme/app/actions/runs/77)[x](http://evil.example")]
+        self.db_set(checks_seq=[red, [dict(red[0], bucket="pending")], [dict(red[0], bucket="pass")]])
+        self.assertEqual(self.tri()["verdict"], "flaky")
+        body = self.stories()[0]["body"]
+        for bad in ("@user", "<b>", "`x`", "\u202e", "\u200b", "\ufeff", "\u2028", "](", "evil.example", "Failed run"):
+            self.assertNotIn(bad, body)
+        self.head("bbb222")
+        other = [dict(self.chk("unit"), link="https://evil.example/actions/runs/77")]
+        self.db_set(checks_seq=[other, [dict(other[0], bucket="pending")], [dict(other[0], bucket="pass")]])
+        self.tri()
+        comments = json.dumps(self.read_db().get("comments", {}))
+        self.assertIn("Flaked again", comments)
+        self.assertNotIn("evil", comments)  # the foreign link is dropped from the comment too
+        self.assertNotIn("Failed run", comments)
+
+    def test_matrix_legs_of_one_job_are_one_flake_not_many(self):
+        r = self.flaky_run(*[(f"unit (3.{n})", "fail", str(70 + n)) for n in range(4)])
+        self.assertNotIn("skipped", r)
+        self.assertEqual(len(r["filed"]), 1)
+        self.assertEqual(len(self.stories()), 1)
+        self.assertEqual(list(self.flakes().values())[0]["count"], 1)
+
+    def test_a_cli_failure_gives_fixed_text_not_an_exit_code(self):
+        self.db_set(fail_create=True)
+        self.assertEqual(self.flaky_run("unit")["fileError"], "gh failed (see stderr)")
+
+    def test_adopting_an_issue_already_on_the_board_leaves_its_status_and_priority(self):
+        self.flaky_run("unit")
+        number = self.stories()[0]["number"]
+        d = self.read_db()
+        item = next(i for i in d["items"] if i["content"].get("number") == number)
+        item["values"]["Priority"] = {"optionId": next(o["id"] for o in next(f for f in d["fields"] if f["name"] == "Priority")["options"] if o["name"] != "Hold")}
+        item["values"]["Status"] = {"optionId": next(o["id"] for o in next(f for f in d["fields"] if f["name"] == "Status")["options"] if o["name"] != "Todo")}
+        before = json.dumps(item["values"])
+        d["mutations"] = []
+        self.write_db(d)
+        self.save_data(flakes={})
+        self.head("bbb222")
+        self.flaky_run("unit")
+        d = self.read_db()
+        items = [i for i in d["items"] if i["content"].get("number") == number]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(json.dumps(items[0]["values"]), before)
+        self.assertEqual(d.get("mutations", []), [])
 
     def test_threshold_above_the_count_records_without_filing(self):
         code = ("import sys; sys.path.insert(0, %r); import cgp_lib.flakes as f; f.FLAKY_FILE_AT = 3; from cgp_lib.cli import main; "

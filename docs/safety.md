@@ -26,7 +26,7 @@ A repo's `.cgp.json` is read only from its default branch and can only add guard
 
 ## CI triage
 
-`cgp ci-triage` is the only place that reruns CI (`gh run rerun --failed`, once per commit and at most twice per PR, recorded before the call); workers are told never to rerun by hand. On a flaky verdict it also creates a story and comments on it. Flaky stories are filed in the PR's repo on Priority Hold with the `cgp-flaky` label, so the loop never works them until you release them. Job, workflow and test names come from the PR's CI and can be written by its author, so they are stripped of control characters, backticks, `@`, `#`, `<` and `>` and capped; log text never reaches an issue and never decides a verdict. A story is reused only when it carries the marker, the label and was written by this account.
+`cgp ci-triage` is the only place that reruns CI (`gh run rerun --failed`, once per commit and at most twice per PR, recorded before the call); workers are told never to rerun by hand. On a flaky verdict it also creates a story and comments on it. Flaky stories are filed in the PR's repo on Priority Hold with the `cgp-flaky` label, so the loop never works them until you release them. Job, workflow and test names come from the PR's CI and can be written by its author, so they are stripped of control, zero-width and bidi characters, backticks, `@`, `#`, `<` and `>` and capped; log text never reaches an issue (only test names matching a strict pattern are taken from it) and never decides a verdict. A story is reused only when it carries the marker, the label and was written by this account.
 
 ## Automatic intake
 

@@ -49,22 +49,35 @@ def put_on_board(c, node_id, priority=None, priority_first=False):
     return item
 
 
+def board_item(c, repo, number):
+    """Board item id of an issue that is on the board with a Status already; None when it is not (or an earlier put never got to
+    set one: put_on_board then finishes it, add_item returning the existing item)."""
+    for raw in fetch_items(c["board"]["id"]):
+        it = parse_item(raw, c)
+        if it["kind"] == "issue" and not it["unset"] and (it["issueRepo"], it["number"]) == (repo, number):
+            return it["item"]
+    return None
+
+
 def create_story(c, repo, title, body, priority=None, on_issue=None, labels=(), marker=None):
     """Create an issue and put it on the board in Todo (the repo and priority must be validated already). on_issue(number) runs
     right after the issue exists and, when given, the priority is set before the status. With a marker (and a label), an open
     issue of this gh account that carries the marker in its body is adopted instead of creating a second one: a rerun after a
     crash never files twice."""
-    issue = None
+    issue, adopted = None, False
     if marker and labels:  # anyone can paste a marker into an issue: only this account's own issue is adopted
         found = rest(f"repos/{repo}/issues?state=open&labels={quote(labels[0], safe='')}")
         issue = next((i for i in found if "pull_request" not in i and marker in (i.get("body") or "")
                       and (i.get("user") or {}).get("login") == viewer()), None)
+        adopted = issue is not None
     if issue is None:
         extra = [x for lb in labels for x in ("-f", f"labels[]={lb}")]
         issue = json.loads(gh("api", f"repos/{repo}/issues", "-f", f"title={title}", "-f", f"body={body}", *extra).stdout)
     if on_issue:
         on_issue(issue["number"])
-    item = put_on_board(c, issue["node_id"], priority, priority_first=bool(on_issue))
+    item = board_item(c, repo, issue["number"]) if adopted else None  # an adopted issue may be on the board (and moved) already
+    if item is None:
+        item = put_on_board(c, issue["node_id"], priority, priority_first=bool(on_issue))
     return {"item": item, "number": issue["number"], "url": issue["html_url"], "repo": repo}
 
 
