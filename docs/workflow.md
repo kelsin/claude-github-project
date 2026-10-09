@@ -4,7 +4,7 @@
 
 | Column | Who acts | What happens |
 |---|---|---|
-| 🆕 Todo | agents | Pick repo, move to Plan |
+| 🆕 Todo | agents | Pick repo, check the story is ready (questions if not), move to Plan |
 | 🧠 Plan | agents | Planners write an HTML plan artifact linked on the story, reviewers review it, updaters apply findings, move to Plan Review. Also where a story lands when you send it back (or it stalled): comments on the plan and the story are resolved, the changes re-reviewed |
 | 🙋 Plan Review | **you** | Read the plan artifact. Comment and move to Plan, or move to Plan Approved |
 | ✅ Plan Approved | agents | Move to Implement |
@@ -27,7 +27,7 @@ The loop dispatches one background worker per actionable story (no cap by defaul
 
 **Priority.** Set a story's `Priority` to High, Medium or Low and stories in the same column are dispatched in that order (unset after Low), and within a column and priority the stories that unlock the most other stories (directly or through a chain of dependencies) go first; `Hold` keeps a story from being dispatched at all. `scripts/cgp add "Fix login" --priority High` creates an issue and puts it on the board; `scripts/cgp import <label>` adds existing labelled issues.
 
-**Skip planning.** Type `Skip` in a Todo story's `Plan` field and no plan is made: the worker writes `- Plan: Skip` into the story description instead of a plan link and moves the story from Todo straight to Implement, working from the description and iterating there.
+**Skip planning.** Type `Skip` in a Todo story's `Plan` field and no plan is made: the worker writes `- Plan: Skip` into the story description instead of a plan link and moves the story from Todo straight to Implement, working from the description and iterating there. Skip stories bypass the ready check.
 
 **Auto approve.** Set a story's `Auto Approve` field to `Plan`, `PR` or `Both` and the agent passes that gate itself: a planned story goes to Plan Approved (instead of Plan Review) and a story with a PR goes to PR Approved (instead of PR Review), each noted in its status comment. `cgp move` allows it only from Plan / Implement and only for the gate the field names; only you can set the field. With `PR` the code is never seen by you before merge, so the "changed after approval, send back to PR Review" rule doesn't apply to that story. The field is re-read when the story reaches a review column: `cgp move` into Plan Review / PR Review lands in Plan Approved / PR Approved if you set the field while the agent was working. A story you sent back from PR Review to Implement with `Auto Approve` = `PR` still set is re-approved at its next move to PR Review. `Skip` plus `Both` makes a story fully hands-off.
 
@@ -39,4 +39,4 @@ The loop dispatches one background worker per actionable story (no cap by defaul
 
 ## Questions
 
-Agents ask questions as a comment on the story, with numbered questions each carrying a proposed default (reply "defaults ok" or answer some). The story gets `Waiting On: You` on the board (a story queued behind another story shows `Waiting On: Another story` instead, set and cleared by `cgp list`) and is skipped until you reply on the issue. Any new non-bot comment without the agent marker counts as a reply; the field clears itself and the worker resumes with the whole Q&A history. When a 4th round of questions is asked on one story, the comment adds a note suggesting it be rescoped or split. Agents prefer writing assumptions into the plan (an explicit "Assumptions" section) over asking, so Plan Approval is where you review them.
+Agents ask questions as a comment on the story, with numbered questions each carrying a proposed default (reply "defaults ok" or answer some). The story gets `Waiting On: You` on the board (a story queued behind another story shows `Waiting On: Another story` instead, set and cleared by `cgp list`) and is skipped until you reply on the issue. Any new non-bot comment without the agent marker counts as a reply; the field clears itself and the worker resumes with the whole Q&A history. When a 4th round of questions is asked on one story, the comment adds a note suggesting it be rescoped or split. Agents prefer writing assumptions into the plan (an explicit "Assumptions" section) over asking, so Plan Approval is where you review them. The ready check at Todo: a cheap low-rating reviewer asks, at most once per story, when the story lacks acceptance criteria, a clear repo, or looks like a duplicate or too big for one PR.
