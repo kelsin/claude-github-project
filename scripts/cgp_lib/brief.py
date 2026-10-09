@@ -1,6 +1,7 @@
 """A cached one-page map of a repo for workers, kept per repo under the cgp home and keyed by the default-branch commit it was
 written at. The CLI never writes the text itself: a worker sub-agent does and pipes it in (`cgp brief <repo> --write --sha <sha>`)."""
 import os
+import re
 import subprocess
 import time
 from .consts import DEFAULTS, HOME
@@ -11,6 +12,7 @@ from .gitutil import default_ref, git, resolve_repo_path
 
 BRIEF_CAP = 6000  # characters, so `cgp prepare` output stays small
 CUT = "\n[cut]"
+SHA_RE = re.compile(r"[0-9a-f]{40,64}")
 
 
 def brief_path(repo):
@@ -38,7 +40,7 @@ def brief_report(c, repo):
         return {**res, "status": "unavailable", "generate": False}
     res.update(head=head, clone=path)
     stored = load_json(brief_path(repo), None)
-    if not isinstance(stored, dict) or not stored.get("text") or not stored.get("sha"):
+    if not isinstance(stored, dict) or not stored.get("text") or not isinstance(stored.get("sha"), str) or not SHA_RE.fullmatch(stored["sha"]):
         return {**res, "status": "missing", "generate": True}
     res["sha"] = stored["sha"]
     if stored["sha"] == head:
@@ -66,7 +68,10 @@ def write_brief(c, repo, sha):
     if len(text) > BRIEF_CAP:
         text = text[:BRIEF_CAP] + CUT
     with locked():  # two workers writing at once: the older commit must not replace the newer
-        old = (load_json(brief_path(repo), None) or {}).get("sha")
+        stored = load_json(brief_path(repo), None)
+        old = stored.get("sha") if isinstance(stored, dict) else None
+        if not isinstance(old, str) or not SHA_RE.fullmatch(old):
+            old = None
         if old and old != full and is_ancestor(path, full, old) and is_ancestor(path, old, ref):
             die(f"the stored brief was written at a newer commit ({old[:10]}); not replacing it with {full[:10]}")
         os.makedirs(os.path.dirname(brief_path(repo)), exist_ok=True)

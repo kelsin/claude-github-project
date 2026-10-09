@@ -500,10 +500,10 @@ def cmd_prepare(a):
         res["prState"] = call(cmd_pr_state, repo=ref[0], pr=ref[1])
     res["repoConfig"] = repo_config(c, it["issueRepo"])  # test / lint commands, reviewers, ... from the repo's .cgp.json
     res["houseRules"] = rules_text(c, it["issueRepo"])  # the default branch's .cgp-rules.md, or null
-    res["brief"] = call(cmd_brief, target=it["issueRepo"], write=False, sha=None)  # the repo's cached map (cgp brief)
     res["settings"] = {"draftPRs": bool(c["settings"].get("draftPRs"))}
     res["stack"], stack_wait = prepare_stack(c, it)  # the blocker's branch the worktree is cut from (stackedStories), else null
     res["worktree"] = {"error": stack_wait} if stack_wait else call(cmd_worktree, item=a.item)
     if "error" not in res["worktree"]:
         res["sync"] = call(cmd_sync, item=a.item)
+    res["brief"] = call(cmd_brief, target=it["issueRepo"], write=False, sha=None)  # the repo's cached map, read after the sync so head is current (cgp brief)
     out(res)

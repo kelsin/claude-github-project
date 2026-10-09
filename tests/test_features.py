@@ -272,6 +272,42 @@ class TestBrief(test_cgp.SyncBase):
         self.write(self.head())
         self.assertEqual(self.cgp("prepare", "i1")["brief"]["status"], "fresh")
 
+    def other_push(self):
+        """Advance origin/main from a second clone so self.clone's origin/main is stale until something fetches."""
+        other = os.path.join(self.tmp, "other")
+        subprocess.run(["git", "clone", "-q", self.origin, other], check=True, capture_output=True)
+        with open(os.path.join(other, "o.txt"), "w") as f:
+            f.write("o")
+        self.git(other, "add", "."); self.git(other, "commit", "-qm", "elsewhere")
+        self.git(other, "push", "-q", "origin", "HEAD:main")
+        return subprocess.run(["git", "-C", other, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+    def test_prepare_reads_the_brief_after_the_fetch(self):
+        new = self.other_push()
+        self.assertNotEqual(self.head(), new)
+        self.assertEqual(self.cgp("prepare", "i1")["brief"]["head"], new)
+
+    def test_prepare_still_reads_the_brief_when_the_worktree_errors(self):
+        shutil.rmtree(self.wt)
+        self.git(self.clone, "worktree", "prune")
+        with open(self.wt, "w") as f:
+            f.write("in the way")
+        r = self.cgp("prepare", "i1")
+        self.assertIn("error", r["worktree"])
+        self.assertEqual(r["brief"]["status"], "missing")
+
+    def stored(self, sha):
+        with open(os.path.join(self.env["CGP_HOME"], "briefs", "acme", "app.json"), "w") as f:
+            json.dump({"sha": sha, "writtenAt": 1, "text": "map"}, f)
+
+    def test_a_malformed_stored_sha_is_missing_and_can_be_overwritten(self):
+        os.makedirs(os.path.join(self.env["CGP_HOME"], "briefs", "acme"))
+        for bad in ("--output=x", "HEAD", "abc", 5):
+            self.stored(bad)
+            self.assertEqual(self.cgp("brief", "acme/app")["status"], "missing")
+            self.write(self.head(), "good")
+            self.assertEqual(self.cgp("brief", "acme/app")["brief"], "good")
+
     def test_threshold_is_an_integer_setting(self):
         self.assertEqual(self.cgp("config", "briefThreshold", "25")["briefThreshold"], 25)
         self.assertNotEqual(self.cgp("config", "briefThreshold", "many", ok=False).returncode, 0)
