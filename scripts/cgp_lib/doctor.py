@@ -253,7 +253,7 @@ def cmd_doctor(a):
             for f in glob.glob(os.path.join(HOME, "state-*.json")):
                 st = load_json(f, {})
                 if st.get("boardKey") == c["board"]["id"]:
-                    gone += [(os.path.basename(f)[6:-5], w["item"]) for w in st.get("workers") or [] if isinstance(w, dict) and str(w.get("item")).removesuffix(SPEC_SUFFIX) not in ids]
+                    gone += [(os.path.basename(f)[6:-5], w["item"]) for w in st.get("workers") or [] if isinstance(w, dict) and str(w.get("item")).split(SPEC_SUFFIX)[0] not in ids]
             check(f"{c['board']['title']}: workers' stories are on the board", not gone,
                   f"{', '.join(f'{i} in {s}' for s, i in gone)} are not on the board: cgp unstick <item> (or release that session)", warn=True)
     lock = list_stale_locks()
