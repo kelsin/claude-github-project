@@ -12,7 +12,7 @@ STRIKES = 3  # failed or fruitless runs of one story in one column before the us
 # Per-story keys of the board data file (data.json). STORY_STATE is operational and what `cgp unstick` clears (and nothing else): a list of
 # item ids, or "pipe" = a dict keyed "<item>|<column>". STORY_KEPT is everything durable or derived (plan, touches, approvals, cursors, ...):
 # unstick never touches it. A test fails when the code writes a key that is in neither, so a new key must be classified here.
-STORY_STATE = {"answered": "list", "daemonStrikes": "pipe"}
+STORY_STATE = {"answered": "list", "daemonStrikes": "pipe", "resume": "pipe"}  # resume: {agent, head, at} of the worker to message on a send-back
 STORY_KEPT = ("asked", "cursors", "pending", "blocks", "epicOrder", "touches", "approvedTouches", "splits", "approvedSplits", "children",
               "parents", "epicAsked", "policyPlans", "policy", "ratings", "reviewed", "cleanRebase", "notified", "deferred", "reasons",
               "tainted", "intake", "reruns", "flakes")  # tainted: a review safety gate (a conflicting rebase), not for unstick to lift

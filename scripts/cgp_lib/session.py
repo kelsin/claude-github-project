@@ -3,12 +3,14 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
 from .consts import DEFAULT_PHASE, HOME, LOCKS, PHASES, STRIKES
 from .util import IS_WINDOWS, die, now_iso, out, pid_alive, ps_field, safe, strip_id
 from .store import board_for_cwd, cfg, ensure_home, list_boards, load_board, load_json, lock_alive, lock_file, lock_holder, lock_mine, locked, same_board, save_json, sid, state_path, stop_path, update_data, update_state
 from .board import get_item, parse_board_url
+from .gitutil import resolve_repo_path
 
 
 def session_title(kind, name):
@@ -71,6 +73,7 @@ def cmd_use(a):
         os.makedirs(LOCKS, mode=0o700, exist_ok=True)
         save_json(lock_file(key), {"session": sid(), "at": time.time()})
         update_state(lambda st: st.update(boardKey=key, board=boards[key]["board"], workers=[]))
+        update_data(lambda d: d.pop("resume", None))  # worker ids of an earlier session mean nothing to this one
     if os.path.exists(stop_path()):
         os.remove(stop_path())  # a stop request left from an earlier run
     c = boards[key]
@@ -107,6 +110,7 @@ def cmd_release(a):
         with locked():  # read and remove together: a session that claimed the board meanwhile keeps its lock
             if lock_mine(key):
                 os.remove(lock_file(key))
+        update_data(lambda d: d.pop("resume", None))  # the workers die with the session
     update_state(lambda st: st.update(boardKey=None, workers=[], counts={}, waiting=[], updatedAt=None))
     out({"released": key})
 
@@ -184,6 +188,53 @@ def reset_strikes(d, item):
         del strikes[k]
 
 
+AGENT_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+RESUME_COLUMN = {"todo": "plan", "plan_approved": "implement"}  # the column a worker's work belongs to: Todo is planned, Plan Approved implemented
+
+
+def resume_column(column):
+    return RESUME_COLUMN.get(column, column)
+
+
+def remote_head(c, it):
+    """Head of the story's branch on origin: the sha, "none" when the branch does not exist, None when it could not be read."""
+    try:
+        base = resolve_repo_path(c, it["issueRepo"])
+    except SystemExit:
+        return None
+    p = subprocess.run(["git", "-C", base, "ls-remote", "origin", f"refs/heads/cgp/{it['number']}"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    return None if p.returncode else (p.stdout.split() or ["none"])[0]
+
+
+def drop_resume(d, item):
+    """Forget the recorded worker of every column of this story."""
+    resume = d.get("resume", {})
+    for k in [k for k in resume if k.split("|")[0] == item]:
+        del resume[k]
+
+
+def record_resume(item, row):
+    """The worker that just finished its run (`worker stop --outcome ok`) becomes what the next run of this story in this column can
+    resume; any other entry of the story is stale. Nothing is recorded without an agent id or a readable remote head."""
+    entry = None
+    if row and row.get("agent"):
+        try:
+            c = cfg()
+            it = get_item(c, item)
+            head = remote_head(c, it) if it["kind"] == "issue" else None
+        except SystemExit:
+            head = None
+        if head:
+            entry = (f"{item}|{resume_column(row['column'])}", {"agent": row["agent"], "head": head, "at": now_iso()})
+
+    def upd(d):
+        drop_resume(d, item)
+        if entry:
+            d.setdefault("resume", {})[entry[0]] = entry[1]
+    update_data(upd)
+
+
 def record_outcome(item, column, outcome):
     """The interactive loop's strike counter, kept where the daemon keeps its own (daemonStrikes, key item|column) so a restart or a
     context compaction does not forget it: `fail` adds one, `ok` and `waiting` (a wait the board shows) start over. Returns the count."""
@@ -193,6 +244,8 @@ def record_outcome(item, column, outcome):
         strikes = d.setdefault("daemonStrikes", {})
         n = strikes.get(f"{item}|{column}", 0) + 1 if outcome == "fail" else 0
         reset_strikes(d, item)  # another column's strikes are stale
+        if outcome == "fail":
+            drop_resume(d, item)  # a failed run's worker is not worth resuming
         if n:
             strikes[f"{item}|{column}"] = n
         count.append(n)
@@ -201,7 +254,7 @@ def record_outcome(item, column, outcome):
 
 
 def cmd_worker(a):
-    """start / stop / clear / phase. `start` takes the title (and, unless given, the column) from the board: an issue title is
+    """start / stop / clear / phase / agent. `start` takes the title (and, unless given, the column) from the board: an issue title is
     text anyone can write, so it must never travel through a shell command line."""
     if a.action == "phase" and a.column not in PHASES:
         die(f"phase must be one of {list(PHASES)}")
@@ -209,9 +262,19 @@ def cmd_worker(a):
     if outcome and a.action != "stop":
         die("--outcome belongs to `worker stop`")
     strikes = None
+    row = next((w for w in load_json(state_path(), {}).get("workers", []) if w["item"] == a.item), None)
+    if a.action == "agent":  # the loop reports the id of the Agent it spawned for this worker
+        if not row:
+            die(f"no live worker row for {a.item}; run worker start first")
+        if not AGENT_ID.fullmatch(a.column or ""):
+            die("the agent id must match [A-Za-z0-9_.:-]{1,128}")
+        update_state(lambda st: [w.__setitem__("agent", a.column) for w in st["workers"] if w["item"] == a.item])
+        out(load_json(state_path(), {}).get("workers", []))
+        return
     if outcome:
-        row = next((w for w in load_json(state_path(), {}).get("workers", []) if w["item"] == a.item), None)
         strikes = record_outcome(a.item, row["column"] if row else get_item(cfg(), a.item)["column"], outcome)
+        if outcome == "ok":
+            record_resume(a.item, row)
     if a.action == "start":
         it = get_item(cfg(), a.item)
         a.column, a.title = a.column or it["column"], it["title"]

@@ -358,6 +358,7 @@ def snapshot(c):
         d["tainted"] = [i for i in d.get("tainted", []) if i in live_ids]
         live_prs = {f"{r[0]}#{r[1]}" for r in (parse_pr_ref(c, i.get("pr")) for i in live) if r}
         d["reruns"] = {k: v for k, v in d.get("reruns", {}).items() if k in live_prs}
+        d["resume"] = {k: v for k, v in d.get("resume", {}).items() if k.split("|")[0] in live_ids}
         prune_flakes(d)
     update_data(prune)
     return snap

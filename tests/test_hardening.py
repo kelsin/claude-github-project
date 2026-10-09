@@ -19,6 +19,114 @@ import test_cgp
 Base, PRBase = test_cgp.Base, test_cgp.PRBase
 
 
+class TestResume(test_cgp.SyncBase):
+    """Send-backs message the worker that last handled the story: `worker agent` + `worker stop --outcome ok` record it, `resume get` decides."""
+    def setUp(self):
+        super().setUp()
+        self.cgp("rate", "i1", "low")
+
+    def run_worker(self, column=None, agent="agent-1", outcome="ok"):
+        self.cgp("worker", "start", "i1", *([column] if column else []))
+        if agent:
+            self.cgp("worker", "agent", "i1", agent)
+        return self.cgp("worker", "stop", "i1", "--outcome", outcome)
+
+    def push_branch(self):
+        self.git(self.wt, "commit", "-q", "--allow-empty", "-m", "work")
+        self.git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/cgp/1")
+
+    def test_records_gets_without_consuming_and_clears(self):
+        self.push_branch()
+        self.run_worker()
+        rec = self.data()["resume"]["i1|plan"]
+        self.assertEqual(rec["agent"], "agent-1")
+        self.assertRegex(rec["head"], r"^[0-9a-f]{40}$")
+        for _ in range(2):
+            self.assertEqual(self.cgp("resume", "get", "i1"), {"resume": True, "agent": "agent-1"})
+        self.cgp("resume", "clear", "i1")
+        self.assertEqual(self.cgp("resume", "get", "i1"), {"resume": False, "reason": "no-record"})
+        self.assertNotIn("i1|plan", self.data()["resume"])
+
+    def test_no_branch_yet_records_the_sentinel_and_still_resumes(self):
+        self.run_worker()
+        self.assertEqual(self.data()["resume"]["i1|plan"]["head"], "none")
+        self.assertTrue(self.cgp("resume", "get", "i1")["resume"])
+
+    def test_other_column_and_moved_head(self):
+        self.push_branch()
+        self.run_worker()
+        self.force("i1", "implement")
+        self.assertEqual(self.cgp("resume", "get", "i1")["reason"], "column-changed")
+        self.force("i1", "todo")
+        self.assertTrue(self.cgp("resume", "get", "i1")["resume"])
+        self.git(self.wt, "commit", "-q", "--allow-empty", "-m", "more")
+        self.git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/cgp/1")
+        self.assertEqual(self.cgp("resume", "get", "i1"), {"resume": False, "reason": "head-moved"})
+
+    def test_rating_decides(self):
+        self.run_worker()
+        self.cgp("rate", "i1", "medium")
+        self.assertTrue(self.cgp("resume", "get", "i1")["resume"])
+        self.cgp("rate", "i1", "high")
+        self.assertEqual(self.cgp("resume", "get", "i1")["reason"], "rating-high")
+        self.save_data(ratings={})
+        self.assertEqual(self.cgp("resume", "get", "i1")["reason"], "unrated")
+
+    def test_columns_are_normalised(self):
+        self.run_worker("todo")
+        self.assertIn("i1|plan", self.data()["resume"])
+        self.force("i1", "plan_approved")
+        self.cgp("rate", "i1", "low")
+        self.cgp("worker", "start", "i1")
+        self.cgp("worker", "agent", "i1", "agent-2")
+        self.cgp("worker", "stop", "i1", "--outcome", "ok")
+        self.assertEqual(list(self.data()["resume"]), ["i1|implement"])  # replaces the plan entry
+        self.cgp("rate", "i1", "low")
+        self.assertEqual(self.cgp("resume", "get", "i1"), {"resume": True, "agent": "agent-2"})
+        self.force("i1", "implement")
+        self.cgp("rate", "i1", "low")
+        self.assertTrue(self.cgp("resume", "get", "i1")["resume"])
+
+    def test_only_ok_records_and_fail_clears(self):
+        for outcome in ("waiting", "fail"):
+            self.run_worker(outcome=outcome)
+            self.assertEqual(self.data().get("resume", {}), {})
+        self.run_worker()
+        self.assertIn("i1|plan", self.data()["resume"])
+        self.run_worker(outcome="waiting")
+        self.assertIn("i1|plan", self.data()["resume"])  # a wait leaves the record alone
+        self.run_worker(outcome="fail")
+        self.assertEqual(self.data()["resume"], {})
+
+    def test_ok_without_an_agent_id_drops_the_old_record(self):
+        self.run_worker()
+        self.run_worker(agent=None)
+        self.assertEqual(self.data()["resume"], {})
+
+    def test_worker_agent_needs_a_live_row_and_a_sane_id(self):
+        self.assertNotEqual(self.cgp("worker", "agent", "i1", "x", ok=False).returncode, 0)
+        self.cgp("worker", "start", "i1")
+        for bad in ("a b", "x;y", "$(id)", "a" * 129):
+            self.assertNotEqual(self.cgp("worker", "agent", "i1", bad, ok=False).returncode, bad)
+        self.cgp("worker", "agent", "i1", "ab12:c_d.e-f")
+        self.assertEqual(self.state()["workers"][0]["agent"], "ab12:c_d.e-f")
+
+    def test_release_and_use_takeover_clear_it(self):
+        self.cgp("use")
+        self.run_worker()
+        self.cgp("release")
+        self.assertNotIn("i1|plan", self.data().get("resume", {}))
+        self.run_worker()
+        self.cgp("use", "--takeover")
+        self.assertNotIn("i1|plan", self.data().get("resume", {}))
+
+    def test_snapshot_prunes_ids_that_are_not_live(self):
+        self.run_worker()
+        self.save_data(resume={**self.data()["resume"], "gone|plan": {"agent": "z", "head": "none", "at": "t"}})
+        self.cgp("list")
+        self.assertEqual(list(self.data()["resume"]), ["i1|plan"])
+
+
 class TestWorkerStart(Base):
     def test_title_and_column_come_from_the_board_not_the_command_line(self):
         self.setup_board()
@@ -1053,7 +1161,8 @@ class TestUnstick(Base):
         self.write_db(d)
         self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/5")
         self.cgp("ask", "i1", input="1. which?")  # Waiting On: You
-        self.save_data(**self.KEPT, answered=["i1", "i2"], daemonStrikes={"i1|todo": 2, "i1|plan": 1, "i2|todo": 1})
+        self.save_data(**self.KEPT, answered=["i1", "i2"], daemonStrikes={"i1|todo": 2, "i1|plan": 1, "i2|todo": 1},
+                       resume={"i1|plan": {"agent": "a1", "head": "none", "at": "t"}, "i2|plan": {"agent": "a2", "head": "none", "at": "t"}})
         self.session("state-s1.json", [{"item": "i1", "column": "todo"}, {"item": "i2", "column": "todo"}])
 
     def tearDown(self):
@@ -1075,7 +1184,7 @@ class TestUnstick(Base):
         before, calls = self.data(), len(self.read_db().get("calls", []))
         res = self.cgp("unstick", "i1", "--dry-run")
         self.assertEqual((res["dryRun"], res["cancelAutoMerge"], res["waitingOn"]), (True, "acme/app#5", True))
-        self.assertEqual(res["data"], {"answered": ["i1"], "daemonStrikes": ["i1|todo", "i1|plan"]})
+        self.assertEqual(res["data"], {"answered": ["i1"], "daemonStrikes": ["i1|todo", "i1|plan"], "resume": ["i1|plan"]})
         self.assertEqual((self.data(), self.rows(), len(self.read_db().get("calls", []))), (before, ["i1", "i2"], calls))
         self.assertEqual(len(self.cgp("list")["waitingOnYou"]), 1)
 
@@ -1084,6 +1193,7 @@ class TestUnstick(Base):
         self.cgp("unstick", "i1")
         d = self.data()
         self.assertEqual((d["answered"], d["daemonStrikes"]), (["i2"], {"i2|todo": 1}))
+        self.assertEqual(list(d["resume"]), ["i2|plan"])
         for key in self.KEPT:
             self.assertEqual(d[key], before[key], key)  # column data, touches and approvals stay
         self.assertEqual(self.rows(), ["i2"])
