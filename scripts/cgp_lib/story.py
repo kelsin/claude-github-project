@@ -5,7 +5,7 @@ import re
 import sys
 from urllib.parse import urlsplit
 from .consts import DEFAULT_PHASE, KEY_RENAMES, SKIP, LINKS_END, LINKS_START, MARK, NETLIFY_BOT, QMARK, TEXT_FIELDS
-from .util import call, die, now_iso, out
+from .util import call, die, norm_path, now_iso, out
 from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
 from .store import cfg, load_data, update_data, update_state
 from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, set_single, set_text
@@ -396,6 +396,10 @@ def cmd_prepare(a):
         out(res)
         return
     res["authorTrusted"] = author_trusted(it)
+    d = load_data()
+    snap = d.get("approvedTouches", {}).get(a.item)  # None when the story has no approved snapshot
+    res["plan"] = {"rating": (d.get("ratings") or {}).get(a.item, {}).get("rating"),  # the last rating, whatever column it was given in
+                   "declared": [norm_path(t) for t in d.get("touches", {}).get(a.item, [])], "approved": None if snap is None else [norm_path(t) for t in snap]}
     from .epics import state  # epics imports this module
     split = state(load_data(), a.item)
     if split:
