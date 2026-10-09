@@ -674,6 +674,80 @@ class TestWorktreeCleanup(test_cgp.SyncBase):
         self.assertNotEqual(self.branches(), "")
         self.assertIn("remove failed", self.state()["worktreeKept"]["i1"]["reason"])
 
+    def conflicted_rebase(self):
+        """A conflicted `rebase --autostash` left in progress (detached HEAD), as cmd_sync leaves it; returns the branch tip."""
+        with open(os.path.join(self.wt, "f.txt"), "w") as f:
+            f.write("mine\n")
+        self.git(self.wt, "commit", "-qam", "mine")
+        tip = self.head()
+        self.push_to_main("theirs\n")
+        self.cgp("sync", "i1")
+        self.assertNotEqual(self.head(), tip)
+        with open(os.path.join(self.wt, "wip.txt"), "w") as f:
+            f.write("debris\n")
+        return tip
+
+    def test_a_merged_pr_that_contains_the_branch_removes_a_worktree_stuck_in_a_rebase(self):
+        tip = self.conflicted_rebase()
+        self.set_pr("MERGED", oid=tip)
+        self.finish()
+        self.cgp("list", "--brief")
+        self.assertFalse(os.path.isdir(self.wt))
+
+    def test_a_merged_pr_that_contains_the_branch_removes_a_dirty_worktree(self):
+        self.commit()
+        self.set_pr("MERGED")
+        with open(os.path.join(self.wt, "f.txt"), "w") as f:
+            f.write("regenerated\n")
+        self.finish()
+        self.cgp("list", "--brief")
+        self.assertFalse(os.path.isdir(self.wt))
+
+    def test_a_merged_pr_that_lacks_a_local_commit_keeps_a_dirty_worktree(self):
+        self.commit()
+        first = self.head()
+        self.commit("more.txt")
+        self.set_pr("MERGED", oid=first)
+        with open(os.path.join(self.wt, "wip.txt"), "w") as f:
+            f.write("unsaved\n")
+        self.finish()
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+
+    def test_a_rebase_in_progress_with_a_clean_status_is_kept_and_named(self):
+        with open(os.path.join(self.wt, "f.txt"), "w") as f:
+            f.write("mine\n")
+        self.git(self.wt, "commit", "-qam", "mine")
+        self.push_to_main("theirs\n")
+        self.cgp("sync", "i1")
+        with open(os.path.join(self.wt, "f.txt"), "w") as f:
+            f.write("theirs\n")  # resolved to main's version: nothing left to commit, the rebase is still open
+        self.git(self.wt, "add", "f.txt")
+        self.assertEqual(subprocess.run(["git", "-C", self.wt, "status", "--porcelain"], capture_output=True, text=True).stdout.strip(), "")
+        self.set_pr("OPEN")
+        self.finish()
+        self.cgp("list", "--brief")
+        self.assertTrue(os.path.isdir(self.wt))
+        self.assertIn("rebase", self.state()["worktreeKept"]["i1"]["reason"])
+
+    def test_the_reason_for_a_dirty_worktree_lists_its_files(self):
+        with open(os.path.join(self.wt, "f.txt"), "w") as f:
+            f.write("changed\n")
+        with open(os.path.join(self.wt, "wip.txt"), "w") as f:
+            f.write("unsaved\n")
+        self.set_pr("OPEN")
+        self.finish()
+        self.cgp("list", "--brief")
+        self.assertIn("1 modified, 1 untracked files: f.txt, wip.txt", self.state()["worktreeKept"]["i1"]["reason"])
+
+    def test_gc_dry_run_leaves_a_stuck_worktree_alone_and_discard_removes_it(self):
+        self.conflicted_rebase()
+        self.finish()
+        self.assertNotIn(self.wt, self.cgp("gc", "--dry-run")["removedWorktrees"])
+        self.assertTrue(os.path.isdir(self.wt))
+        self.assertTrue(self.cgp("worktree-remove", "i1", "--discard")["removed"])
+        self.assertFalse(os.path.isdir(self.wt))
+
 
 class TestQuarantine(Base):
     """A corrupt per-board data file is set aside (and its last good copy restored) instead of stopping the loop."""

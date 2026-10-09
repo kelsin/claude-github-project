@@ -14,7 +14,7 @@ from .gh import gh, gql
 from .store import list_boards, load_board, load_json, lock_alive, locked, same_board, save_board
 from .board import fetch_items, migrate_poll_default, fetch_project, fields_by_name, known_repo, parse_board_url, parse_item
 from .gitutil import git
-from .gitwt import is_dirty, unsaved_work
+from .gitwt import merged_contained, pr_view_of, uncommitted_work, unsaved_work
 from .notify import command_problem
 
 # Permission rules docs/safety.md recommends for sessions that run the loop; doctor only reports whether they are present.
@@ -48,8 +48,32 @@ def orphan_worker_rows(live):
     return found
 
 
-def dirty_worktrees():
-    return [p for p in glob.glob(os.path.join(HOME, "worktrees", "*", "*", "*")) if ".broken-" not in p and is_dirty(p)]
+def dirty_worktrees(boards):
+    """(path, why) of worktrees holding work only they have: uncommitted changes or a rebase in progress (see uncommitted_work),
+    not those of a story whose PR is merged and contains its branch (cleanup removes those)."""
+    root = os.path.join(HOME, "worktrees")
+    stories = {}
+    for c in boards:
+        try:
+            for raw in fetch_items(c["board"]["id"]):
+                it = parse_item(raw, c)
+                if it["kind"] == "issue":
+                    owner, name = it["issueRepo"].split("/")
+                    stories[(owner, name, str(it["number"]))] = (c, it)
+        except SystemExit:  # no network: judge by the files alone
+            pass
+    found = []
+    for p in glob.glob(os.path.join(root, "*", "*", "*")):
+        if ".broken-" in p:
+            continue
+        c, it = stories.get(tuple(os.path.relpath(p, root).split(os.sep)), (None, None))
+        try:
+            why = uncommitted_work(p)
+        except SystemExit:  # not a git checkout
+            why = "git cannot read its state"
+        if why and not (it and merged_contained(p, it, pr_view_of(c, it))):
+            found.append((p, why))
+    return found
 
 
 def finished_stories(c):
@@ -220,8 +244,8 @@ def cmd_doctor(a):
     orphans = orphan_worker_rows(live_sessions())
     check("no orphan worker rows", not orphans,
           f"{len(orphans)} worker row(s) in dead sessions ({', '.join(f'{i} in {s}' for s, i in orphans)}): cgp unstick <item>, or cgp gc", warn=True)
-    dirty = dirty_worktrees()
-    check("no worktrees with uncommitted work", not dirty, f"{', '.join(dirty)}: commit or push it before the story is cleaned up (gc keeps them)", warn=True)
+    dirty = dirty_worktrees(boards)
+    check("no worktrees with uncommitted work", not dirty, f"{'; '.join(f'{p} ({why})' for p, why in dirty)}: commit or push it before the story is cleaned up (gc keeps them)", warn=True)
     if a.deep:
         for c in boards:
             ids = {raw["id"] for raw in fetch_items(c["board"]["id"])}
