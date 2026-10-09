@@ -54,6 +54,13 @@ def agent_context():
     return bool(os.environ.get("CGP_SESSION") or os.environ.get("CLAUDECODE") or not sys.stdin.isatty())
 
 
+def require_human(message):
+    """Dies with `message` unless a person is at a terminal outside a Claude session (stops accidental or instruction-driven use by an
+    agent; not a security boundary: a same-user process could fake a terminal)."""
+    if agent_context():
+        die(message)
+
+
 @functools.lru_cache(maxsize=None)
 def _segment(pattern):
     return re.compile("".join("[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch) for ch in re.sub(r"\*+", "*", pattern)), re.I)

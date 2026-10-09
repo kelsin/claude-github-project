@@ -18,6 +18,7 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `status` | `--json` | Human-readable board overview: counts, what waits on you, workers, blocked stories |
 | `list` | `--brief` | JSON snapshot of the board (also files closed issues under Done and clears answered questions) |
 | `wait` | `--timeout` `--interval` | Poll until a story becomes actionable, a worker is released, all is Done, or the timeout passes |
+| `approve` | `item` | Approve the gate the story waits at (plan_review or pr_review); only you, in a terminal |
 | `move` | `item` `column` | Move a story to a column (human gates enforced) |
 | `set` | `item` `field` `value` | Set the plan or pr field of a story |
 | `preview` | `item` | Copy the deploy preview URL from the story's PR into the Preview field |

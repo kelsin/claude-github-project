@@ -12,8 +12,8 @@ from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, 
 from .session import clear_phase, reset_strikes, set_phase, worker_pr
 from .repoconf import repo_config, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
-from .pr import cancel_auto_merge, cmd_pr_state, pr_view, record_reviewed
-from .policy import GATE_KEYS, current_rating, evaluate, public, record_decision
+from .pr import cancel_auto_merge, changed_since_review, cmd_pr_state, pr_view, record_reviewed
+from .policy import GATE_KEYS, current_rating, evaluate, public, record_decision, require_human
 
 
 def list_replies_since(repo, number, marker_ids, since=None):
@@ -130,6 +130,48 @@ def cmd_move(a):
         advance_cursor(a.item)  # like `cgp comment`: posting counts as having read the feedback so far
     out({"item": a.item, "column": a.column, **({"autoApproved": True} if requested or policy_ok else {}), **({"requested": requested} if requested else {}),
          **({"policy": public(verdict)} if verdict else {})})
+
+
+def cmd_approve(a):
+    """The human passes the gate the story waits at (plan_review -> plan_approved, pr_review -> pr_approved)."""
+    c = cfg()
+    require_human("`cgp approve` can only be run by you, in a terminal outside a Claude session")
+    it = get_item(c, a.item)
+    target = {"plan_review": "plan_approved", "pr_review": "pr_approved"}.get(it["column"])
+    if not target:
+        if it["column"] in ("plan_approved", "pr_approved"):
+            out({"item": a.item, "column": it["column"], "unchanged": True, "note": f"already in {it['column']}"})
+            return
+        die(f"story is in {it['column']}: only a story in plan_review or pr_review can be approved")
+    ref = sha = reviewed = None
+    if target == "plan_approved" and not it["plan"]:
+        die("the story has no plan link to approve")
+    if target == "pr_approved":
+        ref = parse_pr_ref(c, it["pr"])
+        if not ref:
+            die("the story has no valid PR link to approve")
+        v = pr_view(*ref)
+        if not v or not v.get("headRefOid"):
+            die("could not read the PR head; not approving")
+        msg = changed_since_review(a.item, ref, v)  # reads the record: writing it would clear cleanRebase
+        if msg:
+            die("refusing to approve: " + msg)
+        sha = v["headRefOid"]
+        reviewed = load_data()["reviewed"][a.item]["sha"]
+        if v["isDraft"]:
+            ready_pr(ref)
+    set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][target])
+
+    def upd(st):
+        for w in st["workers"]:
+            if w["item"] == a.item:
+                w["column"] = target
+                clear_phase(w)
+                if target in DEFAULT_PHASE:
+                    w.update(phase=DEFAULT_PHASE[target], phaseAt=now_iso())
+    update_state(upd)
+    update_data(lambda d: (d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]), reset_strikes(d, a.item)))
+    out({"item": a.item, "column": target, "approved": True, **({"sha": sha, "reviewed": reviewed} if sha else {"plan": it["plan"]})})
 
 
 def snapshot_touches(item):
