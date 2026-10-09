@@ -18,6 +18,7 @@ from .repoconf import merged_globs
 from .policy import current_rating
 from .flakes import prune as prune_flakes
 from .story import ask_user, process_replies
+from .rules import pending, rules_due
 
 
 def sync_story_field(c, live, held_back=frozenset(), in_flight=frozenset()):
@@ -311,6 +312,7 @@ def snapshot(c):
         "queued": [{"title": i["title"], "reason": reasons[i["item"]]} for i in queued],
         "stalled": stalled,
         "held": [i["title"] for i in live if i["held"]],
+        "rulesDue": [r for r in c["repos"] if rules_due(c, data, r)],
         "items": items,
     }
 
@@ -393,6 +395,7 @@ def cmd_status(a):
            "waitingOnYou": [{"title": i["title"], "url": i["url"]} for i in live if i["waiting"]],
            "blocked": [b for b in blocked if b["blockedBy"]], "githubBlockedBy": github, "workers": workers,
            "held": [i["title"] for i in live if i["held"]], "notStarting": why, "waitingOnYouNothingAsked": stale, "autoApprove": c["settings"]["autoApprove"],
+           "rulesProposals": pending(c),
            "loop": {"session": session, "heartbeatMinutes": round((time.time() - lock["at"]) / 60, 1)} if lock else None,
            "review": {k: [{"title": i["title"], "url": i["url"]} for i in by_col.get(k, [])] for k in ("plan_review", "pr_review")}}
     if a.json:
@@ -417,6 +420,8 @@ def cmd_status(a):
         show(f"⏸ On hold ({len(res['held'])}): {', '.join(res['held'])}")
     if res["autoApprove"] != "plan:never,pr:never":
         show(f"🤖 auto-approval policy: {res['autoApprove']} (autoApproveFiles: {', '.join(c['settings']['autoApproveFiles']) or 'none'})")
+    for r in res["rulesProposals"]:
+        show(f"📝 proposed house rules for {r['repo']} differ from its default branch: {r['path']}")
     for b in res["blocked"]:
         show(f"⛓ {b['title']} waits for {', '.join(b['blockedBy'])}")
     for b in res["blocked"]:

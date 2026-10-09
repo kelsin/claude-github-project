@@ -231,6 +231,10 @@ elif args[0] == "api" and re.fullmatch(r"repos/[^/]+/[^/]+(/actions/(runs|workfl
         print(json.dumps({"workflow_runs": db.get("workflow_runs", {}).get(repo, [])}))
     elif kind == "/actions/workflows":
         print(json.dumps({"workflows": db.get("workflows", {}).get(repo, [])}))
+    elif kind == "/pulls" and "state=closed" in path:  # db["closed_pulls"][repo]: [{number, merged_at, head: {ref}}]; each list call is recorded
+        db.setdefault("closed_pulls_calls", []).append(args)
+        save()
+        print(json.dumps(db.get("closed_pulls", {}).get(repo, [])))
     elif kind == "/pulls":
         print(json.dumps(db.get("pulls", {}).get(repo, [])))
     elif kind:
