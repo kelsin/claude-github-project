@@ -31,20 +31,26 @@ def priority_option(c, name):
     return field["id"], field["options"][match]
 
 
-def put_on_board(c, node_id, priority=None):
-    """Add an issue to the board in Todo (with a priority when given); returns the board item id."""
+def put_on_board(c, node_id, priority=None, priority_first=False):
+    """Add an issue to the board in Todo (with a priority when given); returns the board item id. With priority_first the
+    priority is set before the status, so a failure in between never leaves a dispatchable story without it."""
     item = gql("""mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }""",
                p=c["board"]["id"], c=node_id)["addProjectV2ItemById"]["item"]["id"]
+    if priority and priority_first:
+        set_single(c, item, *priority)
     set_single(c, item, c["fields"]["status"]["id"], c["fields"]["status"]["options"]["todo"])
-    if priority:
+    if priority and not priority_first:
         set_single(c, item, *priority)
     return item
 
 
-def create_story(c, repo, title, body, priority=None):
-    """Create an issue and put it on the board in Todo (the repo and priority must be validated already)."""
+def create_story(c, repo, title, body, priority=None, on_issue=None):
+    """Create an issue and put it on the board in Todo (the repo and priority must be validated already). on_issue(number) runs
+    right after the issue exists and, when given, the priority is set before the status."""
     issue = json.loads(gh("api", f"repos/{repo}/issues", "-f", f"title={title}", "-f", f"body={body}").stdout)
-    item = put_on_board(c, issue["node_id"], priority)
+    if on_issue:
+        on_issue(issue["number"])
+    item = put_on_board(c, issue["node_id"], priority, priority_first=bool(on_issue))
     return {"item": item, "number": issue["number"], "url": issue["html_url"], "repo": repo}
 
 
