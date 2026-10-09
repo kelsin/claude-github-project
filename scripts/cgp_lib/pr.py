@@ -16,6 +16,15 @@ def checks_green(checks):
     return checks is not None and all(x["bucket"] in ("pass", "skipping") for x in checks)
 
 
+def ci_state(checks):
+    """red / pending / green / none for a checks list (pr_checks' result, not None)."""
+    if any(x["bucket"] in ("fail", "cancel") for x in checks):
+        return "red"
+    if any(x["bucket"] == "pending" for x in checks):
+        return "pending"
+    return "green" if checks else "none"
+
+
 def pr_checks(repo, pr):
     """Checks list; [] when none are reported; None on a transient gh failure."""
     p = gh("pr", "checks", str(pr), "-R", repo, "--json", "name,bucket,link,workflow", check=False)
@@ -69,15 +78,16 @@ def ci_wait(a):
             continue
         if checks:
             none_since = time.time()
+        state = ci_state(checks)
         failed = [x for x in checks if x["bucket"] in ("fail", "cancel")]
         pending = [x for x in checks if x["bucket"] == "pending"]
-        if failed:
+        if state == "red":
             out({"state": "red", "failed": failed_logs(a.repo, failed)})
             return
-        if checks and not pending:
+        if state == "green":
             out({"state": "green", "checks": len(checks)})
             return
-        if not checks and time.time() - none_since > a.grace:
+        if state == "none" and time.time() - none_since > a.grace:
             out({"state": "none", "note": "no CI checks reported; treat as green"})
             return
         if not poll.wait():
