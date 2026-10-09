@@ -313,6 +313,11 @@ def record_reviewed(item, ref, sha=None):
         update_data(upd)
 
 
+def forget_review(item):
+    """The commit the user reviewed, and the clean rebases of it, no longer count: the story needs a new review."""
+    update_data(lambda d: [d.get(k, {}).pop(item, None) for k in ("reviewed", "cleanRebase")])
+
+
 def allow_head(item, sha):
     """A head that came from a clean, conflict-free rebase or branch update by this tool needs no new approval."""
     update_data(lambda d: d.setdefault("cleanRebase", {}).setdefault(item, []).append(sha))
@@ -354,9 +359,11 @@ def merge_target(a):
         die(f"refusing to merge: the PR field points at a branch ({v.get('headRefName')}) this loop did not open (expected cgp/{it['number']})")
     if v["state"] == "OPEN" and v.get("isCrossRepository") is not False:  # a fork can use any branch name, cgp/<n> included
         die("refusing to merge: the PR comes from a fork (or its origin could not be read), not a branch of this repo")
-    default = default_branch(c, ref[0])
-    if v["state"] == "OPEN" and default and v.get("baseRefName") != default:
-        die(f"refusing to merge: the PR targets {v.get('baseRefName')}, not the default branch {default}")
+    if v["state"] == "OPEN":
+        why = stack_gate(c, it, v)
+        if why:
+            cancel_auto_merge(*ref)  # an armed auto-merge on a stacked or retargeted PR would land the blocker's commits
+            die("refusing to merge: " + why)
     if v["state"] == "OPEN" and v["isDraft"]:
         die("refusing to merge: the PR is a draft")
     a.repo, a.pr, a.view = ref[0], ref[1], v  # the view just fetched serves merge-wait's first poll
@@ -370,12 +377,48 @@ def merge_target(a):
 
 
 def default_branch(c, repo):
-    """Name of the repo's default branch from the local clone; None when there is no clone to ask."""
+    """Name of the repo's default branch: from its local clone, else from GitHub. None when neither says."""
     path = c["repos"].get(repo)
     try:
-        return default_ref(path).split("/", 1)[1] if path and os.path.isdir(path) else None
+        if path and os.path.isdir(path):
+            return default_ref(path).split("/", 1)[1]
     except SystemExit:
+        pass
+    try:
+        return json.loads(gh("repo", "view", repo, "--json", "defaultBranchRef", check=False).stdout)["defaultBranchRef"]["name"] or None
+    except (ValueError, KeyError, TypeError):
         return None
+
+
+STACKED = ("the story is stacked on another story's branch; `cgp sync` retargets it onto the default branch once that story merged, "
+           "and a rebased PR is reviewed again")
+
+
+def stack_of(item):
+    """The story's stack record (see stack.py), None when it is not stacked."""
+    return load_data().get("stack", {}).get(item)
+
+
+def base_problem(c, repo, view):
+    """Why the PR (a view of it) is not aimed at the repo's default branch, else None. Fails closed: an unknown default branch is a problem."""
+    default = default_branch(c, repo)
+    if not default:
+        return "the default branch could not be determined (no usable local clone, and GitHub did not say), so the PR's base cannot be checked"
+    base = view.get("baseRefName")
+    if base == default:
+        return None
+    return f"the PR targets {base}, not the default branch {default}" + (" (a stacked PR is retargeted by `cgp sync` once its blocker merged)" if (base or "").startswith("cgp/") else "")
+
+
+def stack_gate(c, it, view=None):
+    """Why the story's PR may not be approved, or count as merged, by anyone but the user: the story is stacked, or its PR does not
+    target the default branch (also when it cannot be read or the default branch is unknown). None when nothing stands in the way.
+    `view` is the PR as already read, else it is read here."""
+    if stack_of(it["item"]):
+        return STACKED
+    ref = parse_pr_ref(c, it["pr"])
+    view = view or (ref and pr_view(*ref, check=False))
+    return base_problem(c, ref[0], view) if view else "the PR could not be read"
 
 
 def cancel_auto_merge(repo, pr):

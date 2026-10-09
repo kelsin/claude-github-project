@@ -81,6 +81,12 @@ class Base(unittest.TestCase):
         with open(self.db) as f:
             return json.load(f)
 
+    def db_set(self, **kw):
+        d = self.read_db(); d.update(kw); self.write_db(d)
+
+    def calls(self, sub):
+        return [c for c in self.read_db().get("calls", []) if c[:2] == ["pr", sub]]
+
     def cgp(self, *args, input=None, ok=True, env=None, cwd=None):
         p = subprocess.run([sys.executable, CGP, *args], capture_output=True, text=True, cwd=cwd or self.tmp,  # self.tmp is no repo
                            env={**self.env, **(env or {})}, input=input)
@@ -869,7 +875,7 @@ class TestGates(Base):
         self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/1")
         self.force("i1", "pr_approved")
         self.assertNotEqual(self.cgp("move", "i1", "done", ok=False).returncode, 0)  # PR still open
-        d = self.read_db(); d["pr_view"] = {"state": "MERGED"}; self.write_db(d)
+        d = self.read_db(); d["pr_view"] = {"state": "MERGED", "baseRefName": "main"}; self.write_db(d)
         self.assertEqual(self.cgp("move", "i1", "done")["column"], "done")
 
     def test_merge_requires_pr_approved(self):
@@ -1495,14 +1501,8 @@ class PRBase(Base):
                 "autoMergeRequest": None, "isDraft": False, "headRefOid": "aaa111", "headRefName": "cgp/1",
                 "isCrossRepository": False, "baseRefName": "main", **kw}
 
-    def db_set(self, **kw):
-        d = self.read_db(); d.update(kw); self.write_db(d)
-
     def prs(self, *views):
         self.db_set(prs={"acme/app#1": list(views) if len(views) > 1 else views[0]})
-
-    def calls(self, sub):
-        return [c for c in self.read_db().get("calls", []) if c[:2] == ["pr", sub]]
 
 
 class TestPreview(PRBase):

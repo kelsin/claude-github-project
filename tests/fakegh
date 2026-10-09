@@ -116,6 +116,31 @@ elif args[0] == "pr" and args[1] in ("view", "merge", "checks", "update-branch",
         sys.exit(db.get("merge_rc", 0))
     else:
         save()
+elif args[:2] == ["pr", "edit"]:
+    # --base retargets db["prs"][key] (every queued response of a sequence) or db["pr_view"]; db["edit_rc"]: exit code
+    repo, num = args[args.index("-R") + 1], args[2]
+    db.setdefault("calls", []).append(args)
+    if "--base" in args and not db.get("edit_rc"):
+        views = db["prs"].get(f"{repo}#{num}") if db.get("prs") is not None else db.get("pr_view")
+        for v in (views if isinstance(views, list) else [views]):
+            if isinstance(v, dict):
+                v["baseRefName"] = args[args.index("--base") + 1]
+    save()
+    sys.exit(db.get("edit_rc", 0))
+elif args[:2] == ["pr", "create"]:
+    # a new PR in db["prs"] (--head, --base and --draft are stored); prints its URL
+    repo = args[args.index("-R") + 1]
+    prs = db.setdefault("prs", {})
+    n = max([int(k.split("#")[1]) for k in prs] + [0]) + 1
+    prs[f"{repo}#{n}"] = {"state": "OPEN", "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE", "isDraft": "--draft" in args, "headRefOid": f"pr{n}head",
+                          "headRefName": args[args.index("--head") + 1], "isCrossRepository": False, "baseRefName": args[args.index("--base") + 1]}
+    save()
+    print(f"https://github.com/{repo}/pull/{n}")
+elif args[:2] == ["repo", "view"]:
+    save()
+    if db.get("repo_view_rc"):
+        sys.exit("fakegh: HTTP 502")
+    print(json.dumps({"defaultBranchRef": {"name": db.get("default_branch", "main")}}))
 elif args[:3] == ["api", "-X", "PUT"] and args[3].endswith("/update-branch"):
     db.setdefault("update_branch_calls", []).append(args)
     save()

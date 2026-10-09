@@ -581,6 +581,72 @@ class TestMergeGates(PRBase):
         self.assertEqual(self.data()["cleanRebase"]["i1"], ["ccc333"])
 
 
+STACK = {"on": "i2", "branch": "cgp/2", "pr": "acme/app#2", "tip": "bbb222", "files": ["a.py"]}  # i1 stacked on i2's PR
+
+
+class TestStackedMergeGate(PRBase):
+    """Nothing is merged unless its PR targets the default branch (known from a clone or from GitHub) and no stack record exists."""
+
+    def wait(self):
+        return self.cgp("merge-wait", "i1", "--interval", "0", ok=False)
+
+    def only_disarmed(self, n):
+        self.assertEqual(self.calls("merge"), [["pr", "merge", "1", "-R", "acme/app", "--disable-auto"]] * n)
+
+    def test_a_pr_against_another_branch_is_refused_without_a_clone_and_disarms_auto_merge(self):
+        self.prs(self.view(baseRefName="cgp/2"))
+        for p in (self.cgp("merge", "i1", ok=False), self.wait()):
+            self.assertEqual(p.returncode, 1, p.stderr)
+            self.assertIn("targets cgp/2, not the default branch main", p.stderr)
+            self.assertIn("cgp sync", p.stderr)
+        self.only_disarmed(2)  # no merge, no --auto
+
+    def test_an_unknown_default_branch_refuses_the_merge(self):
+        self.db_set(repo_view_rc=1)
+        for p in (self.cgp("merge", "i1", ok=False), self.wait()):
+            self.assertEqual(p.returncode, 1, p.stderr)
+            self.assertIn("default branch could not be determined", p.stderr)
+        self.only_disarmed(2)
+        self.db_set(repo_view_rc=0)
+        self.assertEqual(self.cgp("merge", "i1"), {"requested": True})
+
+    def test_a_stack_record_refuses_the_merge_even_when_the_pr_was_retargeted(self):
+        self.save_data(stack={"i1": STACK})
+        for p in (self.cgp("merge", "i1", ok=False), self.wait()):
+            self.assertEqual(p.returncode, 1, p.stderr)
+            self.assertIn("stacked", p.stderr)  # the PR's base is main already (GitHub retargeted it): still refused
+        self.only_disarmed(2)
+        self.save_data(stack={})  # cleared by `cgp sync` after its onto-rebase
+        self.assertEqual(self.cgp("merge", "i1"), {"requested": True})
+
+    def test_a_merged_pr_that_landed_on_another_branch_is_not_done(self):
+        self.prs(self.view(state="MERGED", baseRefName="cgp/2"))
+        self.assertIn("not the default branch", self.cgp("move", "i1", "done", ok=False).stderr)
+        self.prs(self.view(state="MERGED"))
+        self.save_data(stack={"i1": STACK})
+        self.assertIn("stacked", self.cgp("move", "i1", "done", ok=False).stderr)
+        self.save_data(stack={})
+        self.assertEqual(self.cgp("move", "i1", "done")["column"], "done")
+
+    def test_a_delegated_approval_does_not_pass_a_stacked_story_or_another_base(self):
+        d = self.read_db(); d["items"][0]["values"]["Auto Approve"] = {"optionId": "o_PR"}; self.write_db(d)
+        for setup, why in ((lambda: self.prs(self.view(baseRefName="cgp/2")), "not the default branch"),
+                           (lambda: (self.prs(self.view()), self.save_data(stack={"i1": STACK})), "stacked")):
+            setup()
+            self.db_set(prs={**self.read_db()["prs"], "acme/app#2": self.view(headRefName="cgp/2", headRefOid="bbb222")})  # the blocker, unchanged
+            self.force("i1", "implement")
+            self.assertIn(why, self.cgp("move", "i1", "pr_approved", ok=False).stderr)
+            r = self.cgp("move", "i1", "pr_review")  # the field does not redirect it: it waits for the user
+            self.assertEqual(r["column"], "pr_review")
+            self.assertNotIn("autoApproved", r)
+        self.assertEqual([c for c in self.calls("merge") if "--auto" in c], [])
+
+    def test_the_move_to_pr_approved_by_a_delegate_works_for_an_ordinary_story(self):
+        d = self.read_db(); d["items"][0]["values"]["Auto Approve"] = {"optionId": "o_PR"}; self.write_db(d)
+        self.force("i1", "implement")
+        self.assertEqual(self.cgp("move", "i1", "pr_review")["column"], "pr_approved")
+
+
 class TestSetValidation(Base):
     def test_plan_is_skip_or_an_https_link_on_claude_ai_or_github(self):
         self.setup_board()

@@ -15,7 +15,7 @@ STRIKES = 3  # failed or fruitless runs of one story in one column before the us
 STORY_STATE = {"answered": "list", "daemonStrikes": "pipe", "resume": "pipe"}  # resume: {agent, head, at} of the worker to message on a send-back
 STORY_KEPT = ("asked", "cursors", "pending", "blocks", "epicOrder", "touches", "approvedTouches", "splits", "approvedSplits", "children",
               "parents", "epicAsked", "policyPlans", "policy", "ratings", "reviewed", "cleanRebase", "notified", "deferred", "reasons",
-              "tainted", "intake", "reruns", "flakes")  # tainted: a review safety gate (a conflicting rebase), not for unstick to lift
+              "tainted", "intake", "reruns", "flakes", "stack")  # stack: {dependent: {on, branch, pr, tip, files}}, see stack.py; tainted: a review safety gate (a conflicting rebase), not for unstick to lift
 MARK = "<!-- cgp -->"
 QMARK = "<!-- cgp:question -->"
 # key, name, emoji, color. plan_review and pr_review are the user's columns (the gates in cmd_move and cmd_merge are built on them).
@@ -64,6 +64,7 @@ STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a b
 # nagAfterHours: fire the notify hook (event nag) again every N hours a story waits on you, while the loop runs (0 = never)
 # maxWorkerMinutes: a worker running longer is reported as stalled by `cgp list` (0 = never), so the loop can release its story
 # nativeDependencies 1: GitHub's own "blocked by" issue dependencies also hold a story back (0 = cgp's own blocks only)
+# stackedStories 1: a story whose only blocker has an open PR starts from that PR's branch (see stack.py); it can only be merged once cgp sync retargeted it
 # intakeSeconds: at most one failing-main / dependency-PR scan per repo this often (a repo opts in with "intake" in its .cgp.json)
 # autoApprove: plan:low,pr:never style, the highest risk rating at which the agent may pass that human gate itself (default never); only a person
 # at a terminal may change it. autoApproveFiles: segment globs (`*` stays in one path segment, `**` spans segments) every changed file must match
@@ -74,7 +75,7 @@ OLD_POLL_SECONDS = 30  # the default before this change: setup stored it in ever
 POLL_SECONDS = 15
 DEFAULTS = {"concurrency": 0, "pollSeconds": POLL_SECONDS, "remoteControl": 1, "notifyCommand": "", "nagAfterHours": 0, "previewProvider": "netlify", "draftPRs": 0,
             "plannerModel": "", "reviewerModel": "", "implementerModel": "", "maxWorkerMinutes": 240, "nativeDependencies": 1,
-            "intakeSeconds": 300, "autoApprove": "plan:never,pr:never", "autoApproveFiles": ["docs/**/*.md", "*.md"],
+            "stackedStories": 0, "intakeSeconds": 300, "autoApprove": "plan:never,pr:never", "autoApproveFiles": ["docs/**/*.md", "*.md"],
             "guardFiles": [".github/*", "CODEOWNERS", "*/CODEOWNERS", ".husky/*", ".pre-commit-config.yaml", ".npmrc", ".yarnrc*",
                            "Makefile", "GNUmakefile", "Dockerfile*", ".gitmodules", ".claude/*", ".mcp.json", ".cgp.json", ".envrc",
                            ".gitlab-ci.yml", "Jenkinsfile", "lefthook.yml", ".githooks/*", ".cgp-rules.md"],
@@ -84,7 +85,7 @@ INTAKE_BOTS = ("dependabot[bot]", "renovate[bot]")  # default allowlist of depen
 INTAKE_MAX_OPEN = 10  # default and cap (20) of open intake stories per repo
 INTAKE_PER_CYCLE = 3  # new intake stories per repo per scan
 INTAKE_KEEP_SECONDS = 90 * 86400  # incident keys older than this are forgotten
-BOOL_SETTINGS = ("nativeDependencies",)  # on / off on the command line, stored as 1 / 0
+BOOL_SETTINGS = ("nativeDependencies", "stackedStories")  # on / off on the command line, stored as 1 / 0
 LIST_SETTINGS = ("sharedFiles", "guardFiles", "autoApproveFiles")
 STRING_SETTINGS = ("notifyCommand", "previewProvider", "plannerModel", "reviewerModel", "implementerModel")
 PR_URL = re.compile(r"^https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pull/(\d+)/?$")
