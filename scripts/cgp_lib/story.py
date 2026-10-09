@@ -10,6 +10,7 @@ from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
 from .store import cfg, load_data, update_data, update_state
 from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, set_single, set_text
 from .session import clear_phase, reset_strikes, set_phase, worker_pr
+from .brief import cmd_brief
 from .repoconf import repo_config, rules_text, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
 from .pr import cancel_auto_merge, changed_since_review, cmd_pr_state, default_branch, forget_review, pr_view, record_reviewed, stack_gate, stack_of
@@ -346,10 +347,10 @@ def cmd_preview(a):
     out({"item": a.item, "preview": url})
 
 
-def read_body():
+def read_body(empty="empty comment body (pipe it on stdin)"):
     body = sys.stdin.read().strip()
     if not body:
-        die("empty comment body (pipe it on stdin)")
+        die(empty)
     return body
 
 
@@ -504,4 +505,5 @@ def cmd_prepare(a):
     res["worktree"] = {"error": stack_wait} if stack_wait else call(cmd_worktree, item=a.item)
     if "error" not in res["worktree"]:
         res["sync"] = call(cmd_sync, item=a.item)
+    res["brief"] = call(cmd_brief, target=it["issueRepo"], write=False, sha=None)  # the repo's cached map, read after the sync so head is current (cgp brief)
     out(res)

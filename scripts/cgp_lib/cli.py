@@ -11,6 +11,7 @@ from .models import RATINGS, cmd_models
 from .policy import cmd_rate
 from .review import cmd_review
 from .rules import cmd_rules
+from .brief import cmd_brief
 from .repoconf import cmd_repo_config
 from .intake import cmd_add, cmd_import
 from .gitwt import cmd_guard, cmd_sync, cmd_worktree, cmd_worktree_remove
@@ -97,6 +98,9 @@ COMMANDS = [
     ("rate", cmd_rate, "Record your risk rating of a story (the auto-approval policy reads it)", [A("item"), A("rating", choices=list(RATINGS))]),
     ("repo-config", cmd_repo_config, "The .cgp.json of a repo's default branch (test and lint commands, shared and guarded files, ...)", [
         A("target", help="owner/name or a story's item id")]),
+    ("brief", cmd_brief, "A repo's cached one-page map for workers (status, text); --write stores one from stdin", [
+        A("target", help="owner/name or a story's item id"), A("--write", action="store_true", help="store the text on stdin"),
+        A("--sha", help="with --write: the default branch commit the text was written from")]),
     ("unstick", cmd_unstick, "Clear one story's operational state (worker, strikes, answered, Waiting On); you only, not agents", [
         A("item"), A("--dry-run", action="store_true", help="list what would be cleared; change nothing"),
         A("--kill", action="store_true", help="also stop its worker if it is still running")]),

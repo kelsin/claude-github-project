@@ -183,6 +183,136 @@ class TestRepoConfig(test_cgp.SyncBase):
         self.assertEqual(self.cgp("prepare", "i1")["plan"]["approved"], [])
 
 
+class TestBrief(test_cgp.SyncBase):
+    def head(self):
+        return subprocess.run(["git", "-C", self.clone, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+    def commit_files(self, *names):
+        for n in names:
+            with open(os.path.join(self.clone, n), "w") as f:
+                f.write(n)
+        self.git(self.clone, "add", "."); self.git(self.clone, "commit", "-qm", "files")
+        self.git(self.clone, "push", "-q", "origin", "HEAD:main")
+
+    def write(self, sha, text="map", ok=True):
+        return self.cgp("brief", "acme/app", "--write", "--sha", sha, input=text, ok=ok)
+
+    def test_missing_then_write_creates_the_directory_and_is_fresh(self):
+        r = self.cgp("brief", "acme/app")
+        self.assertEqual((r["status"], r["generate"]), ("missing", True))
+        self.assertNotIn("brief", r)
+        self.write(self.head(), "the map")
+        self.assertTrue(os.path.exists(os.path.join(self.env["CGP_HOME"], "briefs", "acme", "app.json")))
+        r = self.cgp("brief", "acme/app")
+        self.assertEqual((r["status"], r["brief"], r["generate"]), ("fresh", "the map", False))
+
+    def test_behind_until_the_threshold_then_stale(self):
+        self.write(self.head())
+        self.commit_files("a.txt", "b.txt")
+        r = self.cgp("brief", "acme/app")
+        self.assertEqual((r["status"], r["changedFiles"], r["brief"]), ("behind", 2, "map"))
+        self.cgp("config", "briefThreshold", "2")
+        r = self.cgp("brief", "acme/app")
+        self.assertEqual((r["status"], r["generate"]), ("stale", True))
+        self.assertNotIn("brief", r)
+
+    def test_threshold_zero_makes_any_change_stale(self):
+        self.write(self.head())
+        self.cgp("config", "briefThreshold", "0")
+        self.assertEqual(self.cgp("brief", "acme/app")["status"], "fresh")
+        self.push_to_main("two\n")
+        self.assertEqual(self.cgp("brief", "acme/app")["status"], "stale")
+
+    def test_story_branch_commits_leave_it_fresh(self):
+        self.write(self.head())
+        with open(os.path.join(self.wt, "g.txt"), "w") as f:
+            f.write("mine")
+        self.git(self.wt, "add", "."); self.git(self.wt, "commit", "-qm", "mine")
+        self.assertEqual(self.cgp("brief", "acme/app")["status"], "fresh")
+
+    def test_a_force_pushed_default_branch_is_stale_and_can_be_rewritten(self):
+        self.push_to_main("two\n")
+        self.write(self.head())
+        self.git(self.clone, "reset", "-q", "--hard", "HEAD~1")
+        self.git(self.clone, "push", "-qf", "origin", "HEAD:main")
+        self.assertEqual(self.cgp("brief", "acme/app")["status"], "stale")
+        self.write(self.head(), "new")
+        self.assertEqual(self.cgp("brief", "acme/app")["brief"], "new")
+
+    def test_write_refusals(self):
+        old = self.head()
+        self.push_to_main("two\n")
+        new = self.head()
+        self.assertNotEqual(self.write(new, "", ok=False).returncode, 0)
+        self.assertNotEqual(self.write("0" * 40, ok=False).returncode, 0)
+        self.assertNotEqual(self.write("-x", ok=False).returncode, 0)
+        self.write(new, "newer")
+        self.assertNotEqual(self.write(old, "older", ok=False).returncode, 0)
+        self.assertEqual(self.cgp("brief", "acme/app")["brief"], "newer")
+
+    def test_short_sha_is_stored_in_full_and_long_text_is_cut(self):
+        self.write(self.head()[:8], "x" * 7000)
+        r = self.cgp("brief", "acme/app")
+        self.assertEqual(r["sha"], self.head())
+        self.assertTrue(r["brief"].startswith("x" * 6000) and len(r["brief"]) < 6100)
+
+    def test_an_item_id_resolves_and_a_repo_without_a_clone_is_unavailable(self):
+        self.assertEqual(self.cgp("brief", "i1")["repo"], "acme/app")
+        boards = os.path.join(self.env["CGP_HOME"], "boards")
+        name = next(n for n in os.listdir(boards) if n.endswith(".json") and not n.endswith((".data.json", ".history.json")))
+        with open(os.path.join(boards, name)) as f:
+            c = json.load(f)
+        c["repos"]["acme/other"] = None
+        with open(os.path.join(boards, name), "w") as f:
+            json.dump(c, f)
+        self.assertEqual(self.cgp("brief", "acme/other")["status"], "unavailable")
+
+    def test_prepare_returns_the_brief(self):
+        self.assertEqual(self.cgp("prepare", "i1")["brief"]["status"], "missing")
+        self.write(self.head())
+        self.assertEqual(self.cgp("prepare", "i1")["brief"]["status"], "fresh")
+
+    def other_push(self):
+        """Advance origin/main from a second clone so self.clone's origin/main is stale until something fetches."""
+        other = os.path.join(self.tmp, "other")
+        subprocess.run(["git", "clone", "-q", self.origin, other], check=True, capture_output=True)
+        with open(os.path.join(other, "o.txt"), "w") as f:
+            f.write("o")
+        self.git(other, "add", "."); self.git(other, "commit", "-qm", "elsewhere")
+        self.git(other, "push", "-q", "origin", "HEAD:main")
+        return subprocess.run(["git", "-C", other, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+    def test_prepare_reads_the_brief_after_the_fetch(self):
+        new = self.other_push()
+        self.assertNotEqual(self.head(), new)
+        self.assertEqual(self.cgp("prepare", "i1")["brief"]["head"], new)
+
+    def test_prepare_still_reads_the_brief_when_the_worktree_errors(self):
+        shutil.rmtree(self.wt)
+        self.git(self.clone, "worktree", "prune")
+        with open(self.wt, "w") as f:
+            f.write("in the way")
+        r = self.cgp("prepare", "i1")
+        self.assertIn("error", r["worktree"])
+        self.assertEqual(r["brief"]["status"], "missing")
+
+    def stored(self, sha):
+        with open(os.path.join(self.env["CGP_HOME"], "briefs", "acme", "app.json"), "w") as f:
+            json.dump({"sha": sha, "writtenAt": 1, "text": "map"}, f)
+
+    def test_a_malformed_stored_sha_is_missing_and_can_be_overwritten(self):
+        os.makedirs(os.path.join(self.env["CGP_HOME"], "briefs", "acme"))
+        for bad in ("--output=x", "HEAD", "abc", 5):
+            self.stored(bad)
+            self.assertEqual(self.cgp("brief", "acme/app")["status"], "missing")
+            self.write(self.head(), "good")
+            self.assertEqual(self.cgp("brief", "acme/app")["brief"], "good")
+
+    def test_threshold_is_an_integer_setting(self):
+        self.assertEqual(self.cgp("config", "briefThreshold", "25")["briefThreshold"], 25)
+        self.assertNotEqual(self.cgp("config", "briefThreshold", "many", ok=False).returncode, 0)
+
+
 class TestPreviewProviders(PRBase):
     def comment(self, login, body):
         d = self.read_db()
