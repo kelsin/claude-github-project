@@ -33,6 +33,8 @@ The loop dispatches one background worker per actionable story (no cap by defaul
 
 **Auto-approval policy.** Per board, instead of per story, `cgp config autoApprove plan:low,pr:low` (run by you in a terminal) lets the agent pass a gate for low-risk, docs-only stories (`autoApproveFiles`). The worker rates the story with `cgp rate` and then makes its usual move into Plan Review or PR Review; `cgp move` lands it in the approved column instead when the policy says yes, and posts a comment saying why. Otherwise nothing changes: the story waits for you, and the move's `policy.reason` says what stopped it. The rules are in [safety](safety.md). Unlike the field, the policy does not delegate the merge: a PR it approved is held to the commit it checked.
 
+**Deferred work.** Unfixed review nits and out-of-scope items are listed in a `## Deferred` section of the PR description (`- title :: reason`). After the PR merges, the worker runs `cgp defer <story>`, which files each (at most 10, once each) as a Todo story with Priority Hold in the same repo, pointing back to the parent. Nothing starts until you release a story from Hold.
+
 **Sub-stories.** A plan for a large story may declare up to 10 sub-stories (`cgp split <story> --declare`). When you approve the plan, the worker runs `cgp split <story>`, which creates them in Todo with their plan skipped (the files each may change come from the approved declaration) and orders them as declared (as GitHub dependencies when possible, else in cgp). The parent waits (`Waiting On: Another story`) and is closed once every sub-story is Done by a merged PR. See [Safety](safety.md).
 
 ## Questions

@@ -14,4 +14,4 @@ The user approved the diff as it stands. Run `CGP feedback <item>` (act on anyth
    - `blocked` or `closed`: `CGP ask` explaining why and stop.
    - `pending`: run `merge-wait` again (rule 7 caps this).
    Give up after 5 fix rounds with `CGP ask`.
-3. Once merged (`CGP move <item> done` is a no-op if the story is already Done; treat "already done" as success): `CGP worktree-remove <item>`, post a status comment (merged, PR link), `CGP move <item> done`.
+3. Once merged (`CGP move <item> done` is a no-op if the story is already Done; treat "already done" as success): `CGP worktree-remove <item>`, run `CGP defer <item>` (files the PR description's `## Deferred` entries as stories on hold; safe to rerun; an error goes into the status comment and never blocks Done), post a status comment (merged, PR link, the stories `defer` filed), `CGP move <item> done`.
