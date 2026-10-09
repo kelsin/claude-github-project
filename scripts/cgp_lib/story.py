@@ -143,7 +143,9 @@ def cmd_approve(a):
             out({"item": a.item, "column": it["column"], "unchanged": True, "note": f"already in {it['column']}"})
             return
         die(f"story is in {it['column']}: only a story in plan_review or pr_review can be approved")
-    ref = sha = None
+    ref = sha = reviewed = None
+    if target == "plan_approved" and not it["plan"]:
+        die("the story has no plan link to approve")
     if target == "pr_approved":
         ref = parse_pr_ref(c, it["pr"])
         if not ref:
@@ -155,6 +157,7 @@ def cmd_approve(a):
         if msg:
             die("refusing to approve: " + msg)
         sha = v["headRefOid"]
+        reviewed = load_data()["reviewed"][a.item]["sha"]
         if v["isDraft"]:
             ready_pr(ref)
     set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][target])
@@ -168,7 +171,7 @@ def cmd_approve(a):
                     w.update(phase=DEFAULT_PHASE[target], phaseAt=now_iso())
     update_state(upd)
     update_data(lambda d: (d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]), reset_strikes(d, a.item)))
-    out({"item": a.item, "column": target, "approved": True, **({"sha": sha} if sha else {"plan": it["plan"]})})
+    out({"item": a.item, "column": target, "approved": True, **({"sha": sha, "reviewed": reviewed} if sha else {"plan": it["plan"]})})
 
 
 def snapshot_touches(item):

@@ -1583,7 +1583,7 @@ class TestApprove(PRBase):
     def test_pr_review_goes_to_pr_approved_pinned_to_the_reviewed_commit(self):
         self.force("i1", "pr_review")
         r = json.loads(self.tty("approve", "i1").stdout)
-        self.assertEqual((r["column"], r["approved"], r["sha"]), ("pr_approved", True, "aaa111"))
+        self.assertEqual((r["column"], r["approved"], r["sha"], r["reviewed"]), ("pr_approved", True, "aaa111", "aaa111"))
         self.assertEqual(self.state()["workers"][0]["column"], "pr_approved")
         self.assertEqual(self.cgp("merge", "i1"), {"requested": True})
         self.prs(self.view(headRefOid="bbb222"))
@@ -1604,7 +1604,7 @@ class TestApprove(PRBase):
         self.assertEqual(self.column(), "pr_review")
         self.save_data(cleanRebase={"i1": ["bbb222"]})
         r = json.loads(self.tty("approve", "i1").stdout)
-        self.assertEqual((r["column"], r["sha"]), ("pr_approved", "bbb222"))
+        self.assertEqual((r["column"], r["sha"], r["reviewed"]), ("pr_approved", "bbb222", "aaa111"))
 
     def test_a_draft_is_made_ready_only_after_the_checks_pass(self):
         ready = ["pr", "ready", "1", "-R", "acme/app"]
@@ -1619,13 +1619,20 @@ class TestApprove(PRBase):
     def test_agents_and_scripts_cannot_approve(self):
         for column in ("plan_review", "pr_review"):
             self.force("i1", column)
-            for env, kw in (({"CGP_SESSION": "abc"}, {}), ({"CLAUDECODE": "1"}, {}), ({}, {"input": ""})):
-                p = self.cgp("approve", "i1", ok=False, env=env, **kw)
+            for env in ({"CGP_SESSION": "abc"}, {"CLAUDECODE": "1"}):
+                p = self.tty("approve", "i1", env=env)
                 self.assertNotEqual(p.returncode, 0)
                 self.assertIn("can only be run by you", p.stderr)
-            p = self.tty("approve", "i1", env={"CGP_SESSION": "abc"})
+            p = self.cgp("approve", "i1", ok=False, input="")
+            self.assertNotEqual(p.returncode, 0)
             self.assertIn("can only be run by you", p.stderr)
             self.assertEqual(self.column(), column)
+
+    def test_plan_review_without_a_plan_link_is_refused(self):
+        self.cgp("set", "i1", "plan", "")
+        self.force("i1", "plan_review")
+        self.refused("no plan link")
+        self.assertEqual(self.column(), "plan_review")
 
     def test_other_columns_are_refused_and_an_approved_story_is_unchanged(self):
         for column in ("todo", "implement"):

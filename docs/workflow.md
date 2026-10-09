@@ -13,7 +13,7 @@
 | 🚀 PR Approved | agents | Squash merge (auto-merge once CI is green), fix conflicts and CI until merged, move to Done |
 | 🎉 Done | nobody | |
 
-You can also pass the gate from a terminal with `cgp approve <item>` (the item is the project item id): it moves a story from Plan Review to Plan Approved or from PR Review to PR Approved. It must be run by you in a real terminal, outside a Claude session; a notification action that runs it needs a real terminal too, and wrapping it in a pty is not a supported route. For a PR it approves only the commit you were shown (it refuses a PR with no review on record or one that changed after review) and prints that commit. A plan has no pin, so it prints the plan URL to check.
+You can also pass the gate from a terminal with `cgp approve <item>` (the item is the project item id): it moves a story from Plan Review to Plan Approved or from PR Review to PR Approved. It must be run by you in a real terminal, outside a Claude session; a notification action that runs it needs a real terminal too, and wrapping it in a pty is not a supported route. For a PR it approves only the commit recorded when the story entered PR Review, or a clean, conflict-free rebase of it made by cgp. It refuses a PR with no such record or with any other head, and prints the commit it approved. A plan has no pin, so it prints the plan URL to check.
 
 Colors: Todo blue, Plan yellow, Plan Review purple, Plan Approved blue, Implement red, PR Review purple, PR Approved blue, Done green.
 
