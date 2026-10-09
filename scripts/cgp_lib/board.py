@@ -509,8 +509,8 @@ def cmd_config(a):
         if a.key not in DEFAULTS:
             die(f"unknown setting; one of {list(DEFAULTS)}")
         from . import policy  # policy imports this module
-        if a.value is not None and a.key.startswith(policy.HUMAN_ONLY) and policy.agent_context():
-            die(f"{a.key} can only be changed by you, in a terminal outside a Claude session (it widens what agents may approve or run)")
+        if a.value is not None and a.key.startswith(policy.HUMAN_ONLY):
+            policy.require_human(f"{a.key} can only be changed by you, in a terminal outside a Claude session (it widens what agents may approve or run)")
         if a.key in LIST_SETTINGS:
             if a.value is None:
                 die(f"usage: cgp config {a.key} <comma-separated globs, or empty for none>")

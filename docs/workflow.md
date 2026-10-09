@@ -13,6 +13,8 @@
 | 🚀 PR Approved | agents | Squash merge (auto-merge once CI is green), fix conflicts and CI until merged, move to Done |
 | 🎉 Done | nobody | |
 
+You can also pass the gate from a terminal with `cgp approve <item>` (the item is the project item id): it moves a story from Plan Review to Plan Approved or from PR Review to PR Approved. It must be run by you in a real terminal, outside a Claude session; a notification action that runs it needs a real terminal too, and wrapping it in a pty is not a supported route. For a PR it approves only the commit you were shown (it refuses a PR with no review on record or one that changed after review) and prints that commit. A plan has no pin, so it prints the plan URL to check.
+
 Colors: Todo blue, Plan yellow, Plan Review purple, Plan Approved blue, Implement red, PR Review purple, PR Approved blue, Done green.
 
 Planning and review share one worker run (as do implementing and PR review), so a story is picked up by a fresh worker only after Todo, Plan Approved and PR Approved. The mod shows which phase each worker is in (see [the mod](mod.md)).

@@ -1555,3 +1555,87 @@ class TestReview(Base):
         for bad in ("-1", "1.5", "soon"):
             self.assertNotEqual(self.cgp("config", "nagAfterHours", bad, ok=False).returncode, 0)
         self.assertEqual(self.cgp("config", "nagAfterHours", "6")["nagAfterHours"], 6)
+
+
+class TestApprove(PRBase):
+    def setUp(self):
+        super().setUp()
+        self.cgp("worker", "start", "i1", "plan", "one")
+
+    def column(self):
+        return self.cgp("list")["items"][0]["column"]
+
+    def refused(self, why):
+        p = self.tty("approve", "i1")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn(why, p.stderr)
+        return p
+
+    def test_plan_review_goes_to_plan_approved_and_shows_the_plan(self):
+        self.cgp("set", "i1", "plan", "https://claude.ai/artifact/x")
+        self.force("i1", "plan_review")
+        p = self.tty("approve", "i1")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        r = json.loads(p.stdout)
+        self.assertEqual((r["column"], r["approved"], r["plan"]), ("plan_approved", True, "https://claude.ai/artifact/x"))
+        self.assertEqual(self.state()["workers"][0]["column"], "plan_approved")
+
+    def test_pr_review_goes_to_pr_approved_pinned_to_the_reviewed_commit(self):
+        self.force("i1", "pr_review")
+        r = json.loads(self.tty("approve", "i1").stdout)
+        self.assertEqual((r["column"], r["approved"], r["sha"]), ("pr_approved", True, "aaa111"))
+        self.assertEqual(self.state()["workers"][0]["column"], "pr_approved")
+        self.assertEqual(self.cgp("merge", "i1"), {"requested": True})
+        self.prs(self.view(headRefOid="bbb222"))
+        self.assertEqual(self.cgp("merge", "i1", ok=False).returncode, 7)
+
+    def test_no_record_or_a_record_for_another_pr_is_refused_and_not_written(self):
+        self.force("i1", "pr_review")
+        for rec in ({}, {"i1": {"pr": "acme/app#2", "sha": "aaa111"}}):
+            self.save_data(reviewed=rec)
+            self.refused("no review of this PR is on record")
+            self.assertEqual(self.column(), "pr_review")
+            self.assertEqual(self.data()["reviewed"], rec)
+
+    def test_a_moved_head_is_refused_unless_it_is_a_clean_rebase(self):
+        self.force("i1", "pr_review")
+        self.prs(self.view(headRefOid="bbb222"))
+        self.refused("code changed after review")
+        self.assertEqual(self.column(), "pr_review")
+        self.save_data(cleanRebase={"i1": ["bbb222"]})
+        r = json.loads(self.tty("approve", "i1").stdout)
+        self.assertEqual((r["column"], r["sha"]), ("pr_approved", "bbb222"))
+
+    def test_a_draft_is_made_ready_only_after_the_checks_pass(self):
+        ready = ["pr", "ready", "1", "-R", "acme/app"]
+        self.force("i1", "pr_review")
+        self.prs(self.view(isDraft=True, headRefOid="bbb222"))
+        self.refused("code changed after review")
+        self.assertNotIn(ready, self.read_db()["calls"])
+        self.prs(self.view(isDraft=True))
+        self.assertEqual(self.tty("approve", "i1").returncode, 0)
+        self.assertIn(ready, self.read_db()["calls"])
+
+    def test_agents_and_scripts_cannot_approve(self):
+        for column in ("plan_review", "pr_review"):
+            self.force("i1", column)
+            for env, kw in (({"CGP_SESSION": "abc"}, {}), ({"CLAUDECODE": "1"}, {}), ({}, {"input": ""})):
+                p = self.cgp("approve", "i1", ok=False, env=env, **kw)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn("can only be run by you", p.stderr)
+            p = self.tty("approve", "i1", env={"CGP_SESSION": "abc"})
+            self.assertIn("can only be run by you", p.stderr)
+            self.assertEqual(self.column(), column)
+
+    def test_other_columns_are_refused_and_an_approved_story_is_unchanged(self):
+        for column in ("todo", "implement"):
+            self.force("i1", column)
+            self.refused(column)
+        self.force("i1", "pr_approved")
+        self.assertEqual(json.loads(self.tty("approve", "i1").stdout)["unchanged"], True)
+
+    def test_pr_review_without_a_pr_link_is_refused(self):
+        self.cgp("set", "i1", "pr", "")
+        self.force("i1", "pr_review")
+        self.refused("no valid PR link")
+        self.assertEqual(self.column(), "pr_review")

@@ -17,7 +17,7 @@ from .pr import cmd_ci_wait, cmd_merge, cmd_merge_wait, cmd_pr_state
 from .sched import cmd_block, cmd_list, cmd_overlap, cmd_status, cmd_touches, cmd_wait
 from .unstick import cmd_unstick
 from .session import cmd_release, cmd_session_title, cmd_stop, cmd_use, cmd_worker
-from .story import (cmd_answers, cmd_ask, cmd_comment, cmd_feedback, cmd_move, cmd_prepare, cmd_preview, cmd_set)
+from .story import (cmd_answers, cmd_approve, cmd_ask, cmd_comment, cmd_feedback, cmd_move, cmd_prepare, cmd_preview, cmd_set)
 from .util import die
 
 A = lambda *names, **kw: (names, kw)  # one add_argument call
@@ -44,6 +44,7 @@ COMMANDS = [
         A("--brief", action="store_true")]),
     ("wait", cmd_wait, "Poll until a story becomes actionable, a worker is released, all is Done, or the timeout passes", [
         A("--timeout", type=int, default=540), A("--interval", type=int, default=0)]),
+    ("approve", cmd_approve, "Approve the gate the story waits at (plan_review or pr_review); only you, in a terminal", [A("item")]),
     ("move", cmd_move, "Move a story to a column (human gates enforced)", [A("item"), A("column")]),
     ("set", cmd_set, "Set the plan or pr field of a story", [A("item"), A("field"), A("value")]),
     ("preview", cmd_preview, "Copy the deploy preview URL from the story's PR into the Preview field", [A("item")]),
