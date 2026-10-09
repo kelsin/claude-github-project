@@ -1986,12 +1986,6 @@ class StackBase(test_cgp.SyncBase):
         d["prs"] = {"acme/app#2": blocker or self.pr(headRefName="cgp/2", headRefOid=self.blocker_tip), "acme/app#1": story or self.pr(baseRefName="cgp/2")}
         self.write_db(d)
 
-    def db_set(self, **kw):
-        d = self.read_db(); d.update(kw); self.write_db(d)
-
-    def calls(self, sub):
-        return [c for c in self.read_db().get("calls", []) if c[:2] == ["pr", sub]]
-
     def comments(self):
         return [c["body"] for c in self.read_db()["comments"].get("acme/app#1", [])]
 
@@ -2106,6 +2100,83 @@ class TestStackedSync(StackBase):
         self.assertNotIn("i1", self.board_data().get("cleanRebase", {}))
         self.assertEqual(self.cgp("sync", "i1")["state"], "clean")
 
+    def push_story(self):
+        self.git(self.wt, "push", "-q", "origin", "HEAD:refs/heads/cgp/1")
+        self.git(self.wt, "fetch", "-q")
+
+    def test_two_syncs_after_a_squash_merge_leave_the_rebased_branch_alone(self):
+        self.git(self.clone, "checkout", "-q", "cgp/2")  # a blocker of two commits: the squash commit is no patch of either
+        self.commit_in(self.clone, "b2.txt", "more\n")
+        self.git(self.clone, "push", "-q", "origin", "cgp/2")
+        self.git(self.clone, "checkout", "-q", "main")
+        self.blocker_tip = self.rev(self.clone, "cgp/2")
+        self.set_prs()
+        self.assertEqual(self.cgp("sync", "i1")["state"], "rebased")
+        self.push_story()  # the story branch on the remote holds the blocker's commits
+        self.squash_blocker()
+        self.assertEqual(self.cgp("sync", "i1")["state"], "rebased")
+        rebased = self.rev(self.wt, "HEAD")
+        self.assertEqual(self.rev(self.wt, "origin/cgp/1"), rebased)  # pushed with the lease
+        self.git(self.wt, "fetch", "-q")
+        self.assertEqual(self.cgp("sync", "i1")["state"], "clean")  # not a rebase onto the old remote branch again
+        self.assertEqual(self.rev(self.wt, "HEAD"), rebased)
+        self.assertEqual(self.rev(self.wt, "HEAD~1"), self.rev(self.clone, "main"))
+
+    def test_commits_others_pushed_to_a_stacked_branch_are_reported_as_rebased(self):
+        self.push_story()
+        other = os.path.join(self.tmp, "other")
+        self.git(self.tmp, "clone", "-q", "-b", "cgp/1", self.origin, other)
+        self.commit_in(other, "e.txt", "suggested\n")
+        self.git(other, "push", "-q", "origin", "cgp/1")
+        r = self.cgp("sync", "i1")
+        self.assertEqual(r["state"], "rebased")
+        self.assertTrue(os.path.exists(os.path.join(self.wt, "e.txt")))
+
+    def test_a_blocker_merged_into_another_branch_is_not_rebased_onto_the_default_branch(self):
+        self.squash_blocker()
+        self.force("i1", "pr_review")
+        self.set_prs(blocker=self.pr(state="MERGED", headRefName="cgp/2", headRefOid=self.blocker_tip, baseRefName="release"))
+        r = self.cgp("sync", "i1")
+        self.assertEqual(r["state"], "error")
+        self.assertIn("release", r["stderr"])
+        self.assertIn("i1", self.board_data()["stack"])
+        self.assertEqual(self.column("i1"), "implement")
+        self.assertEqual(self.calls("edit"), [])
+        self.assertEqual(self.rev(self.wt, "HEAD~1"), self.blocker_tip)
+
+    def test_finishing_a_conflict_with_an_open_blocker_by_hand_moves_the_tip(self):
+        self.commit_in(self.wt, "c.txt", "mine\n")
+        self.git(self.clone, "checkout", "-q", "cgp/2")
+        self.commit_in(self.clone, "c.txt", "theirs\n")  # the blocker adds a file the story adds too
+        self.git(self.clone, "push", "-q", "origin", "cgp/2")
+        self.git(self.clone, "checkout", "-q", "main")
+        new_tip = self.rev(self.clone, "cgp/2")
+        self.assertEqual(self.cgp("sync", "i1")["state"], "conflict")
+        self.assertEqual(self.board_data()["stack"]["i1"]["pendingTip"], new_tip)
+        with open(os.path.join(self.wt, "c.txt"), "w") as f:
+            f.write("both\n")
+        self.git(self.wt, "add", "c.txt")
+        subprocess.run(["git", "-C", self.wt, "rebase", "--continue"], check=True, capture_output=True,
+                       env={**os.environ, "GIT_EDITOR": "true", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+        self.assertEqual(self.cgp("sync", "i1")["state"], "rebased")
+        rec = self.board_data()["stack"]["i1"]
+        self.assertEqual(rec["tip"], new_tip)
+        self.assertNotIn("pendingTip", rec)
+        self.assertEqual(self.cgp("sync", "i1")["state"], "clean")  # the tip is where the story is built: no taint, no second rebase
+
+    def test_an_open_blocker_rebase_of_a_story_in_review_sends_it_back(self):
+        self.force("i1", "pr_review")
+        self.git(self.clone, "checkout", "-q", "cgp/2")
+        self.commit_in(self.clone, "b2.txt", "more\n")
+        self.git(self.clone, "push", "-q", "origin", "cgp/2")
+        self.git(self.clone, "checkout", "-q", "main")
+        self.db_set(pr_files={"acme/app#2": ["b.txt", "b2.txt"]})
+        r = self.cgp("sync", "i1")
+        self.assertEqual(r["state"], "rebased")
+        self.assertEqual(self.column("i1"), "implement")
+        self.assertEqual(self.board_data()["stack"]["i1"]["files"], ["b.txt", "b2.txt"])
+        self.assertTrue(any("rebased" in c for c in self.comments()))
+
     def test_an_already_retargeted_pr_is_not_edited_again(self):
         self.squash_blocker()
         self.set_prs(blocker=self.pr(state="MERGED", headRefName="cgp/2"), story=self.pr(baseRefName="main"))
@@ -2168,6 +2239,9 @@ class TestStackedStart(StackBase):
     def prepared(self):
         return self.cgp("prepare", "i1")
 
+    def wt_exists(self):
+        return os.path.isdir(os.path.join(self.env["CGP_HOME"], "worktrees", "acme", "app", "1"))
+
     def test_prepare_records_the_stack_and_cuts_the_worktree_from_the_blockers_branch(self):
         r = self.prepared()
         self.assertEqual(r["stack"], {"on": "i2", "branch": "cgp/2", "pr": "acme/app#2", "tip": self.blocker_tip, "files": ["b.txt"]})
@@ -2209,16 +2283,31 @@ class TestStackedStart(StackBase):
                 self.cgp("config", "stackedStories", "off" if name == "setting off" else "on")
                 r = self.prepared()
                 self.assertIsNone(r["stack"])
-                self.assertNotIn("stackedOn", r["worktree"])
-                self.assertEqual(self.rev(r["worktree"]["path"], "HEAD"), self.rev(self.clone, "main"))
                 self.assertNotIn("i1", self.board_data().get("stack", {}))
-                self.cgp("worktree-remove", "i1", "--discard")
+                if name == "setting off":  # not asked to stack: as before
+                    self.assertEqual(self.rev(r["worktree"]["path"], "HEAD"), self.rev(self.clone, "main"))
+                    self.cgp("worktree-remove", "i1", "--discard")
+                else:  # asked to, could not: no worktree from the default branch while the blocker is unfinished
+                    self.assertIn("waits on", r["worktree"]["error"])
+                    self.assertNotIn("sync", r)
+                    self.assertFalse(self.wt_exists())
         self.cgp("config", "stackedStories", "on")
+
+    def test_a_story_with_a_branch_of_its_own_gets_no_worktree_while_its_blocker_is_unfinished(self):
+        self.git(self.clone, "push", "-q", "origin", "main:refs/heads/cgp/1")  # a branch for the story exists on the remote
+        r = self.prepared()
+        self.assertIsNone(r["stack"])
+        self.assertIn("waits on two", r["worktree"]["error"])
+        self.assertFalse(self.wt_exists())
+        self.assertNotIn("i1", [i["item"] for i in self.cgp("list")["batch"]])  # the scheduler agrees: it stays blocked
+        self.force("i2", "done")
+        r = self.prepared()
+        self.assertNotIn("error", r["worktree"])
+
 
     def test_a_blocker_that_is_itself_stacked_or_a_cycle_is_refused(self):
         self.put_data(stack={"i2": {"on": "i3", "branch": "cgp/3", "pr": "acme/app#3", "tip": "x", "files": []}})
         self.assertIsNone(self.prepared()["stack"])
-        self.cgp("worktree-remove", "i1", "--discard")
         self.put_data(stack={})
         d = self.read_db(); d["blocked_by"] = {"acme/app#2": [node(1)]}; self.write_db(d)  # i2 waits for i1 on GitHub: a cycle
         self.assertIsNone(self.prepared()["stack"])
@@ -2244,9 +2333,8 @@ class TestStackedStart(StackBase):
     def test_set_pr_and_the_move_to_pr_review_follow_the_stack(self):
         self.prepared()
         self.force("i1", "implement")
-        for base in ("someone/else",):
-            self.set_prs(story=self.pr(baseRefName=base))
-            self.assertIn("opens its PR against", self.cgp("set", "i1", "pr", self.PR1, ok=False).stderr)
+        self.set_prs(story=self.pr(baseRefName="someone/else"))
+        self.assertIn("opens its PR against", self.cgp("set", "i1", "pr", self.PR1, ok=False).stderr)
         self.set_prs(story=self.pr(baseRefName="cgp/2"))
         self.cgp("set", "i1", "pr", self.PR1)
         self.set_prs(story=self.pr(baseRefName="main"))
@@ -2362,6 +2450,17 @@ class TestStackedSendBack(StackBase):
         self.cgp("list")
         self.assertNotIn("i1", self.board_data()["stack"])
 
+    def test_a_story_sent_back_for_its_blockers_column_is_held_until_the_blocker_is_in_review_again(self):
+        self.force("i2", "implement")
+        self.cgp("list")
+        self.assertTrue(self.sent_back())
+        snap = self.cgp("list")
+        self.assertNotIn("i1", [i["item"] for i in snap["batch"]])  # not dispatched to move to PR Review and be sent back again
+        self.assertEqual([b["title"] for b in snap["blocked"]], ["one"])
+        self.assertEqual(snap["blocked"][0]["blockedBy"], ["two"])
+        self.force("i2", "pr_review")
+        self.assertIn("i1", [i["item"] for i in self.cgp("list")["batch"]])
+
     def test_overlap_does_not_ask_to_wait_for_the_stack_base(self):
         self.force("i1", "implement")  # behind i2, which is in review
         self.cgp("touches", "i1", "b.txt", "d.txt")
@@ -2389,5 +2488,11 @@ class TestStackedGuard(StackBase):
         self.assertTrue(self.cgp("guard", "i1")["ok"])
 
     def test_the_repo_config_still_comes_from_the_default_branch(self):
-        self.commit_in(self.wt, ".cgp.json", json.dumps({"guardFiles": [], "test": "evil"}))
+        self.git(self.clone, "checkout", "-q", "cgp/2")
+        self.commit_in(self.clone, ".cgp.json", json.dumps({"guardFiles": [], "test": "evil"}))  # the stack base carries a config main lacks
+        self.git(self.clone, "push", "-q", "origin", "cgp/2")
+        self.git(self.clone, "checkout", "-q", "main")
+        self.git(self.wt, "fetch", "-q")
+        self.git(self.wt, "rebase", "-q", "--onto", "origin/cgp/2", self.blocker_tip)
+        self.assertTrue(os.path.exists(os.path.join(self.wt, ".cgp.json")))
         self.assertEqual(self.cgp("repo-config", "acme/app")["config"], {})
