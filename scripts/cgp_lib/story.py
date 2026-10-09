@@ -12,7 +12,8 @@ from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, 
 from .session import clear_phase, reset_strikes, set_phase, worker_pr
 from .repoconf import repo_config, rules_text, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
-from .pr import cancel_auto_merge, changed_since_review, cmd_pr_state, pr_view, record_reviewed
+from .pr import STACKED, base_problem, cancel_auto_merge, changed_since_review, cmd_pr_state, default_branch, forget_review, pr_view, record_reviewed, stack_of
+from .stack import prepare_stack, stale as stack_stale
 from .policy import GATE_KEYS, current_rating, evaluate, public, record_decision, require_human
 
 
@@ -56,8 +57,21 @@ def auto_allows(c, it, target):
 
 
 def policy_verdict(c, it, target):
-    """The auto-approval policy's verdict for the gate (None when the policy is off for it), see policy.evaluate."""
-    return evaluate(c, it, target, lambda: author_trusted(it))
+    """The auto-approval policy's verdict for the gate (None when the policy is off for it), see policy.evaluate. A stacked story
+    or a PR that does not target the default branch is never approved."""
+    verdict = evaluate(c, it, target, lambda: author_trusted(it))
+    why = stack_gate(c, it) if verdict and verdict["approved"] and target == "pr_approved" else None
+    return {"approved": False, "reason": why} if why else verdict
+
+
+def stack_gate(c, it):
+    """Why the story's PR may not be approved, or count as merged, by anyone but the user: the story is stacked, or its PR does not
+    target the default branch (also when it cannot be read or the default branch is unknown). None when nothing stands in the way."""
+    if stack_of(it["item"]):
+        return STACKED
+    ref = parse_pr_ref(c, it["pr"])
+    view = ref and pr_view(*ref, check=False)
+    return base_problem(c, ref[0], view) if view else "the PR could not be read"
 
 
 def ready_pr(ref):
@@ -78,6 +92,10 @@ def cmd_move(a):
     # the user's Auto Approve field (read live: they may have set it after the worker started) or, failing that, the policy delegates a gate
     field_ok = target in GATE_KEYS and auto_allows(c, it, target)
     verdict = policy_verdict(c, it, target) if target in GATE_KEYS and not field_ok and gate_open(c, it, target) else None
+    stacked = stack_gate(c, it) if field_ok and target == "pr_approved" else None
+    if stacked and a.column == "pr_approved":
+        die(f"refusing to approve the PR: {stacked}")
+    field_ok = field_ok and not stacked  # a delegated move into PR Review then stays there for the user
     policy_ok = bool(verdict and verdict["approved"])
     if target != a.column and (field_ok or policy_ok):
         requested, a.column = a.column, target
@@ -90,6 +108,9 @@ def cmd_move(a):
     if a.column == "done" and not (it["closed"] and it["kind"] == "issue"):  # a closed issue is finished already
         if it["column"] != "pr_approved" or not ref or pr_view(*ref)["state"] != "MERGED":
             die("a story reaches Done only from pr_approved, after its PR merged")
+        why = stack_gate(c, it)
+        if why:
+            die(f"a story reaches Done only when its PR merged into the default branch: {why}")
     if a.column != "done" and it["column"] == "pr_approved" and ref:
         cancel_auto_merge(*ref)  # leaving PR Approved must not leave a merge armed
     if policy_ok and a.column == "pr_approved":  # a policy approval stands in for the review: ready the PR and record the commit it checked
@@ -103,6 +124,10 @@ def cmd_move(a):
         shown = pr_view(*ref)  # not leave the story in PR Review with no record of what was reviewed
         if not shown or not shown.get("headRefOid"):
             die("could not read the PR head; not moving the story to pr_review")
+        rec = stack_of(a.item)
+        why = stack_stale(rec) if rec else None
+        if why:
+            die(f"not moving the story to pr_review: {why}")
     if policy_ok:
         record_decision(it, a.column, verdict)  # before the move: the files that were checked are the files approved
     set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
@@ -174,6 +199,27 @@ def cmd_approve(a):
     out({"item": a.item, "column": target, "approved": True, **({"sha": sha, "reviewed": reviewed} if sha else {"plan": it["plan"]})})
 
 
+def send_back(c, item, reason):
+    """Put a story back in Implement because what its PR was built on changed (a stacked story's blocker): auto-merge is disarmed, the
+    review record forgotten and a comment says why. Not a move through a human gate, so `cgp move` stays as strict as it was."""
+    it = get_item(c, item)
+    ref = parse_pr_ref(c, it["pr"])
+    if ref:
+        cancel_auto_merge(*ref)
+    forget_review(item)
+    if it["column"] != "implement":
+        set_single(c, item, c["fields"]["status"]["id"], c["fields"]["status"]["options"]["implement"])
+
+        def upd(st):
+            for w in st["workers"]:
+                if w["item"] == item:
+                    w["column"] = "implement"
+                    clear_phase(w)
+                    w.update(phase=DEFAULT_PHASE["implement"], phaseAt=now_iso())
+        update_state(upd)
+    post_comment(it["issueRepo"], it["number"], f"{MARK}\n{reason}")
+
+
 def snapshot_touches(item):
     """Save the files the story declared when it entered Plan Approved / Implement: `cgp guard` allows guarded paths only from
     this copy, so a worker cannot widen it afterwards by re-declaring its touches."""
@@ -217,8 +263,16 @@ def cmd_set(a):
         if it["column"] in ("pr_review", "pr_approved") and (it["pr"] or "").strip() != value:
             die(f"the story is in {it['column']}: the PR the user reviews cannot be replaced. Only the user can fix this: ask them "
                 "to move the story out of that column")
-        if (pr_view(*ref) or {}).get("isCrossRepository") is not False:
+        view = pr_view(*ref) or {}
+        if view.get("isCrossRepository") is not False:
             die("that PR comes from a fork (or its origin could not be read); the loop only works on its own branches")
+        rec = stack_of(a.item)
+        if rec:  # a stacked story's PR is aimed at its blocker's branch, or already at the default branch
+            if view.get("baseRefName") not in (rec["branch"], default_branch(c, ref[0])):
+                die(f"that PR targets {view.get('baseRefName')}: a story stacked on {rec['branch']} opens its PR against that branch")
+            why = stack_stale(rec)
+            if why:
+                die(f"refusing: {why}")
     set_text(c, a.item, c["fields"][key], value)
     if value:  # a published plan or an opened PR means review comes next
         if key == "pr":
@@ -456,6 +510,7 @@ def cmd_prepare(a):
     res["repoConfig"] = repo_config(c, it["issueRepo"])  # test / lint commands, reviewers, ... from the repo's .cgp.json
     res["houseRules"] = rules_text(c, it["issueRepo"])  # the default branch's .cgp-rules.md, or null
     res["settings"] = {"draftPRs": bool(c["settings"].get("draftPRs"))}
+    res["stack"] = prepare_stack(c, it)  # the blocker's branch the worktree is cut from (stackedStories), else null
     res["worktree"] = call(cmd_worktree, item=a.item)
     if "error" not in res["worktree"]:
         res["sync"] = call(cmd_sync, item=a.item)

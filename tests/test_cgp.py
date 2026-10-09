@@ -869,7 +869,7 @@ class TestGates(Base):
         self.cgp("set", "i1", "pr", "https://github.com/acme/app/pull/1")
         self.force("i1", "pr_approved")
         self.assertNotEqual(self.cgp("move", "i1", "done", ok=False).returncode, 0)  # PR still open
-        d = self.read_db(); d["pr_view"] = {"state": "MERGED"}; self.write_db(d)
+        d = self.read_db(); d["pr_view"] = {"state": "MERGED", "baseRefName": "main"}; self.write_db(d)
         self.assertEqual(self.cgp("move", "i1", "done")["column"], "done")
 
     def test_merge_requires_pr_approved(self):
