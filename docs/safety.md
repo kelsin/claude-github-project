@@ -23,6 +23,10 @@ Story titles are text anyone can write. The CLI never takes one on a command lin
 
 A repo's `.cgp.json` is read only from its default branch and can only add guarded files, never remove them. The `notifyCommand` receives story text through environment variables (control and bidi characters removed), never on its command line, and runs without `GH_*`, `GITHUB_*`, `GIT_*` or `*_TOKEN` variables. It runs only when its program is an absolute path to an executable you own that nobody else can write and that is not under a worktree, `/tmp` or the cgp home (`cgp doctor` warns when it would not run). `cgp repo-path` refuses a path whose `origin` is not that repo on github.com (a local path or `file://` origin is allowed) and never repoints a repo that already has a clone.
 
+## Automatic intake
+
+Opt-in per repo (`intake` in `.cgp.json`, read from the default branch only, so a PR cannot enable it). It creates issues and board items from outside input, so: titles are fixed templates, bot PR titles and bodies are never copied, links are built from ids, and a quoted workflow name is stripped of control, bidi and markup characters and cut to 120 characters. Red-main stories are created with your own token, so they count as written by someone you trust; that is acceptable because their content is only ids and the sanitised name. Only bots on the allowlist whose account type is Bot, on non-fork non-draft PRs, are imported, and `github-actions[bot]` cannot be allowed. Dependency stories sit in PR Review with `Plan: Skip`: the auto-approval policy refuses a Plan: Skip story, and its guard and always-deny lists are unchanged, so intake never loosens what an agent may approve or merge.
+
 ## Auto-approval policy
 
 Off by default. With `autoApprove` set (by you, in a terminal: `cgp config` refuses `autoApprove` and `autoApproveFiles` inside a Claude session, with `CGP_SESSION` or `CLAUDECODE` set, or without a terminal, and notifies you of a change), `cgp move` approves a gate for an agent when all of these hold, and otherwise leaves the story in your column with the reason in the result:
