@@ -17,6 +17,7 @@ The plugin has three parts: skills (prompts), the `scripts/cgp` CLI that does ev
 | `gitwt` | story worktrees: create, `sync` (rebase), `guard`, remove |
 | `pr` | checks, CI waiting, merging, the review-bound merge gate |
 | `story` | comments, questions, feedback, field updates, `move`, `prepare` |
+| `stack` | `stack`, and the rules for starting a story on its blocker's open PR (`stackedStories`); `gitwt` creates the worktree and rebases it, `pr` refuses to merge it |
 | `sched` | which stories are actionable, file overlap and blocking, `list` / `status` / `wait` |
 | `doctor` | `doctor` and `gc` |
 | `intake` | `add` and `import` (stories onto the board) |
