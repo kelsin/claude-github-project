@@ -27,7 +27,7 @@ def parse_deferred(body):
         m = inside and re.match(r"\s*[-*]\s+(.*\S)\s*$", line)
         if not m:
             continue
-        title, _, reason = m.group(1).partition("::")
+        title, _, reason = m.group(1).partition(" :: ")
         title, reason = title.strip(), reason.strip()
         if not title or len(title) > 200 or len(reason) > 500 or BAD_TEXT.search(title + reason):
             skipped.append(m.group(1)[:80])
@@ -67,17 +67,25 @@ def cmd_defer(a):
     known = {k["key"]: k for k in load_data().get("deferred", {}).get(a.item, [])}
     parent = f"{it['issueRepo']}#{it['number']}"
     filed, already = [], []
+    room = MAX_ITEMS - len(known)  # the cap is per story, over every run
     for i in items:
         if i["key"] in known:
             already.append(known[i["key"]])
             continue
+        if room <= 0:
+            skipped.append(i["title"])
+            continue
+        room -= 1
         body = f"Deferred from {parent} (PR {pr.get('url') or it['pr']})\n\n"
         body += "Filed automatically from the PR's Deferred section; read it before releasing this story from Hold."
         if i["reason"]:
             body += "\n\n> " + i["reason"].replace("@", "@​")
-        r = create_story(c, it["issueRepo"], i["title"].replace("@", "@​"), body, hold)
-        rec = {"key": i["key"], "number": r["number"], "repo": r["repo"], "title": i["title"]}
-        update_data(lambda d, rec=rec: d.setdefault("deferred", {}).setdefault(a.item, []).append(rec))  # recorded at once
+        rec = {"key": i["key"], "repo": it["issueRepo"], "title": i["title"]}
+
+        def record(number, rec=rec):  # as soon as the issue exists, before it goes on the board
+            rec["number"] = number
+            update_data(lambda d: d.setdefault("deferred", {}).setdefault(a.item, []).append(dict(rec)))
+        create_story(c, it["issueRepo"], i["title"].replace("@", "@​"), body, hold, on_issue=record)
         filed.append(rec)
     if filed:
         post_comment(it["issueRepo"], it["number"], f"{MARK}\nDeferred work filed as stories on hold:\n" +

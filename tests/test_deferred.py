@@ -24,6 +24,10 @@ class TestParse(test_cgp.unittest.TestCase):
         self.assertEqual([i["title"] for i in items], ["ok"])
         self.assertEqual(len(skipped), 3)
 
+    def test_only_a_spaced_separator_splits(self):
+        items, _ = parse_deferred("## Deferred\n- Rename Foo::bar\n- Other :: why Foo::bar")
+        self.assertEqual([(i["title"], i["reason"]) for i in items], [("Rename Foo::bar", ""), ("Other", "why Foo::bar")])
+
     def test_ten_at_most_and_duplicates_collapse(self):
         items, skipped = parse_deferred("## Deferred\n" + "\n".join(f"- item {n}" for n in range(11)) + "\n- ITEM   1")
         self.assertEqual(len(items), 10)
@@ -78,6 +82,39 @@ class TestDefer(test_cgp.PRBase):
         r = self.cgp("defer", "i1")
         self.assertEqual([f["title"] for f in r["filed"]], ["Add a test"])
         self.assertEqual(len(self.issues()), 3)
+
+    def test_mentions_in_a_title_are_neutralised(self):
+        self.prs(self.view(state="MERGED", body="## Deferred\n- Ask @mallory about Foo::bar", author={"login": "kelsin"}, url=self.PR))
+        self.cgp("defer", "i1")
+        self.assertEqual(self.issues()[0]["title"], "Ask @\u200bmallory about Foo::bar")
+        self.assertIn("Ask @\u200bmallory about Foo::bar", [c for c in self.comments() if "Deferred work filed" in c][0])
+        self.assertNotIn("@mallory", self.comments()[-1])
+
+    def test_the_cap_is_per_story_across_runs(self):
+        def body(names):
+            return "## Deferred\n" + "\n".join(f"- {n}" for n in names)
+        self.prs(self.view(state="MERGED", body=body(f"a{n}" for n in range(6)), author={"login": "kelsin"}, url=self.PR))
+        self.cgp("defer", "i1")
+        self.prs(self.view(state="MERGED", body=body(f"b{n}" for n in range(6)), author={"login": "kelsin"}, url=self.PR))
+        r = self.cgp("defer", "i1")
+        self.assertEqual([f["title"] for f in r["filed"]], ["b0", "b1", "b2", "b3"])
+        self.assertEqual(r["skipped"], ["b4", "b5"])
+        self.assertEqual(len(self.issues()), 10)
+        self.assertEqual(len(self.data()["deferred"]["i1"]), 10)
+
+    def test_a_failed_hold_leaves_nothing_dispatchable_and_no_duplicate(self):
+        d = self.read_db()
+        d["failures"] = [{"match": "o_Hold", "times": 3, "stderr": "gh: HTTP 502"}]
+        self.write_db(d)
+        self.cgp("defer", "i1", ok=False)
+        d = self.read_db()
+        self.assertEqual(len(self.issues()), 1)
+        item = next(i for i in d["items"] if i["content"].get("number") == self.issues()[0]["number"])
+        self.assertNotIn("Status", item["values"])  # never Todo without Hold
+        self.assertEqual(len(self.data()["deferred"]["i1"]), 1)
+        r = self.cgp("defer", "i1")
+        self.assertEqual([f["title"] for f in r["filed"]], ["Add a test"])
+        self.assertEqual(len(self.issues()), 2)
 
     def test_refusals_create_nothing(self):
         self.merged("OPEN")
