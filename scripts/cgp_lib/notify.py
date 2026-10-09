@@ -6,7 +6,7 @@ import shlex
 import subprocess
 from .consts import HOME
 from .store import update_data
-from .util import IS_WINDOWS, printable
+from .util import IS_WINDOWS, age_seconds, now_iso, printable
 
 REVIEW = ("plan_review", "pr_review")
 
@@ -55,28 +55,46 @@ def fire(c, event, title, url):
 
 def check(c, items, stalled):
     """Fire events for what changed since the last snapshot. The first snapshot after the setting appears only records the
-    current state, so enabling it does not announce the whole board."""
+    current state, so enabling it does not announce the whole board. Each entry also keeps `since` (when the story entered its
+    column or started waiting; `approx` when that is only when it was first seen) and `nagged` (the last nag, or the moment the
+    nagAfterHours setting first saw the story, so enabling it does not nag every old story)."""
     events, started = [], {s["item"]: s for s in stalled}
+    nag = int(c["settings"].get("nagAfterHours") or 0)
+    cmd = (c["settings"].get("notifyCommand") or "").strip()
+    runs = bool(cmd) and not command_problem(cmd)
 
     def upd(d):
         seen, first = d.setdefault("notified", {}), "notified" not in d or not d["notified"]
         for it in items:
             was = seen.get(it["item"], {})
             now = {"column": it["column"], "waiting": bool(it["waiting"]), "stalled": was.get("stalled")}
+            if was.get("column") == now["column"] and was.get("waiting") == now["waiting"] and was.get("since"):
+                now.update({k: was[k] for k in ("since", "approx", "nagged") if k in was})
+            else:
+                now["since"] = now_iso()
+                if first or (was and not was.get("since")):
+                    now["approx"] = True  # a story seen before the loop tracked its wait
             if not first:
                 if it["waiting"] and not was.get("waiting"):
-                    events.append(("waiting", it))
+                    events.append(("waiting", it, it["title"]))
                 if it["column"] in REVIEW and was.get("column") != it["column"]:
-                    events.append(("review", it))
+                    events.append(("review", it, it["title"]))
                 if it["column"] == "done" and was.get("column") not in (None, "done"):
-                    events.append(("done", it))
+                    events.append(("done", it, it["title"]))
                 if it["item"] in started and was.get("stalled") != started[it["item"]].get("startedAt"):
-                    events.append(("stalled", it))
+                    events.append(("stalled", it, it["title"]))
+            if nag and (it["waiting"] or it["column"] in REVIEW):
+                if not now.get("nagged"):
+                    now["nagged"] = now_iso()
+                elif age_seconds(now["nagged"]) >= nag * 3600:
+                    events.append(("nag", it, f"{it['title']} (waiting {int(age_seconds(now['since']) // 3600)}h)"))
+                    if runs:
+                        now["nagged"] = now_iso()
             if it["item"] in started:
                 now["stalled"] = started[it["item"]].get("startedAt")
             seen[it["item"]] = now
         for k in [k for k in seen if k not in {i["item"] for i in items}]:
             del seen[k]
     update_data(upd)
-    for event, it in events:
-        fire(c, event, it["title"], it.get("url"))
+    for event, it, title in events:
+        fire(c, event, title, it.get("url"))
