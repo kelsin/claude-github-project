@@ -9,9 +9,25 @@ from .board import get_item, require_repo
 from .gitutil import default_ref, git
 
 FILE = ".cgp.json"
-STR, LIST, MAP = "string", "list", "map"
-KNOWN = {"test": STR, "lint": STR, "sharedFiles": LIST, "guardFiles": LIST, "reviewers": LIST, "preview": MAP}
+STR, LIST, MAP, INTAKE = "string", "list", "map", "intake"
+KNOWN = {"test": STR, "lint": STR, "sharedFiles": LIST, "guardFiles": LIST, "reviewers": LIST, "preview": MAP, "intake": INTAKE}
+NEVER_BOT = "github-actions[bot]"  # its PRs and its token are the workflows' own: never a dependency source
 _cache = {}
+
+
+def clean_intake(v):
+    """The typed intake settings: redMain and dependencies are booleans, bots up to 10 short logins (never github-actions[bot]),
+    maxOpen an integer from 1 to 20. Anything else is dropped."""
+    res = {}
+    for k in ("redMain", "dependencies"):
+        if isinstance(v.get(k), bool):
+            res[k] = v[k]
+    if isinstance(v.get("bots"), list):
+        bots = [x.strip() for x in v["bots"] if isinstance(x, str) and 0 < len(x.strip()) <= 60 and x.strip().lower() != NEVER_BOT]
+        res["bots"] = bots[:10]
+    if isinstance(v.get("maxOpen"), int) and not isinstance(v["maxOpen"], bool):
+        res["maxOpen"] = min(max(v["maxOpen"], 1), 20)
+    return res
 
 
 def clean(raw):
@@ -23,14 +39,17 @@ def clean(raw):
             res[key] = v.strip()[:500]
         elif kind == LIST and isinstance(v, list):
             res[key] = [x.strip()[:200] for x in v if isinstance(x, str) and x.strip()][:50]
+        elif kind == INTAKE and isinstance(v, dict):
+            res[key] = clean_intake(v)
         elif kind == MAP and isinstance(v, dict):
             res[key] = {k: x[:300] for k, x in v.items() if isinstance(x, str)}
     return res
 
 
-def repo_config(c, repo):
-    """The cleaned .cgp.json of a linked repo's default branch; {} when there is none, no clone, or it is not valid JSON."""
-    if repo in _cache:
+def repo_config(c, repo, fresh=False):
+    """The cleaned .cgp.json of a linked repo's default branch; {} when there is none, no clone, or it is not valid JSON. Cached per
+    process; `fresh` re-reads it (a long-lived `cgp wait` would otherwise never see a change)."""
+    if repo in _cache and not fresh:
         return _cache[repo]
     cfg_ = {}
     path = c["repos"].get(repo)
