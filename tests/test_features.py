@@ -168,6 +168,17 @@ class TestRepoConfig(test_cgp.SyncBase):
         self.assertEqual(r["repoConfig"], {"lint": "ruff check"})
         self.assertEqual(r["settings"], {"draftPRs": False})
 
+    def test_prepare_returns_the_plan_touches_and_rating(self):
+        self.assertEqual(self.cgp("prepare", "i1")["plan"], {"rating": None, "declared": [], "approved": []})
+        self.cgp("touches", "i1", "a.py", "dir/")
+        self.assertEqual(self.cgp("prepare", "i1")["plan"], {"rating": None, "declared": ["a.py", "dir/"], "approved": []})
+
+    def test_prepare_returns_the_approved_snapshot_and_the_last_rating(self):
+        self.cgp("touches", "i1", "a.py", "dir/")
+        self.cgp("rate", "i1", "medium")
+        self.save_data(approvedTouches={"i1": ["a.py"]})
+        self.assertEqual(self.cgp("prepare", "i1")["plan"], {"rating": "medium", "declared": ["a.py", "dir/"], "approved": ["a.py"]})
+
 
 class TestPreviewProviders(PRBase):
     def comment(self, login, body):
