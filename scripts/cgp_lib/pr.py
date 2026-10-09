@@ -5,9 +5,9 @@ import re
 import time
 from .util import Poll, die, out
 from urllib.parse import quote
-from .gh import gh, rest
+from .gh import gh, gql, rest
 from .store import cfg, load_data, update_data
-from .board import get_item, parse_pr_ref, require_repo
+from .board import fetch_items, get_item, parse_item, parse_pr_ref, require_repo
 from .gitutil import default_ref
 from .session import set_phase
 from .flakes import capture, clean
@@ -287,10 +287,11 @@ def settle(a, head, saved, jobs, others, base):
     out(res)
 
 
-def pr_view(repo, pr, check=True):
+def pr_view(repo, pr, check=True, queue=False):
+    """The PR as gh shows it. `queue` adds isInMergeQueue (asked only of repos with a merge queue: older gh does not know it)."""
     p = gh("pr", "view", str(pr), "-R", repo, "--json",
            "state,isDraft,mergeable,mergeStateStatus,reviewDecision,autoMergeRequest,url,mergedAt,headRefOid,headRefName,"
-           "isCrossRepository,baseRefName", check=check)
+           "isCrossRepository,baseRefName" + (",isInMergeQueue" if queue else ""), check=check)
     try:
         return json.loads(p.stdout)
     except json.JSONDecodeError:
@@ -448,6 +449,16 @@ def cmd_merge(a):
         out({"cancelled": cancel_auto_merge(*ref)})
         return
     a = merge_target(a)
+    if merge_queue_enabled(a.repo, a.view["baseRefName"]):  # GitHub orders and tests the queue; the pin still decides which commit is queued
+        p = gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--auto", "--delete-branch", *pin(a.view), check=False)
+        if p.returncode:  # only --squash and --delete-branch may go (some queues refuse them); the pin never does
+            p = gh("pr", "merge", str(a.pr), "-R", a.repo, "--auto", *pin(a.view), check=False)
+        out({"requested": True, "queue": True} if not p.returncode else {"requested": False, "queue": True, "error": (p.stderr or p.stdout).strip()})
+        return
+    info = train_info(cfg(), a, {}, a.view)
+    if info["ahead"]:
+        out({"requested": False, "train": train_note(info), "error": "other approved PRs merge first; run merge-wait, it takes this PR's turn"})
+        return
     p = gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--auto", "--delete-branch", *pin(a.view), check=False)
     if p.returncode:
         checks = pr_checks(a.repo, a.pr)  # no auto-merge: this merges at once, so never over red or pending checks
@@ -459,6 +470,48 @@ def cmd_merge(a):
             out({"requested": False, "error": (p2.stderr or p.stderr).strip()})
             return
     out({"requested": True})
+
+
+MERGE_QUEUE = "query($o:String!,$n:String!,$b:String!){ repository(owner:$o,name:$n){ mergeQueue(branch:$b){ id } } }"
+
+
+def merge_queue_enabled(repo, branch):
+    """Whether the repo has a GitHub merge queue for the branch. Fails safe: any error (an older GitHub, no access) means no queue."""
+    owner, name = repo.split("/", 1)
+    try:
+        return bool(gql(MERGE_QUEUE, o=owner, n=name, b=branch)["repository"]["mergeQueue"])
+    except (SystemExit, KeyError, TypeError):
+        return False
+
+
+def train_info(c, a, board, view):
+    """Who merges before the story (see train.py). `board` caches the board read between calls; empty means read it now. A board that
+    cannot be read holds the story. `view` is the story's own PR as just read."""
+    from .train import train_ahead  # train imports this module
+    from .sched import effective_blocks, native_edges  # sched imports this module
+    try:
+        if "live" not in board:
+            native = bool(c["settings"]["nativeDependencies"])
+            items = [parse_item(r, c) for r in fetch_items(c["board"]["id"], native)]
+            live = [i for i in items if not i["archived"] and i["kind"] in ("issue", "draft") and i["column"] != "done" and not i["closed"]]
+            board.update(live=live, blocks=effective_blocks(live, load_data(), native_edges(live) if native else {}))
+        me = next(i for i in board["live"] if i["item"] == a.item)
+        return train_ahead(c, me, board["live"], board["blocks"], {(a.repo, a.pr): view})
+    except (SystemExit, StopIteration):
+        return {"ahead": [{"why": "the merge train could not be read"}], "merged": [], "note": None}
+
+
+def train_note(info):
+    return {"ahead": info["ahead"], **({"note": info["note"]} if info["note"] else {})}
+
+
+def pause(poll, skip=False, factor=1):
+    """Poll.wait() that can skip the sleep (never past the deadline) and stretch it."""
+    if poll.expired():
+        return False
+    if not skip:
+        time.sleep(poll.interval * factor)
+    return True
 
 
 def still_approved(c, item):
@@ -479,9 +532,10 @@ def cmd_merge_wait(a):
     a = merge_target(a)
     c = cfg()
     poll = Poll(a.timeout, a.interval)
-    last_head = None
+    queue = merge_queue_enabled(a.repo, a.view["baseRefName"])  # decided once; with a queue GitHub orders the merges
+    last_head, board, ahead_ids, seen_merged = None, {}, None, None
     while True:
-        v, a.view = a.view or pr_view(a.repo, a.pr, check=False), None
+        v, a.view = (None if queue else a.view) or pr_view(a.repo, a.pr, check=False, queue=queue), None  # (merge_target's view has no queue field)
         if v is None:  # a transient gh failure must not end the wait (ci-wait is as tolerant)
             if not poll.wait():
                 out({"state": "pending", "note": "gh errors while polling"})
@@ -504,6 +558,31 @@ def cmd_merge_wait(a):
         if v["mergeable"] == "CONFLICTING" or v["mergeStateStatus"] == "DIRTY":
             out({"state": "conflict", "pr": v})
             return
+        skip, held = False, None
+        if not queue:  # the train: only the head is updated, armed and merged; a story behind it waits, quietly
+            fresh = not board
+            info = train_info(c, a, board, v)
+            ids = {e.get("item") for e in info["ahead"]}
+            if not fresh and ids != ahead_ids:  # the line moved: read the board again before trusting the old picture
+                board.clear()
+                info = train_info(c, a, board, v)
+                ids = {e.get("item") for e in info["ahead"]}
+            ahead_ids = ids
+            new = set(info["merged"]) - (seen_merged or set())  # a PR ahead merged: the next one need not sleep before its turn
+            skip, seen_merged = seen_merged is not None and bool(new), (seen_merged or set()) | new
+            held = info if info["ahead"] else None
+        if held:
+            changed = v["state"] == "OPEN" and not a.delegated and changed_since_review(a.item, (a.repo, a.pr), v)
+            if changed:
+                cancel_auto_merge(a.repo, a.pr)
+                out({"state": "changed", "note": changed, "pr": v})
+                return
+            if v.get("autoMergeRequest"):  # armed before the line moved: disarm so it cannot jump the line
+                cancel_auto_merge(a.repo, a.pr)
+            if not pause(poll, skip, 3):
+                out({"state": "pending", "pr": v, **train_note(held)})
+                return
+            continue
         checks = pr_checks(a.repo, a.pr)
         if any(x["bucket"] in ("fail", "cancel") for x in (checks or [])):
             out({"state": "ci-red", "pr": v})
@@ -513,10 +592,13 @@ def cmd_merge_wait(a):
             cancel_auto_merge(a.repo, a.pr)
             out({"state": "changed", "note": changed, "pr": v})
             return
+        if queue and v["state"] == "OPEN" and not v.get("isInMergeQueue") and not v.get("autoMergeRequest"):
+            out({"state": "dequeued", "pr": v, "note": "the merge queue does not hold this PR (it was removed, or never added)"})
+            return
         if last_head and v["headRefOid"] != last_head:  # the head moved (branch update, a delegated fix): the armed merge was for the old one
             gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--auto", "--delete-branch", *pin(v), check=False)
         last_head = v["headRefOid"]
-        if v["mergeStateStatus"] == "BEHIND":
+        if v["mergeStateStatus"] == "BEHIND" and not queue:
             if update_branch(a.repo, a.pr, v["headRefOid"]):
                 # the REST call only queues the update: wait for the new head. It is this tool's own commit, so no re-approval
                 for _ in range(8):
@@ -529,8 +611,8 @@ def cmd_merge_wait(a):
         elif v["reviewDecision"] in ("CHANGES_REQUESTED", "REVIEW_REQUIRED") and v["mergeStateStatus"] == "BLOCKED":
             out({"state": "blocked", "pr": v})
             return
-        elif v["mergeStateStatus"] == "CLEAN" and not v.get("autoMergeRequest") and checks_green(checks):
+        elif v["mergeStateStatus"] == "CLEAN" and not v.get("autoMergeRequest") and checks_green(checks) and not queue:
             gh("pr", "merge", str(a.pr), "-R", a.repo, "--squash", "--delete-branch", *pin(v), check=False)
-        if not poll.wait():
+        if not pause(poll, skip):
             out({"state": "pending", "pr": v})
             return

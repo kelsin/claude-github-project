@@ -20,6 +20,7 @@ from .flakes import prune as prune_flakes
 from .story import ask_user, process_replies, send_back
 from .stack import blocker_ref, pr_files, stackable
 from .pr import pr_view
+from .train import train_held
 from .rules import pending, rules_due
 
 
@@ -316,6 +317,8 @@ def snapshot(c):
             i["blockedBy"] = i["blockedBy"] or [base["title"]]
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and not i["held"] and i not in blocked
                   and i["item"] not in in_flight]
+    trailing = train_held(c, actionable, live, blocks)  # approved PRs behind another in the merge train (see train.py) wait for their turn
+    actionable = [i for i in actionable if i["item"] not in trailing]
     actionable.sort(key=lambda i: (ACTIONABLE.index(i["column"]), i["priorityRank"], -i["unlocks"]))  # stable: board order breaks remaining ties
     cap = c["settings"]["concurrency"]
     free = max(cap - len(in_flight), 0)
@@ -343,8 +346,9 @@ def snapshot(c):
     queued = [i for i in actionable if i not in batch] if cap > 0 and not stop else []  # (stop: see held_back below)
     reasons = {i["item"]: "waits for " + ", ".join(i["blockedBy"]) for i in blocked}
     reasons.update({i["item"]: "overlaps with " + ", ".join(i["conflictsWith"]) for i in deferred if starting(i)})
+    reasons.update({k: "merges after " + ", ".join(f"#{e['number']}" for e in v if e.get("number")) + " (merge train)" for k, v in trailing.items()})
     reasons.update({i["item"]: f"queued: all {cap} worker slots are busy" for i in queued})
-    held_back = set() if stop else {i["item"] for i in deferred if starting(i)} | {i["item"] for i in queued}
+    held_back = set() if stop else {i["item"] for i in deferred if starting(i)} | {i["item"] for i in queued} | set(trailing)
     sync_story_field(c, live, held_back, in_flight)
     fresh = created - live_ids  # stories intake just filed: live work this cycle
     status = "done" if not live and not fresh else "work" if batch else "idle"  # idle also when the cap is full

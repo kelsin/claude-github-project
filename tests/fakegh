@@ -109,6 +109,8 @@ elif args[0] == "pr" and args[1] in ("view", "merge", "checks", "update-branch",
         print(json.dumps(r))
     elif args[1] == "merge":
         save()
+        if "--disable-auto" not in args and "--match-head-commit" not in args:  # a merge or enqueue without the pin must never happen
+            sys.exit("fakegh: merge without --match-head-commit")
         if "--match-head-commit" in args and db.get("head_is") and args[args.index("--match-head-commit") + 1] != db["head_is"]:
             sys.exit("Head branch was modified. Review and try the merge again.")  # the pin refuses a head that moved
         if "--auto" in args and db.get("auto_merge_unavailable"):
@@ -159,7 +161,12 @@ elif args[:2] == ["api", "graphql"]:
     if "blockedBy(" in q and db.get("no_blocked_by_field"):  # an older GitHub: the whole query is rejected
         print(json.dumps({"errors": [{"type": "undefinedField", "message": "Field 'blockedBy' doesn't exist on type 'Issue'"}]}))
         sys.exit(1)
-    if "__type(" in q:
+    if "mergeQueue(" in q:  # db["merge_queue"]: the repo has one; db["no_merge_queue_field"]: an older GitHub rejects the query
+        if db.get("no_merge_queue_field"):
+            print(json.dumps({"errors": [{"type": "undefinedField", "message": "Field 'mergeQueue' doesn't exist on type 'Repository'"}]}))
+            sys.exit(1)
+        r = {"repository": {"mergeQueue": {"id": "MQ1"} if db.get("merge_queue") else None}}
+    elif "__type(" in q:
         r = {"__type": {"fields": [{"name": "number"}] + ([] if db.get("no_blocked_by_field") else [{"name": "blockedBy"}])}}
     elif "updateProjectV2Field(" in q:
         f = next(x for x in db["fields"] if x["id"] == v["f"])
