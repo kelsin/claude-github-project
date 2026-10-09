@@ -2164,6 +2164,45 @@ class TestStackedSync(StackBase):
         self.assertNotIn("pendingTip", rec)
         self.assertEqual(self.cgp("sync", "i1")["state"], "clean")  # the tip is where the story is built: no taint, no second rebase
 
+    def resolve_conflict_by_hand(self):
+        with open(os.path.join(self.wt, "c.txt"), "w") as f:
+            f.write("both\n")
+        self.git(self.wt, "add", "c.txt")
+        subprocess.run(["git", "-C", self.wt, "rebase", "--continue"], check=True, capture_output=True,
+                       env={**os.environ, "GIT_EDITOR": "true", "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+
+    def conflict_with_blocker(self):
+        self.commit_in(self.wt, "c.txt", "mine\n")
+        self.push_story()  # the story branch is on the remote already
+        self.git(self.clone, "checkout", "-q", "cgp/2")
+        self.commit_in(self.clone, "c.txt", "theirs\n")
+        self.git(self.clone, "push", "-q", "origin", "cgp/2")
+        self.git(self.clone, "checkout", "-q", "main")
+        new_tip = self.rev(self.clone, "cgp/2")
+        self.assertEqual(self.cgp("sync", "i1")["state"], "conflict")
+        return new_tip
+
+    def test_finishing_a_conflict_by_hand_with_the_story_already_pushed_moves_the_tip(self):
+        new_tip = self.conflict_with_blocker()
+        self.resolve_conflict_by_hand()
+        self.assertEqual(self.cgp("sync", "i1")["state"], "rebased")
+        rec = self.board_data()["stack"]["i1"]
+        self.assertEqual(rec["tip"], new_tip)
+        self.assertNotIn("pendingTip", rec)
+        self.assertNotIn("pendingFrom", rec)
+        self.assertEqual(self.rev(self.wt, "origin/cgp/1"), self.rev(self.wt, "HEAD"))
+        self.assertEqual(self.cgp("sync", "i1")["state"], "clean")
+
+    def test_a_blocker_merged_after_a_conflict_was_finished_by_hand_is_rebased_from_the_new_tip(self):
+        new_tip = self.conflict_with_blocker()
+        self.resolve_conflict_by_hand()
+        self.squash_blocker()
+        self.set_prs(blocker=self.pr(state="MERGED", headRefName="cgp/2", headRefOid=new_tip))
+        self.assertEqual(self.cgp("sync", "i1")["state"], "rebased")
+        self.assertEqual(self.rev(self.wt, "HEAD~2"), self.rev(self.clone, "main"))
+        self.assertEqual(self.rev(self.wt, "origin/cgp/1"), self.rev(self.wt, "HEAD"))
+        self.assertNotIn("i1", self.board_data().get("stack", {}))
+
     def test_an_open_blocker_rebase_of_a_story_in_review_sends_it_back(self):
         self.force("i1", "pr_review")
         self.git(self.clone, "checkout", "-q", "cgp/2")

@@ -164,11 +164,18 @@ def stack_sync(c, it, wt, rec, default):
     if not new_tip:
         return {"state": "error", "stderr": f"{target} does not exist", "base": target}
     behind = int(git(wt, "rev-list", "--count", f"HEAD..{target}") or 0)
+    promoted = False
+    stale = rec.get("pendingTip")
+    if merged and stale and is_ancestor(wt, stale):  # rebased by hand onto the blocker before it merged: that is where the story is built now
+        rec = {**rec, "tip": stale}
+        promoted = True
+        update_data(lambda d: (d["stack"][item].__setitem__("tip", stale), d["stack"][item].pop("pendingTip", None)))
     pending = rec.get("onto" if merged else "pendingTip")  # the commit an earlier sync set out to rebase onto (its conflict may have been resolved by hand)
     resumed = bool(pending) and is_ancestor(wt, pending)
     if resumed and not merged and pending != new_tip:  # rebased by hand onto a blocker commit that has moved on since: carry on from there
         rec = {**rec, "tip": pending}
-        update_data(lambda d: (d["stack"][item].__setitem__("tip", pending), d["stack"][item].pop("pendingTip", None)))
+        update_data(lambda d: (d["stack"][item].__setitem__("tip", pending), d["stack"][item].pop("pendingTip", None),
+                               d["stack"][item].pop("pendingFrom", None)))
         resumed = False
     if not merged and not resumed and new_tip == rec["tip"]:
         return {"state": "clean", "behind": 0, "base": target}
@@ -179,7 +186,9 @@ def stack_sync(c, it, wt, rec, default):
                                "branch any more, so it cannot be rebased safely. It is back in Implement.")
             return {"state": "tainted", "base": target, "note": "the recorded blocker commit is not in the branch"}
         key = "onto" if merged else "pendingTip"
-        update_data(lambda d: d["stack"][item].__setitem__(key, new_tip))
+        start = git(wt, "rev-parse", "HEAD")  # what the branch on the remote may still hold: not someone else's push (see cmd_sync)
+        update_data(lambda d: (d["stack"][item].__setitem__(key, new_tip),
+                               d["stack"][item].__setitem__("pendingFrom", d["stack"][item].get("pendingFrom") if promoted else start)))
         res = run_rebase(wt, target, upstream=rec["tip"])
         if res:
             if res["state"] == "conflict":
@@ -193,7 +202,8 @@ def stack_sync(c, it, wt, rec, default):
             files = pr_files(repo, num)
         except SystemExit:
             files = rec["files"]
-        update_data(lambda d: (d["stack"][item].update(tip=new_tip, files=files), d["stack"][item].pop("pendingTip", None)))
+        update_data(lambda d: (d["stack"][item].update(tip=new_tip, files=files), d["stack"][item].pop("pendingTip", None),
+                               d["stack"][item].pop("pendingFrom", None)))
     else:
         retarget(c, it, default)
         update_data(lambda d: d.get("stack", {}).pop(item, None))
@@ -262,6 +272,10 @@ def cmd_sync(a):
         # commits on the remote that are not (patch-equivalent to) ours: a local rebase not yet pushed is not someone else's push
         # (a stacked story's remote branch may still hold the blocker's commits it was rebased away from: they are not someone's push)
         skip = [f"^{rec['tip']}"] if rec and git(wt, "rev-parse", "--verify", "-q", f"{rec['tip']}^{{commit}}", check=False) else []
+        # a conflict resolved by hand is not pushed yet: the remote still holds the commits the rebase started from
+        mid = rec and rec.get("pendingFrom") and (rec.get("pendingTip") or rec.get("onto"))
+        if mid and is_ancestor(wt, mid) and git(wt, "rev-parse", "--verify", "-q", f"{rec['pendingFrom']}^{{commit}}", check=False):
+            skip.append(f"^{rec['pendingFrom']}")
         ahead_of_us = int(git(wt, "rev-list", "--count", "--cherry-pick", "--right-only", f"HEAD...{remote}", *skip) or 0)
         if ahead_of_us:  # someone (e.g. a GitHub suggested change) pushed to the PR branch: keep their commits
             res = run_rebase(wt, remote)
