@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -1338,3 +1339,207 @@ class TestAutoIntake(test_cgp.SyncBase):
         self.pulls(self.bot_pr(5, head={"sha": "s2", "repo": {"full_name": "acme/app"}}), self.bot_pr(6))
         self.cgp("list")
         self.assertEqual(self.data()["ratings"][ids["Dependency update: PR #5"]]["rating"], "medium")
+
+
+def hours_ago(h):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - h * 3600))
+
+
+class TestReview(Base):
+    PR = "https://github.com/acme/app/pull/1"
+    script, events = TestNotify.script, TestNotify.events
+
+    def db_set(self, **kw):
+        d = self.read_db(); d.update(kw); self.write_db(d)
+
+    def waiting_on_you(self, item):
+        d = self.read_db()
+        next(i for i in d["items"] if i["id"] == item)["values"]["Waiting On"] = {"optionId": "o_You"}
+        self.write_db(d)
+
+    def seen(self, **entries):
+        """Back-date the loop's record of when each story entered its column: item -> (column, waiting, hours ago)."""
+        self.put_notified({k: {"column": c, "waiting": w, "since": hours_ago(h)} for k, (c, w, h) in entries.items()})
+
+    def put_notified(self, notified):
+        try:
+            self.data()
+        except StopIteration:  # no data file yet
+            self.cgp("list")
+        self.save_data(notified=notified)
+
+    def titles(self, r=None):
+        return [s["title"] for s in (r or self.cgp("review"))["stories"]]
+
+    def test_only_stories_waiting_on_you_ordered_by_age_then_size(self):
+        self.setup_board()
+        self.cgp("set", "i1", "pr", self.PR)
+        self.force("i1", "pr_review"); self.force("i2", "plan_review"); self.force("i4", "implement")
+        self.db_set(pr_view={"additions": 9, "deletions": 1, "changedFiles": 2, "files": [{"path": "a.py"}]}, checks=[{"name": "t", "bucket": "pass"}])
+        self.seen(i1=("pr_review", False, 5), i2=("plan_review", False, 30), i4=("implement", False, 99))
+        r = self.cgp("review")
+        self.assertEqual(self.titles(r), ["two", "one"])  # i3 is Done, i4 is not waiting on anyone
+        one = r["stories"][1]
+        self.assertEqual((one["waitingHours"], one["ci"], one["diff"]["additions"], one["files"], one["approximate"]),
+                         (5, "green", 9, ["a.py"], False))
+        self.assertEqual(one["packet"]["pr"], self.PR)
+        self.waiting_on_you("i4")  # a question to you counts in any column
+        self.seen(i1=("pr_review", False, 5), i2=("plan_review", False, 5), i4=("implement", True, 99))
+        self.assertEqual(self.titles(), ["draft", "one", "two"])
+
+    def test_same_age_smaller_diff_first_and_unknown_data_last(self):
+        self.setup_board()
+        for n, i in enumerate(("i1", "i2")):
+            self.cgp("set", i, "pr", f"https://github.com/acme/app/pull/{n + 1}")
+            self.force(i, "pr_review")
+        self.seen(i1=("pr_review", False, 3), i2=("pr_review", False, 3))
+        self.db_set(prs={"acme/app#1": {"additions": 500, "deletions": 5, "changedFiles": 9, "files": []},
+                         "acme/app#2": {"additions": 3, "deletions": 1, "changedFiles": 1, "files": []}})
+        self.assertEqual(self.titles(), ["two", "one"])
+        self.db_set(prs={"acme/app#2": {"additions": 3, "deletions": 1, "changedFiles": 1, "files": []}}, checks={"rc": 1, "stderr": "boom"})  # #1: gh fails
+        r = self.cgp("review")
+        self.assertEqual(self.titles(r), ["two", "one"])
+        self.assertEqual((r["stories"][1]["diff"], r["stories"][1]["ci"], r["stories"][1]["files"]), (None, None, None))
+
+    def test_approximate_and_unrecorded_waits_sort_last_and_missing_data_is_null(self):
+        self.setup_board()
+        self.force("i1", "pr_review"); self.force("i2", "plan_review")
+        self.put_notified({"i1": {"column": "pr_review", "waiting": False}})  # from before the feature: no since
+        r = self.cgp("review")
+        self.assertEqual(self.titles(r), ["one", "two"])
+        for s in r["stories"]:
+            self.assertEqual((s["waitingSince"], s["waitingHours"], s["approximate"], s["rating"], s["files"], s["diff"], s["ci"], s["pr"]),
+                             (None, None, True, None, None, None, None, None))
+        self.seen(i1=("pr_review", False, 1), i2=("plan_review", False, 2))
+        self.save_data(notified={**self.data()["notified"], "i2": {**self.data()["notified"]["i2"], "approx": True}})
+        self.assertEqual(self.titles(), ["one", "two"])
+
+    def test_a_pr_on_an_unlinked_repo_has_no_facts_and_review_changes_nothing(self):
+        self.setup_board()
+        self.force("i1", "pr_review")
+        d = self.read_db()
+        next(i for i in d["items"] if i["id"] == "i1")["values"]["PR"] = {"text": "https://github.com/other/repo/pull/3"}
+        self.write_db(d)
+        self.seen(i1=("pr_review", False, 2))
+        before = {n: self.load(self.board_path(n)) for n in (".json", ".data.json")}
+        r = self.cgp("review")
+        self.assertEqual((r["stories"][0]["diff"], r["stories"][0]["ci"]), (None, None))
+        self.assertEqual({n: self.load(self.board_path(n)) for n in (".json", ".data.json")}, before)
+
+    def test_ci_states(self):
+        load = test_cgp.load_cgp
+        load()
+        ci_state = importlib.import_module("cgp_lib.pr").ci_state
+        b = lambda *buckets: [{"bucket": x} for x in buckets]
+        self.assertEqual([ci_state(b("pass", "fail")), ci_state(b("pass", "pending")), ci_state(b("pass", "skipping")), ci_state([])],
+                         ["red", "pending", "green", "none"])
+        self.setup_board()
+        self.cgp("set", "i1", "pr", self.PR)
+        self.force("i1", "pr_review")
+        self.seen(i1=("pr_review", False, 1))
+        for checks, want in (([{"name": "t", "bucket": "cancel"}], "red"), ([{"name": "t", "bucket": "pending"}], "pending"), ([], "none")):
+            self.db_set(checks=checks)
+            self.assertEqual(self.cgp("review")["stories"][0]["ci"], want)
+
+    def test_html_is_private_escaped_and_never_follows_a_symlink(self):
+        self.setup_board()
+        evil = '"><img src=x onerror=alert(1)>'
+        d = self.read_db()
+        d["items"][0]["content"]["title"] = evil
+        d["items"][1]["content"]["url"] = "javascript:alert(1)"
+        self.write_db(d)
+        self.force("i1", "pr_review"); self.force("i2", "pr_review")
+        self.seen(i1=("pr_review", False, 4), i2=("pr_review", False, 3))
+        path = os.path.join(self.tmp, "digest.html")
+        self.assertEqual(self.cgp("review", "--html", path)["path"], path)
+        with open(path) as f:
+            text = f.read()
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertNotIn("<img", text)
+        self.assertIn("&quot;&gt;&lt;img src=x onerror=alert(1)&gt;", text)
+        self.assertNotIn('href="javascript', text)
+        self.assertNotIn("javascript:", text)
+        self.assertIn("Content-Security-Policy", text)
+        link = os.path.join(self.tmp, "link.html")
+        os.symlink(path, link)
+        p = self.cgp("review", "--html", link, ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("symlink", p.stderr)
+
+    def test_since_persists_and_resets_when_the_column_or_waiting_changes(self):
+        self.setup_board()
+        self.force("i1", "plan_review")
+        self.seen(i1=("plan_review", False, 7))
+        self.cgp("list")
+        self.assertEqual(self.cgp("review")["stories"][0]["waitingHours"], 7)
+        self.force("i1", "pr_review")
+        self.cgp("list")
+        self.assertEqual(self.cgp("review")["stories"][0]["waitingHours"], 0)
+        self.seen(i1=("pr_review", False, 7))
+        self.waiting_on_you("i1")
+        self.cgp("list")
+        self.assertEqual(self.cgp("review")["stories"][0]["waitingHours"], 0)
+
+    def nagging(self, hours=2, command=True):
+        self.setup_board()
+        path, out = self.script()
+        self.force("i1", "pr_review")
+        self.cgp("config", "nagAfterHours", str(hours))
+        if command:
+            self.cgp("config", "notifyCommand", path)
+        self.cgp("list")  # seeds
+        return out
+
+    def backdate(self, **kw):
+        d = self.data()
+        d["notified"]["i1"].update({k: hours_ago(h) for k, h in kw.items()})
+        self.save_data(notified=d["notified"])
+
+    def test_nag_is_off_by_default_and_the_first_snapshot_only_stamps(self):
+        self.setup_board()
+        path, out = self.script()
+        self.force("i1", "pr_review")
+        self.cgp("config", "notifyCommand", path)
+        self.cgp("list"); self.backdate(since=50)
+        self.cgp("list")
+        self.assertNotIn("nagged", self.data()["notified"]["i1"])
+        self.assertEqual(self.events(out), [])
+        self.cgp("config", "nagAfterHours", "2")
+        self.cgp("list")  # old story, setting just enabled
+        self.assertIn("nagged", self.data()["notified"]["i1"])
+        self.assertEqual(self.events(out), [])
+
+    def test_nag_fires_after_n_hours_from_the_stamp_and_repeats(self):
+        out = self.nagging()
+        self.cgp("list")
+        self.backdate(nagged=1)
+        self.cgp("list")
+        self.assertEqual(self.events(out), [])
+        self.backdate(since=5, nagged=3)
+        self.cgp("list")
+        self.assertEqual([e.split("|")[0] for e in self.events(out)], ["nag"])
+        self.assertIn("waiting 5h", self.events(out)[0])
+        self.cgp("list")  # nagged was advanced
+        self.assertEqual(len(self.events(out)), 1)
+        self.backdate(nagged=3)
+        self.cgp("list")
+        self.assertEqual(len(self.events(out)), 2)
+
+    def test_nag_does_not_advance_without_a_command_and_resets_on_a_column_change(self):
+        self.nagging(command=False)
+        self.backdate(nagged=9)
+        stamp = self.data()["notified"]["i1"]["nagged"]
+        self.cgp("list")
+        self.assertEqual(self.data()["notified"]["i1"]["nagged"], stamp)
+        self.force("i1", "pr_approved")
+        self.cgp("list")
+        self.force("i1", "pr_review")
+        self.cgp("list")
+        self.cgp("list")
+        self.assertNotEqual(self.data()["notified"]["i1"]["nagged"], stamp)
+
+    def test_nag_after_hours_must_be_a_non_negative_integer(self):
+        self.setup_board()
+        for bad in ("-1", "1.5", "soon"):
+            self.assertNotEqual(self.cgp("config", "nagAfterHours", bad, ok=False).returncode, 0)
+        self.assertEqual(self.cgp("config", "nagAfterHours", "6")["nagAfterHours"], 6)

@@ -9,6 +9,7 @@ from .deferred import cmd_defer
 from .doctor import cmd_doctor, cmd_gc
 from .models import RATINGS, cmd_models
 from .policy import cmd_rate
+from .review import cmd_review
 from .repoconf import cmd_repo_config
 from .intake import cmd_add, cmd_import
 from .gitwt import cmd_guard, cmd_sync, cmd_worktree, cmd_worktree_remove
@@ -35,6 +36,8 @@ COMMANDS = [
     ("config", cmd_config, "Show or set a board setting (concurrency, pollSeconds, remoteControl, sharedFiles, ...)", [
         A("key", nargs="?"), A("value", nargs="?")]),
     ("repos", cmd_repos, "Repos linked to the board and their local clones", []),
+    ("review", cmd_review, "Digest of stories waiting on you: oldest wait first, smallest diff first (JSON; --html writes a page)", [
+        A("--html", nargs="?", const=True, metavar="PATH", help="write a self-contained HTML page (default: review.html in the cgp home) and print its path")]),
     ("status", cmd_status, "Human-readable board overview: counts, what waits on you, workers, blocked stories", [
         A("--json", action="store_true", help="the raw snapshot instead of the table")]),
     ("list", cmd_list, "JSON snapshot of the board (also files closed issues under Done and clears answered questions)", [

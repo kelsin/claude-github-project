@@ -27,6 +27,8 @@ Each snapshot of the loop (`cgp list` / `cgp wait`) can run an opt-in intake pas
 
 ## Story fields
 
+**Review digest.** `scripts/cgp review` lists every story waiting on you (plan review, PR review, or a question), oldest wait first and smallest diff first within the same hour, with rating, files, CI state and links; `--html [PATH]` writes it as one self-contained page. It is read-only. The wait is counted from when the loop first saw the story in its column, so stories already there when the loop first ran are marked approximate (`~`) and listed last.
+
 **Dependencies.** A story that GitHub shows as "blocked by" another issue on the board waits for it (set `nativeDependencies` to `off` to ignore GitHub's dependencies). `scripts/cgp status` lists each GitHub blocker with who opened it, and a dependency cycle that only you can break is asked about on the story.
 
 **Priority.** Set a story's `Priority` to High, Medium or Low and stories in the same column are dispatched in that order (unset after Low), and within a column and priority the stories that unlock the most other stories (directly or through a chain of dependencies) go first; `Hold` keeps a story from being dispatched at all. `scripts/cgp add "Fix login" --priority High` creates an issue and puts it on the board; `scripts/cgp import <label>` adds existing labelled issues.

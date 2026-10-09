@@ -14,6 +14,7 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `discover` | `roots` | Find local clones of the board's repos under ~/src, ~/code, ... |
 | `config` | `key` `value` | Show or set a board setting (concurrency, pollSeconds, remoteControl, sharedFiles, ...) |
 | `repos` |  | Repos linked to the board and their local clones |
+| `review` | `--html` | Digest of stories waiting on you: oldest wait first, smallest diff first (JSON; --html writes a page) |
 | `status` | `--json` | Human-readable board overview: counts, what waits on you, workers, blocked stories |
 | `list` | `--brief` | JSON snapshot of the board (also files closed issues under Done and clears answered questions) |
 | `wait` | `--timeout` `--interval` | Poll until a story becomes actionable, a worker is released, all is Done, or the timeout passes |
