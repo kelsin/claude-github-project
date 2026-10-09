@@ -29,7 +29,8 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `prepare` | `item` | Everything a worker reads before acting, in one call |
 | `adopt` | `item` `repo` | Convert a draft item into an issue in a linked repo |
 | `stop` | `board` `--cancel` | Finish the current cycle, then stop the loop (a separate shell stops the live session holding the board's lock) |
-| `worker` | `action` `item` `column` `title` `--outcome` | Register (start/stop/clear) a worker or set its phase |
+| `worker` | `action` `item` `column` `title` `--outcome` | Register (start/stop/clear) a worker, set its phase, or record its agent id (loop only) |
+| `resume` | `action` `item` | Loop only: get = may a send-back message the worker that last handled this story (read-only); clear = forget it |
 | `worktree` | `item` | Create or reuse the story's git worktree |
 | `worktree-remove` | `item` `--discard` | Remove the story's worktree and branch; refuses uncommitted or unpushed work |
 | `sync` | `item` | Rebase the story's worktree onto its remote branch and the latest default branch |

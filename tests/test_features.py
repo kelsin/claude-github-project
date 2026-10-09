@@ -1000,6 +1000,18 @@ class TestMandatorySubagents(unittest.TestCase):
             self.assertIn("at least one", test_cgp.read_text("skills", "run", "columns", name))
 
 
+class TestResumableWorkersText(unittest.TestCase):
+    def test_run_skill_resumes_with_send_message_and_falls_back_cold(self):
+        s = test_cgp.read_text("skills", "run", "SKILL.md")
+        for phrase in ("SendMessage", "resume get", "resume clear", "worker agent", "starts cold", "spawn a fresh worker", "<same id>", "plain `CGP worker stop <item>`", "by convention"):
+            self.assertIn(phrase, s)
+
+    def test_shared_rules_make_a_resumed_worker_redo_everything(self):
+        s = test_cgp.read_text("skills", "run", "columns", "shared.md")
+        for phrase in ("redo every phase", "background only", "Do not skip passes", "`resume` or `worker agent`"):
+            self.assertIn(phrase, s)
+
+
 class TestConventionalPRTitles(unittest.TestCase):
     def test_shared_requires_conventional_titles(self):
         s = test_cgp.read_text("skills", "run", "columns", "shared.md")

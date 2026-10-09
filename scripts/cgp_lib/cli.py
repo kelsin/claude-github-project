@@ -17,6 +17,7 @@ from .gitwt import cmd_guard, cmd_sync, cmd_worktree, cmd_worktree_remove
 from .pr import cmd_ci_triage, cmd_ci_wait, cmd_merge, cmd_merge_wait, cmd_pr_state
 from .sched import cmd_block, cmd_list, cmd_overlap, cmd_status, cmd_touches, cmd_wait
 from .unstick import cmd_unstick
+from .resume import cmd_resume
 from .session import cmd_release, cmd_session_title, cmd_stop, cmd_use, cmd_worker
 from .story import (cmd_answers, cmd_approve, cmd_ask, cmd_comment, cmd_feedback, cmd_move, cmd_prepare, cmd_preview, cmd_set)
 from .util import die
@@ -57,10 +58,12 @@ COMMANDS = [
     ("adopt", cmd_adopt, "Convert a draft item into an issue in a linked repo", [A("item"), A("repo")]),
     ("stop", cmd_stop, "Finish the current cycle, then stop the loop (a separate shell stops the live session holding the board's lock)", [
         A("board", nargs="?", help="board URL or key; default: this session"), A("--cancel", action="store_true")]),
-    ("worker", cmd_worker, "Register (start/stop/clear) a worker or set its phase", [
-        A("action", choices=["start", "stop", "clear", "phase"]), A("item", nargs="?"), A("column", nargs="?"),
+    ("worker", cmd_worker, "Register (start/stop/clear) a worker, set its phase, or record its agent id (loop only)", [
+        A("action", choices=["start", "stop", "clear", "phase", "agent"]), A("item", nargs="?"), A("column", nargs="?", help="agent: the id of the spawned Agent"),
         A("title", nargs="?", default="", help="the phase's detail text (worker phase); start looks the title up itself"),
-        A("--outcome", choices=["fail", "ok", "waiting"], help="stop: how the run ended, for the 3-strikes rule (fail adds a strike; ok and waiting reset it)")]),
+        A("--outcome", choices=["fail", "ok", "waiting"], help="stop: how the run ended, for the 3-strikes rule (fail adds a strike; ok and waiting reset it; ok also records the worker for a send-back to resume)")]),
+    ("resume", cmd_resume, "Loop only: get = may a send-back message the worker that last handled this story (read-only); clear = forget it", [
+        A("action", choices=["get", "clear"]), A("item")]),
     ("worktree", cmd_worktree, "Create or reuse the story's git worktree", [A("item")]),
     ("worktree-remove", cmd_worktree_remove, "Remove the story's worktree and branch; refuses uncommitted or unpushed work", [
         A("item"), A("--discard", action="store_true", help="remove it even so (you, not an agent)")]),
