@@ -17,7 +17,9 @@ from .auto_intake import run_intake
 from .repoconf import merged_globs
 from .policy import current_rating
 from .flakes import prune as prune_flakes
-from .story import ask_user, process_replies
+from .story import ask_user, process_replies, send_back
+from .stack import blocker_ref, pr_files, stackable
+from .pr import pr_view
 from .rules import pending, rules_due
 
 
@@ -32,7 +34,7 @@ def sync_story_field(c, live, held_back=frozenset(), in_flight=frozenset()):
         w["story"] = ensure_story_option(field)
         update_board(lambda cur: cur["fields"]["waiting"].__setitem__("story", w["story"]))
     for i in live:
-        desired = i["item"] not in in_flight and (bool(i["blockedBy"]) or i["item"] in held_back)
+        desired = i["item"] not in in_flight and ((bool(i["blockedBy"]) and not i.get("stackOn")) or i["item"] in held_back)
         if desired and not i["waitingOn"]:
             set_single(c, i["item"], w["id"], w["story"])
             i["waitingOn"] = STORY_OPTION
@@ -198,6 +200,40 @@ def stalled_workers(c):
             for w in load_json(state_path(), {}).get("workers", []) if age_seconds(w.get("startedAt")) > limit]
 
 
+def send_back_stacks(c, live, by_id, in_flight):
+    """A stacked story waiting in PR Review or PR Approved goes back to Implement when what it is built on changed: its blocker went
+    back to an earlier column, its PR was closed, or it was pushed to and the new commits touch files this story touches (shared files
+    excepted). Waits while the story's worker runs. A gh error decides nothing this cycle."""
+    data = load_data()
+    patterns = merged_globs(c, "sharedFiles", {i["issueRepo"] for i in live})
+    for i in live:
+        rec = data.get("stack", {}).get(i["item"])
+        blocker = by_id.get(rec["on"]) if rec else None
+        if not blocker or i["column"] not in ("pr_review", "pr_approved") or i["item"] in in_flight:
+            continue
+        why = None
+        if ALL_KEYS.index(blocker["column"]) < ALL_KEYS.index("pr_review"):
+            why = f"the story it is stacked on ({blocker['title']}) went back to {blocker['column']}"
+        else:
+            try:
+                view = pr_view(*blocker_ref(rec), check=False)
+                if view and view["state"] == "CLOSED":
+                    why = f"the PR of the story it is stacked on ({blocker['title']}) was closed"
+                elif view and view["state"] == "OPEN" and view["headRefOid"] != rec["tip"]:
+                    theirs = set(rec["files"]) | set(pr_files(*blocker_ref(rec)))
+                    hit = sorted(f for f in story_files(c, data, i) & theirs if not any(fnmatch.fnmatchcase(f, g) for g in patterns))
+                    if hit:
+                        why = f"the story it is stacked on ({blocker['title']}) was pushed to and now changes files this one changes ({', '.join(hit[:3])})"
+            except SystemExit:
+                continue
+        if why:
+            try:
+                send_back(c, i["item"], f"Back in Implement: {why}. The PR needs a `cgp sync` and a new review.")
+            except SystemExit:
+                continue
+            i["column"] = "implement"
+
+
 def snapshot(c):
     holder = lock_holder(c["board"]["id"])
     if holder:
@@ -240,8 +276,9 @@ def snapshot(c):
     file_closed()
     sweep_done()
     live = [i for i in items if i["column"] != "done"]
-    counts = {k: sum(1 for i in items if i["column"] == k) for k in board_keys(c)}
     by_id = {i["item"]: i for i in live}
+    send_back_stacks(c, live, by_id, in_flight)
+    counts = {k: sum(1 for i in items if i["column"] == k) for k in board_keys(c)}
 
     data = load_data()
     for i in items:
@@ -260,7 +297,17 @@ def snapshot(c):
         i["blockers"] = [{"title": r["title"], "column": r["column"], "waiting": r["waiting"]} for r in rows]
     # a block gates a story that is about to start work (see starting)
     parents = parent_edges(by_id, data)  # a story waiting for its sub-stories is never dispatched, whatever its column
-    blocked = [i for i in live if i["blockedBy"] and (starting(i) or i["item"] in parents)]
+    for i in live:  # stackedStories: a starting story whose only blocker has an open PR starts at once, built on that PR's branch (see stack.py)
+        if i["blockedBy"] and starting(i) and i["item"] not in parents:
+            rec = data.get("stack", {}).get(i["item"])
+            if i["item"] in in_flight:  # its worker owns it: no gh call to say what it is stacked on
+                blocker = by_id.get(rec["on"]) if rec and rec["on"] in blocks.get(i["item"], []) else None
+            else:
+                found = stackable(c, i, by_id, blocks, data)
+                blocker = found and found[0]
+            if blocker:
+                i["stackOn"] = {"item": blocker["item"], "title": blocker["title"], "pr": blocker["pr"]}
+    blocked = [i for i in live if i["blockedBy"] and not i.get("stackOn") and (starting(i) or i["item"] in parents)]
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and not i["held"] and i not in blocked
                   and i["item"] not in in_flight]
     actionable.sort(key=lambda i: (ACTIONABLE.index(i["column"]), i["priorityRank"], -i["unlocks"]))  # stable: board order breaks remaining ties
@@ -359,6 +406,7 @@ def snapshot(c):
         live_prs = {f"{r[0]}#{r[1]}" for r in (parse_pr_ref(c, i.get("pr")) for i in live) if r}
         d["reruns"] = {k: v for k, v in d.get("reruns", {}).items() if k in live_prs}
         d["resume"] = {k: v for k, v in d.get("resume", {}).items() if k.split("|")[0] in live_ids}
+        d["stack"] = {k: v for k, v in d.get("stack", {}).items() if k in live_ids}  # live_ids: every story on the board, workers' too
         prune_flakes(d)
     update_data(prune)
     return snap
@@ -510,7 +558,7 @@ def cmd_overlap(a):
             continue
         found.append({"item": o["item"], "title": o["title"], "number": o["number"], "column": o["column"],
                       "pr": o["pr"], "files": files, "shared": shared, "areas": areas, "ahead": rank(o) > rank(me),
-                      "alreadyWaitsOnMe": a.item in blocks.get(o["item"], [])})
+                      "alreadyWaitsOnMe": a.item in blocks.get(o["item"], []) or st.get("stack", {}).get(a.item, {}).get("on") == o["item"]})  # the stack base is no block to ask for
     held = set(st.get("deferred", []))  # the loop is holding these back for me: waiting on them would deadlock
     block_on = [f["item"] for f in found if f["ahead"] and f["files"] and not f["alreadyWaitsOnMe"] and f["item"] not in held]
     suggest = ({"action": "declare", "why": "this story has no touches or PR yet: run `cgp touches` first"} if not mine

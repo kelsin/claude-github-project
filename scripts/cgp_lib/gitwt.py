@@ -11,7 +11,9 @@ from .store import cfg, load_data, update_data
 from .board import issue_item, known_repo, parse_pr_ref
 from .gitutil import default_ref, fetch, git, resolve_repo_path, wt_path
 from .repoconf import merged_globs
-from .pr import allow_head, is_approved_head, pr_view
+from .pr import allow_head, cancel_auto_merge, forget_review, is_approved_head, pr_view
+from .gh import gh
+from .stack import blocker_ref, pr_files
 
 
 def cleanup_worktree(c, it, fetched=None):
@@ -101,7 +103,11 @@ def cmd_worktree(a):
     elif has_local:
         git(base, "worktree", "add", wt, branch)
     else:
-        git(base, "worktree", "add", "-b", branch, wt, default)
+        stack = load_data().get("stack", {}).get(a.item)  # a stacked story is cut from the blocker commit it was recorded on
+        git(base, "worktree", "add", "-b", branch, wt, stack["tip"] if stack else default)
+        if stack:
+            out({"path": wt, "branch": branch, "base": default, "repo": repo, "stackedOn": stack["branch"]})
+            return
     out({"path": wt, "branch": branch, "base": default, "repo": repo})
 
 
@@ -110,9 +116,11 @@ def rebase_in_progress(wt):
                for d in ("rebase-merge", "rebase-apply"))
 
 
-def run_rebase(wt, target):
-    """None on success, else a result dict: conflict (rebase left in progress) or error."""
-    p = subprocess.run(["git", "-C", wt, "rebase", "--autostash", target], capture_output=True, text=True, encoding="utf-8", errors="replace")
+def run_rebase(wt, target, upstream=None):
+    """None on success, else a result dict: conflict (rebase left in progress) or error. With `upstream`, only the commits after it are
+    replayed onto `target` (git rebase --onto)."""
+    cmd = ["rebase", "--autostash", *(["--onto", target, upstream] if upstream else [target])]
+    p = subprocess.run(["git", "-C", wt, *cmd], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if p.returncode == 0:
         return None
     if rebase_in_progress(wt):
@@ -123,6 +131,82 @@ def run_rebase(wt, target):
 def taint(item):
     """A conflict was resolved by hand: later clean rebases may no longer be passed off as already approved (see pr.allow_head)."""
     update_data(lambda d: d.setdefault("tainted", []).append(item) if item not in d.get("tainted", []) else None)
+
+
+def is_ancestor(wt, commit, of="HEAD"):
+    return subprocess.run(["git", "-C", wt, "merge-base", "--is-ancestor", commit, of], capture_output=True).returncode == 0
+
+
+def stack_sync(c, it, wt, rec, default):
+    """cmd_sync for a stacked story, in place of the rebase onto the default branch (see stack.py). While the blocker's PR is open the
+    story is rebased onto the blocker's branch, from the commit it was built on (`tip`, which then moves forward). Once it is merged
+    the story is rebased onto the default branch from that commit (the blocker was squash-merged, so its own commits must not be
+    replayed), the PR is retargeted and only then the record, and with it the merge gate, goes away. A closed blocker, a recorded commit
+    that is no longer in the branch and any conflict leave the record in place. Neither rebase is passed off as approved: the story is
+    sent back for a new review. Returns the result to print."""
+    from .story import send_back  # story imports this module
+    item = it["item"]
+    repo, num = blocker_ref(rec)
+    subprocess.run(["git", "-C", wt, "fetch", "origin", f"refs/pull/{num}/head"], capture_output=True)  # the commits stay local once the branch is deleted
+    view = pr_view(repo, num, check=False)
+    if not view:
+        die("could not read the blocker's PR; not changing the stacked story")
+    if view["state"] == "CLOSED":
+        send_back(c, item, f"The blocker's PR ({rec['pr']}) was closed without merging, so this story, stacked on {rec['branch']}, "
+                           "cannot go on as it is. It is back in Implement; the user decides what happens to the stack.")
+        return {"state": "blocker-closed", "pr": rec["pr"], "base": rec["branch"]}
+    merged = view["state"] == "MERGED"
+    target = default if merged else f"origin/{rec['branch']}"
+    new_tip = git(wt, "rev-parse", "--verify", "-q", target, check=False)
+    if not new_tip:
+        return {"state": "error", "stderr": f"{target} does not exist", "base": target}
+    behind = int(git(wt, "rev-list", "--count", f"HEAD..{target}") or 0)
+    if not merged and new_tip == rec["tip"]:
+        return {"state": "clean", "behind": 0, "base": target}
+    if not (merged and rec.get("onto") and is_ancestor(wt, rec["onto"])):  # not rebased onto the default branch already (e.g. by hand after a conflict)
+        if not is_ancestor(wt, rec["tip"]):
+            taint(item)
+            send_back(c, item, f"This story was recorded as built on {rec['branch']} at {rec['tip'][:8]}, but that commit is not in its "
+                               "branch any more, so it cannot be rebased safely. It is back in Implement.")
+            return {"state": "tainted", "base": target, "note": "the recorded blocker commit is not in the branch"}
+        if merged:
+            update_data(lambda d: d["stack"][item].__setitem__("onto", new_tip))
+        res = run_rebase(wt, target, upstream=rec["tip"])
+        if res:
+            if res["state"] == "conflict":
+                taint(item)
+            return {**res, "behind": behind, "base": target}
+    if not merged:
+        try:
+            files = pr_files(repo, num)
+        except SystemExit:
+            files = rec["files"]
+        update_data(lambda d: d["stack"][item].update(tip=new_tip, files=files))
+    else:
+        retarget(c, it, default)
+        update_data(lambda d: d.get("stack", {}).pop(item, None))
+    if it["column"] in ("pr_review", "pr_approved"):
+        send_back(c, item, f"This PR was rebased onto {'the default branch after its blocker merged' if merged else rec['branch']} and so changed after "
+                           "it was reviewed. It is back in Implement for a new review.")
+    else:
+        forget_review(item)
+    return {"state": "rebased", "behind": behind, "base": target, **({"retargeted": True} if merged else {})}
+
+
+def retarget(c, it, default):
+    """Point the story's PR at the default branch (auto-merge is disarmed first). Dies, leaving the record, when GitHub refuses."""
+    ref = parse_pr_ref(c, it["pr"])
+    if not ref:
+        return
+    cancel_auto_merge(*ref)
+    view = pr_view(*ref, check=False)
+    if not view:
+        die("could not read the story's PR; not retargeting it")
+    name = default.split("/", 1)[1]
+    if view.get("baseRefName") != name:
+        p = gh("pr", "edit", str(ref[1]), "-R", ref[0], "--base", name, check=False)
+        if p.returncode:
+            die(f"could not retarget the PR onto {name}: {(p.stderr or p.stdout).strip()}")
 
 
 def cmd_sync(a):
@@ -160,6 +244,11 @@ def cmd_sync(a):
                 out({**res, "base": remote})
                 return
             moved += ahead_of_us
+    rec = load_data().get("stack", {}).get(a.item)
+    if rec:  # a stacked story follows its blocker's branch, not the default branch
+        res = stack_sync(c, it, wt, rec, default)
+        out({**res, **({"stack": rec["branch"]} if res["state"] != "blocker-closed" else {})})
+        return
     behind = int(git(wt, "rev-list", "--count", f"HEAD..{default}") or 0)
     if behind:
         res = run_rebase(wt, default)
