@@ -1518,25 +1518,37 @@ class TestReview(Base):
         self.backdate(since=5, nagged=3)
         self.cgp("list")
         self.assertEqual([e.split("|")[0] for e in self.events(out)], ["nag"])
-        self.assertIn("waiting 5h", self.events(out)[0])
+        self.assertIn("waiting ~5h", self.events(out)[0])  # first seen by the loop: approximate
         self.cgp("list")  # nagged was advanced
         self.assertEqual(len(self.events(out)), 1)
         self.backdate(nagged=3)
         self.cgp("list")
         self.assertEqual(len(self.events(out)), 2)
 
-    def test_nag_does_not_advance_without_a_command_and_resets_on_a_column_change(self):
-        self.nagging(command=False)
+    def test_nag_without_a_command_or_setting_drops_the_stamp_so_enabling_it_restamps(self):
+        out = self.nagging(command=False)
+        self.cgp("list")
+        self.assertNotIn("nagged", self.data()["notified"]["i1"])
+        path, out = self.script()
+        self.cgp("config", "notifyCommand", path)
+        self.cgp("list")  # command just enabled: stamps, does not nag
+        self.assertIn("nagged", self.data()["notified"]["i1"])
+        self.assertEqual(self.events(out), [])
         self.backdate(nagged=9)
-        stamp = self.data()["notified"]["i1"]["nagged"]
+        self.cgp("config", "nagAfterHours", "0")
         self.cgp("list")
-        self.assertEqual(self.data()["notified"]["i1"]["nagged"], stamp)
-        self.force("i1", "pr_approved")
+        self.assertNotIn("nagged", self.data()["notified"]["i1"])
+        self.cgp("config", "nagAfterHours", "2")
         self.cgp("list")
-        self.force("i1", "pr_review")
+        self.assertEqual(self.events(out), [])
+
+    def test_nag_title_marks_an_approximate_wait(self):
+        out = self.nagging()
+        d = self.data()
+        d["notified"]["i1"].update(approx=True, since=hours_ago(5), nagged=hours_ago(3))
+        self.save_data(notified=d["notified"])
         self.cgp("list")
-        self.cgp("list")
-        self.assertNotEqual(self.data()["notified"]["i1"]["nagged"], stamp)
+        self.assertIn("waiting ~5h", self.events(out)[0])
 
     def test_nag_after_hours_must_be_a_non_negative_integer(self):
         self.setup_board()

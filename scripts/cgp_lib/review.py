@@ -4,6 +4,8 @@ import concurrent.futures
 import html
 import json
 import os
+import subprocess
+import tempfile
 from urllib.parse import urlparse
 from .consts import HOME
 from .util import age_seconds, die, out, printable
@@ -21,10 +23,10 @@ DIFF_KEYS = ("additions", "deletions", "changedFiles")
 def pr_facts(ref):
     """{diff, files, ci} of a PR; every part is None when gh does not answer."""
     repo, number = ref
-    p = gh("pr", "view", str(number), "-R", repo, "--json", ",".join(DIFF_KEYS + ("files",)), check=False)
     try:
+        p = gh("pr", "view", str(number), "-R", repo, "--json", ",".join(DIFF_KEYS + ("files",)), check=False, timeout=PR_TIMEOUT)
         view = json.loads(p.stdout) if not p.returncode else None
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, subprocess.TimeoutExpired):
         view = None
     view = view if isinstance(view, dict) else None
     checks = pr_checks(repo, number)
@@ -48,8 +50,8 @@ def collect(c):
         facts = {"diff": None, "files": None, "ci": None}
         if it["item"] in futures:
             try:
-                facts = futures[it["item"]].result(timeout=PR_TIMEOUT)
-            except Exception:  # a timeout or a crash in one PR's lookup must not lose the digest
+                facts = futures[it["item"]].result()
+            except Exception:  # a crash in one PR's lookup must not lose the digest
                 pass
         entry = seen.get(it["item"]) or {}
         since = entry.get("since") if entry.get("column") == it["column"] and entry.get("waiting") == it["waiting"] else None
@@ -64,7 +66,7 @@ def collect(c):
         d = facts["diff"]
         size = (d.get("additions") or 0) + (d.get("deletions") or 0) if d else None
         rows.append(((approx, -(hours or 0), size is None, size or 0, n), row))
-    pool.shutdown(wait=False, cancel_futures=True)
+    pool.shutdown(wait=False)
     return [r for _, r in sorted(rows, key=lambda x: x[0])]
 
 
@@ -120,13 +122,17 @@ def write_html(path, text):
     if os.path.islink(path):
         die(f"{path} is a symlink; refusing to write through it")
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)), prefix=".review-", suffix=".tmp")  # 0600
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
         try:
-            os.fchmod(f.fileno(), 0o600)
-        except (AttributeError, OSError):  # Windows
+            os.unlink(tmp)
+        except OSError:
             pass
-        f.write(text)
+        raise
 
 
 def cmd_review(a):

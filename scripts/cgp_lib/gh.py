@@ -46,10 +46,10 @@ def has_data(stdout):
         return False
 
 
-def gh(*args, input=None, check=True, retry=None):
+def gh(*args, input=None, check=True, retry=None, timeout=None):
     retry = readonly(args) if retry is None else retry
     for delay in (*BACKOFF, None):
-        p = subprocess.run([shutil.which("gh") or "gh", *args], input=input, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        p = subprocess.run([shutil.which("gh") or "gh", *args], input=input, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         if not p.returncode or not retry or delay is None or not TRANSIENT.search(p.stderr) or has_data(p.stdout):
             break
         time.sleep(delay)

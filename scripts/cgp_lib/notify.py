@@ -83,13 +83,15 @@ def check(c, items, stalled):
                     events.append(("done", it, it["title"]))
                 if it["item"] in started and was.get("stalled") != started[it["item"]].get("startedAt"):
                     events.append(("stalled", it, it["title"]))
-            if nag and (it["waiting"] or it["column"] in REVIEW):
+            if nag and runs and (it["waiting"] or it["column"] in REVIEW):
                 if not now.get("nagged"):
                     now["nagged"] = now_iso()
                 elif age_seconds(now["nagged"]) >= nag * 3600:
-                    events.append(("nag", it, f"{it['title']} (waiting {int(age_seconds(now['since']) // 3600)}h)"))
-                    if runs:
-                        now["nagged"] = now_iso()
+                    age = f"{'~' if now.get('approx') else ''}{int(age_seconds(now['since']) // 3600)}h"
+                    events.append(("nag", it, f"{it['title']} (waiting {age})"))
+                    now["nagged"] = now_iso()
+            else:
+                now.pop("nagged", None)  # nagging is off or has no command: re-enabling it re-stamps instead of nagging at once
             if it["item"] in started:
                 now["stalled"] = started[it["item"]].get("startedAt")
             seen[it["item"]] = now
