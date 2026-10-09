@@ -42,8 +42,8 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `ci-wait` | `repo` `pr` `--timeout` `--interval` `--grace` `--sha` | Wait for a PR's checks: green, red (with logs), none or pending |
 | `ci-triage` | `repo` `pr` `--timeout` `--interval` `--sha` | After ci-wait says red: flaky (green after one rerun; files it once as a story on hold), main-broken or real |
 | `pr-state` | `repo` `pr` | State of a PR on a linked repo |
-| `merge` | `item` `--cancel` | Squash-merge (auto-merge) the story's PR; only from PR Approved |
-| `merge-wait` | `item` `--timeout` `--interval` | Wait for the story's PR to merge, keeping it up to date |
+| `merge` | `item` `--cancel` | Squash-merge (auto-merge) the story's PR; only from PR Approved, and only when it is first in the merge train (otherwise requested:false with train info; in a merge queue repo it enqueues, queue:true) |
+| `merge-wait` | `item` `--timeout` `--interval` | Wait for the story's PR to merge, keeping it up to date; behind the merge train it only waits (pending with ahead), in a merge queue repo it only watches (dequeued when the queue drops it) |
 | `add` | `title` `--repo` `--body` `--priority` | Create an issue and put it on the board in Todo (body on stdin with --body -) |
 | `split` | `item` `--declare` | Sub-stories: declare a split in the plan (--declare, JSON on stdin), or create the approved ones |
 | `defer` | `item` | After the merge: file the PR's `## Deferred` entries as Todo stories on hold (safe to rerun) |
