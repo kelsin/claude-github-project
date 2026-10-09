@@ -78,25 +78,36 @@ def stackable(c, dep, by_id, blocks, data):
             return None
         if not (author_trusted(dep) and author_trusted(blocker)):
             return None
+        if dep["item"] not in stack and branch_exists(resolve_repo_path(c, dep["issueRepo"]), dep):
+            return None  # the story has a branch of its own already (make_record agrees)
     except SystemExit:
         return None
     return blocker, ref, view
 
 
 def prepare_stack(c, it):
-    """Called by `cgp prepare` before the worktree exists: the story's stack record, made now when the story may be stacked (see
-    stackable) and the blocker's branch is on the remote at the commit of its PR's head. None when the story is not stacked."""
+    """Called by `cgp prepare` before the worktree exists: (the story's stack record, why it must not start). The record is made now
+    when the story may be stacked (see stackable) and the blocker's branch is on the remote at the commit of its PR's head. With the
+    setting on, a story that has no record yet and still waits for an unfinished blocker (the record could not be made: its branch
+    exists, the blocker moved, gh failed) must not get a worktree cut from the default branch: the second value then says what it waits on."""
     rec = stack_of(it["item"])
     if rec or not c["settings"].get("stackedStories") or os.path.isdir(wt_path(it)):
-        return rec
+        return rec, None
+    waits = []
     try:
         with contextlib.redirect_stderr(io.StringIO()):  # die() prints before it exits
-            return make_record(c, it)
+            rec = make_record(c, it, waits)
     except SystemExit:
-        return None
+        rec = None
+        if not waits:
+            waits.append("a blocker that could not be read")
+    if rec or not waits:
+        return rec, None
+    return None, "this story waits on " + ", ".join(waits) + " and could not be stacked on it: reply `waiting:`, no worktree is created"
 
 
-def make_record(c, it):
+def make_record(c, it, waits):
+    """The record, or None. `waits` is filled with the titles of the story's unfinished effective blockers as soon as they are known."""
     from .sched import effective_blocks, native_edges, parent_edges, starting
     items = [parse_item(r, c) for r in fetch_items(c["board"]["id"], bool(c["settings"]["nativeDependencies"]))]
     live = [i for i in items if not i["archived"] and i["kind"] in ("issue", "draft") and i["column"] != "done"]
@@ -104,6 +115,7 @@ def make_record(c, it):
     if not starting(it) or it["item"] in parent_edges(by_id, data):
         return None
     blocks = effective_blocks(live, data, native_edges(live) if c["settings"]["nativeDependencies"] else {})
+    waits.extend(by_id[b]["title"] for b in blocks.get(it["item"], []) if b in by_id)
     found = stackable(c, it, by_id, blocks, data)
     if not found:
         return None
@@ -111,8 +123,7 @@ def make_record(c, it):
     base = resolve_repo_path(c, it["issueRepo"])
     fetch(base)
     branch = view["headRefName"]
-    if git(base, "rev-parse", "--verify", "-q", f"refs/heads/cgp/{it['number']}", check=False) \
-            or git(base, "rev-parse", "--verify", "-q", f"origin/cgp/{it['number']}", check=False):
+    if branch_exists(base, it):
         return None  # a branch of its own exists already: it is not cut from the blocker now
     tip = git(base, "rev-parse", "--verify", "-q", f"origin/{branch}", check=False)
     if not tip or tip != view["headRefOid"]:
@@ -121,3 +132,8 @@ def make_record(c, it):
     update_data(lambda d: d.setdefault("stack", {}).__setitem__(it["item"], rec))
     return rec
 
+
+def branch_exists(base, it):
+    """The story's own cgp/<n> branch exists locally or on the remote (as of the last fetch)."""
+    return bool(git(base, "rev-parse", "--verify", "-q", f"refs/heads/cgp/{it['number']}", check=False)
+                or git(base, "rev-parse", "--verify", "-q", f"origin/cgp/{it['number']}", check=False))

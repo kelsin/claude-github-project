@@ -360,7 +360,7 @@ def merge_target(a):
     if v["state"] == "OPEN" and v.get("isCrossRepository") is not False:  # a fork can use any branch name, cgp/<n> included
         die("refusing to merge: the PR comes from a fork (or its origin could not be read), not a branch of this repo")
     if v["state"] == "OPEN":
-        why = stack_of(a.item) and STACKED or base_problem(c, ref[0], v)
+        why = stack_gate(c, it, v)
         if why:
             cancel_auto_merge(*ref)  # an armed auto-merge on a stacked or retargeted PR would land the blocker's commits
             die("refusing to merge: " + why)
@@ -408,6 +408,17 @@ def base_problem(c, repo, view):
     if base == default:
         return None
     return f"the PR targets {base}, not the default branch {default}" + (" (a stacked PR is retargeted by `cgp sync` once its blocker merged)" if (base or "").startswith("cgp/") else "")
+
+
+def stack_gate(c, it, view=None):
+    """Why the story's PR may not be approved, or count as merged, by anyone but the user: the story is stacked, or its PR does not
+    target the default branch (also when it cannot be read or the default branch is unknown). None when nothing stands in the way.
+    `view` is the PR as already read, else it is read here."""
+    if stack_of(it["item"]):
+        return STACKED
+    ref = parse_pr_ref(c, it["pr"])
+    view = view or (ref and pr_view(*ref, check=False))
+    return base_problem(c, ref[0], view) if view else "the PR could not be read"
 
 
 def cancel_auto_merge(repo, pr):

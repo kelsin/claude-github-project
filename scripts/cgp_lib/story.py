@@ -12,7 +12,7 @@ from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, 
 from .session import clear_phase, reset_strikes, set_phase, worker_pr
 from .repoconf import repo_config, rules_text, safe_pattern
 from .gitwt import cmd_sync, cmd_worktree
-from .pr import STACKED, base_problem, cancel_auto_merge, changed_since_review, cmd_pr_state, default_branch, forget_review, pr_view, record_reviewed, stack_of
+from .pr import cancel_auto_merge, changed_since_review, cmd_pr_state, default_branch, forget_review, pr_view, record_reviewed, stack_gate, stack_of
 from .stack import prepare_stack, stale as stack_stale
 from .policy import GATE_KEYS, current_rating, evaluate, public, record_decision, require_human
 
@@ -62,16 +62,6 @@ def policy_verdict(c, it, target):
     verdict = evaluate(c, it, target, lambda: author_trusted(it))
     why = stack_gate(c, it) if verdict and verdict["approved"] and target == "pr_approved" else None
     return {"approved": False, "reason": why} if why else verdict
-
-
-def stack_gate(c, it):
-    """Why the story's PR may not be approved, or count as merged, by anyone but the user: the story is stacked, or its PR does not
-    target the default branch (also when it cannot be read or the default branch is unknown). None when nothing stands in the way."""
-    if stack_of(it["item"]):
-        return STACKED
-    ref = parse_pr_ref(c, it["pr"])
-    view = ref and pr_view(*ref, check=False)
-    return base_problem(c, ref[0], view) if view else "the PR could not be read"
 
 
 def ready_pr(ref):
@@ -510,8 +500,8 @@ def cmd_prepare(a):
     res["repoConfig"] = repo_config(c, it["issueRepo"])  # test / lint commands, reviewers, ... from the repo's .cgp.json
     res["houseRules"] = rules_text(c, it["issueRepo"])  # the default branch's .cgp-rules.md, or null
     res["settings"] = {"draftPRs": bool(c["settings"].get("draftPRs"))}
-    res["stack"] = prepare_stack(c, it)  # the blocker's branch the worktree is cut from (stackedStories), else null
-    res["worktree"] = call(cmd_worktree, item=a.item)
+    res["stack"], stack_wait = prepare_stack(c, it)  # the blocker's branch the worktree is cut from (stackedStories), else null
+    res["worktree"] = {"error": stack_wait} if stack_wait else call(cmd_worktree, item=a.item)
     if "error" not in res["worktree"]:
         res["sync"] = call(cmd_sync, item=a.item)
     out(res)
