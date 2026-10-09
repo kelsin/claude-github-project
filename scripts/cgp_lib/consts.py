@@ -15,7 +15,7 @@ STRIKES = 3  # failed or fruitless runs of one story in one column before the us
 STORY_STATE = {"answered": "list", "daemonStrikes": "pipe"}
 STORY_KEPT = ("asked", "cursors", "pending", "blocks", "epicOrder", "touches", "approvedTouches", "splits", "approvedSplits", "children",
               "parents", "epicAsked", "policyPlans", "policy", "ratings", "reviewed", "cleanRebase", "notified", "deferred", "reasons",
-              "tainted", "intake")  # tainted: a review safety gate (a conflicting rebase), not for unstick to lift
+              "tainted", "intake", "reruns", "flakes")  # tainted: a review safety gate (a conflicting rebase), not for unstick to lift
 MARK = "<!-- cgp -->"
 QMARK = "<!-- cgp:question -->"
 # key, name, emoji, color. plan_review and pr_review are the user's columns (the gates in cmd_move and cmd_merge are built on them).

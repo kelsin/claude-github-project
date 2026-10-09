@@ -9,7 +9,7 @@ The user approved the diff as it stands. Run `CGP feedback <item>` (act on anyth
    - `merged`: go to step 3.
    - `revoked`: the user took the approval back. Do nothing more and stop (the story is theirs again).
    - `conflict`: `CGP merge <item> --cancel`, `CGP worktree <item>`, `CGP sync <item>`. If it returns `clean` or `rebased` (a conflict-free rebase), `CGP guard <item>`, push with `--force-with-lease`, then `ci-wait --sha <pushed sha>`, `merge` and `merge-wait` again. If you had to resolve conflicts, follow the re-approval rule (rule 7).
-   - `ci-red`: `CGP merge <item> --cancel`, fix as in the Implement column (`ci-wait` gives logs), push. Your fix commit is code the user never approved: follow the re-approval rule (rule 7).
+   - `ci-red`: `CGP merge <item> --cancel`, run `CGP ci-triage <repo> <pr>` and fix as in the Implement column only when it says `real`, push. Your fix commit is code the user never approved: follow the re-approval rule (rule 7).
    - `changed` (or `merge`/`merge-wait` exiting 7): the PR head is not the commit the user reviewed. `CGP merge <item> --cancel`, post a status comment saying what changed, `CGP move <item> pr_review` (rule 7, re-approval).
    - `blocked` or `closed`: `CGP ask` explaining why and stop.
    - `pending`: run `merge-wait` again (rule 7 caps this).
