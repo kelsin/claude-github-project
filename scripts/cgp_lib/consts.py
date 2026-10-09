@@ -15,7 +15,7 @@ STRIKES = 3  # failed or fruitless runs of one story in one column before the us
 STORY_STATE = {"answered": "list", "daemonStrikes": "pipe", "resume": "pipe"}  # resume: {agent, head, at} of the worker to message on a send-back
 STORY_KEPT = ("asked", "cursors", "pending", "blocks", "epicOrder", "touches", "approvedTouches", "splits", "approvedSplits", "children",
               "parents", "epicAsked", "policyPlans", "policy", "ratings", "reviewed", "cleanRebase", "notified", "deferred", "reasons",
-              "tainted", "intake", "reruns", "flakes", "stack")  # stack: {dependent: {on, branch, pr, tip, files}}, see stack.py; tainted: a review safety gate (a conflicting rebase), not for unstick to lift
+              "tainted", "intake", "reruns", "flakes", "stack", "spec")  # stack: {dependent: {on, branch, pr, tip, files}}, see stack.py; spec: a speculative draft of a Plan Review story, see spec.py; tainted: a review safety gate (a conflicting rebase), not for unstick to lift
 MARK = "<!-- cgp -->"
 QMARK = "<!-- cgp:question -->"
 # key, name, emoji, color. plan_review and pr_review are the user's columns (the gates in cmd_move and cmd_merge are built on them).
@@ -54,6 +54,7 @@ AUTO_OPTIONS = ("Plan", "PR", "Both")
 SKIP = "skip"  # a Plan field of "Skip" (set by the user on a Todo story) means the story is implemented without a plan
 PRIORITY_FIELD = "Priority"  # single-select; stories are dispatched High before Medium before Low before unset, Hold is never dispatched
 PRIORITY_OPTIONS = (("High", "RED"), ("Medium", "YELLOW"), ("Low", "BLUE"), ("Hold", "GRAY"))
+SPEC_SUFFIX = ":spec"  # a speculative worker's row is keyed "<item>:spec", so it never replaces or hides the story's own worker
 STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a blocker; "You" is the user
 # concurrency 0 = no cap; sharedFiles: fnmatch globs for files many stories edit (registries, lockfiles): overlaps on them never block
 # remoteControl 1: /cgp:run turns on Remote Control for its session (desktop app only), so the loop can be followed from claude.ai or the phone
@@ -69,6 +70,7 @@ STORY_OPTION = "Another story"  # Waiting On value for a story queued behind a b
 # autoApprove: plan:low,pr:never style, the highest risk rating at which the agent may pass that human gate itself (default never); only a person
 # at a terminal may change it. autoApproveFiles: segment globs (`*` stays in one path segment, `**` spans segments) every changed file must match
 # rulesProposeDays: `cgp rules propose --if-due` runs this often per repo (0 = never; see rules.py)
+# speculative 1: a low-rated story in Plan Review is drafted as local commits on its own branch while its plan awaits review (see spec.py); speculativeMax: at most this many such workers at once. Only a person at a terminal may change either
 # briefThreshold: the repo brief (cgp brief) is regenerated once the default branch changed this many files since it was written
 # guardFiles: fnmatch globs (tried on the path and on its file name, ignoring case) for files an agent may only change when the approved plan lists them;
 # these built-in ones always apply, the setting can only add to them
@@ -81,12 +83,12 @@ DEFAULTS = {"concurrency": 0, "pollSeconds": POLL_SECONDS, "remoteControl": 1, "
                            "Makefile", "GNUmakefile", "Dockerfile*", ".gitmodules", ".claude/*", ".mcp.json", ".cgp.json", ".envrc",
                            ".gitlab-ci.yml", "Jenkinsfile", "lefthook.yml", ".githooks/*", ".cgp-rules.md"],
             "sharedFiles": ["*package-lock.json", "*yarn.lock", "*pnpm-lock.yaml", "*.schema.json", "*locales/*",
-                            "*__snapshots__/*", "*.md"], "rulesProposeDays": 7, "briefThreshold": 40}
+                            "*__snapshots__/*", "*.md"], "rulesProposeDays": 7, "briefThreshold": 40, "speculative": 0, "speculativeMax": 1}
 INTAKE_BOTS = ("dependabot[bot]", "renovate[bot]")  # default allowlist of dependency-PR authors (a repo's .cgp.json can name its own)
 INTAKE_MAX_OPEN = 10  # default and cap (20) of open intake stories per repo
 INTAKE_PER_CYCLE = 3  # new intake stories per repo per scan
 INTAKE_KEEP_SECONDS = 90 * 86400  # incident keys older than this are forgotten
-BOOL_SETTINGS = ("nativeDependencies", "stackedStories")  # on / off on the command line, stored as 1 / 0
+BOOL_SETTINGS = ("nativeDependencies", "stackedStories", "speculative")  # on / off on the command line, stored as 1 / 0
 LIST_SETTINGS = ("sharedFiles", "guardFiles", "autoApproveFiles")
 STRING_SETTINGS = ("notifyCommand", "previewProvider", "plannerModel", "reviewerModel", "implementerModel")
 PR_URL = re.compile(r"^https://github\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/pull/(\d+)/?$")
