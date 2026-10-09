@@ -6,7 +6,7 @@ import sys
 import time
 from .consts import ACTIONABLE, ALL_KEYS, COLUMNS, HOME, STORY_OPTION, WAITING_FIELD
 from .util import Poll, age_seconds, printable, strip_id, covers, die, norm_path, now_iso, out
-from .gh import gh, rest
+from .gh import gh
 from .store import cfg, load_data, load_json, lock_file, lock_holder, state_path, stop_requested, update_board, update_data, update_state
 from .board import board_keys, clear_field, ensure_story_option, fetch_items, fetch_project, fields_by_name, get_item, known_repo, parse_item, parse_pr_ref, rank, set_single
 from .gitutil import wt_path
@@ -202,7 +202,7 @@ def stalled_workers(c):
 
 def send_back_stacks(c, live, by_id, in_flight):
     """A stacked story waiting in PR Review or PR Approved goes back to Implement when what it is built on changed: its blocker went
-    back to an earlier column, its PR was closed, or it was pushed to and the new commits touch files this story touches (shared files
+    back to an earlier column, its PR was closed, or it was pushed to and its PR's files overlap the files this story touches (shared files
     excepted). Waits while the story's worker runs. A gh error decides nothing this cycle."""
     data = load_data()
     patterns = merged_globs(c, "sharedFiles", {i["issueRepo"] for i in live})
@@ -308,6 +308,12 @@ def snapshot(c):
             if blocker:
                 i["stackOn"] = {"item": blocker["item"], "title": blocker["title"], "pr": blocker["pr"]}
     blocked = [i for i in live if i["blockedBy"] and not i.get("stackOn") and (starting(i) or i["item"] in parents)]
+    for i in live:  # a story sent back because its stack base went back to an earlier column is held until it is in review again
+        rec = data.get("stack", {}).get(i["item"])
+        base = by_id.get(rec["on"]) if rec else None
+        if base and i["column"] == "implement" and i not in blocked and i["item"] not in in_flight and ALL_KEYS.index(base["column"]) < ALL_KEYS.index("pr_review"):
+            blocked.append(i)
+            i["blockedBy"] = i["blockedBy"] or [base["title"]]
     actionable = [i for i in live if i["column"] in ACTIONABLE and not i["waiting"] and not i["held"] and i not in blocked
                   and i["item"] not in in_flight]
     actionable.sort(key=lambda i: (ACTIONABLE.index(i["column"]), i["priorityRank"], -i["unlocks"]))  # stable: board order breaks remaining ties
@@ -506,10 +512,7 @@ def cmd_wait(a):
 def story_files(c, st, it):
     files = set(norm_path(f) for f in st.get("touches", {}).get(it["item"], []))
     ref = parse_pr_ref(c, it.get("pr"))
-    if ref:
-        for f in rest(f"repos/{ref[0]}/pulls/{ref[1]}/files"):
-            files |= {f["filename"], f.get("previous_filename") or f["filename"]}
-    return files
+    return files | set(pr_files(*ref)) if ref else files
 
 
 def would_cycle(blocks, item, other, native=None):
