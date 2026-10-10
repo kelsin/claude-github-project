@@ -45,12 +45,20 @@ def story_events(created, nodes, board_id):
     """(anchor time, [(time, from column, to column)]) of one story on this board, or None when its history cannot be trusted.
     Events of other projects and with column names this board does not know are ignored."""
     added = sorted(stamp(e["createdAt"]) for e in nodes if e.get("__typename") == "AddedToProjectV2Event" and (e.get("project") or {}).get("id") == board_id)
-    moves = sorted((stamp(e["createdAt"]), KEYS_BY_NAME.get(norm(e["previousStatus"])), KEYS_BY_NAME.get(norm(e["status"])))
-                   for e in nodes if e.get("__typename") == "ProjectV2ItemStatusChangedEvent" and (e.get("project") or {}).get("id") == board_id)
+    moves = sorted(((stamp(e["createdAt"]), KEYS_BY_NAME.get(norm(e["previousStatus"])), KEYS_BY_NAME.get(norm(e["status"])))
+                    for e in nodes if e.get("__typename") == "ProjectV2ItemStatusChangedEvent" and (e.get("project") or {}).get("id") == board_id),
+                   key=lambda m: m[0])  # time only: same-second ties keep GitHub's order
     moves = [m for m in moves if m[1] and m[2]]
     if not moves or (not added and moves[0][1] != ALL_KEYS[0]):  # it started elsewhere and nothing says when: missing early history
         return None
     return (added[0] if added else stamp(created)), moves
+
+
+def done_time(nodes, board_id):
+    """Time of the latest move into Done on this board, or None when there is none."""
+    times = [stamp(e["createdAt"]) for e in nodes if e.get("__typename") == "ProjectV2ItemStatusChangedEvent"
+             and (e.get("project") or {}).get("id") == board_id and KEYS_BY_NAME.get(norm(e["status"])) == "done"]
+    return max(times, default=None)
 
 
 def column_durations(anchor, moves):
@@ -102,7 +110,9 @@ def compute(c, days, now=None):
         found = timelines.get(i["item"])
         hist = story_events(*found, c["board"]["id"]) if found else None
         if not hist or hist[1][-1][2] != "done":
-            skipped += 1
+            at = done_time(found[1], c["board"]["id"]) if found else None
+            if at is None or at >= now - days * 86400:  # a story known to be done before the window is not counted at all
+                skipped += 1
             continue
         if hist[1][-1][0] < now - days * 86400:
             continue

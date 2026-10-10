@@ -2700,6 +2700,11 @@ class TestStatsMath(unittest.TestCase):
         self.assertIsNone(self.stats.story_events("2025-12-31T00:00:00Z", [ev("2026-01-02T00:00:00Z", "🆕 Todo", "🧠 Plan", "OTHER")], "P1"))
         self.assertIsNone(self.stats.story_events("2025-12-31T00:00:00Z", [ev("2026-01-02T00:00:00Z", "🆕 Todo", "Mystery")], "P1"))
 
+    def test_same_second_moves_keep_their_given_order(self):
+        ev = lambda a, b: {"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": "2026-01-02T00:00:00Z", "previousStatus": a, "status": b, "project": {"id": "P1"}}
+        _, moves = self.stats.story_events("2026-01-01T00:00:00Z", [ev("🆕 Todo", "🧠 Plan"), ev("🧠 Plan", "🙋 Plan Review")], "P1")
+        self.assertEqual([m[1:] for m in moves], [("todo", "plan"), ("plan", "plan_review")])  # a tuple sort would put plan_review's move first
+
 
 class TestStats(Base):
     NAMES = {"todo": "🆕 Todo", "plan": "🧠 Plan", "plan_review": "🙋 Plan Review", "plan_approved": "✅ Plan Approved", "implement": "🔨 Implement",
@@ -2756,6 +2761,17 @@ class TestStats(Base):
         self.history("i1", [(20, "done")], project="OTHER")
         res = self.cgp("stats", "--json")
         self.assertEqual((res["stories"], res["skipped"]), (1, 1))
+
+    def test_old_untrusted_history_is_not_counted_as_skipped(self):
+        self.seed()
+        self.history("i3", [(5000, "plan"), (4990, "done")], project="OTHER")  # no board events: time unknown, still skipped
+        self.assertEqual(self.cgp("stats", "--json")["skipped"], 1)
+        d = self.read_db()
+        d["timelines"]["i3"]["events"] = [{"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": self.ago(4990), "previousStatus": self.NAMES["plan"],
+                                           "status": self.NAMES["done"], "project": {"id": "P1"}}]  # started elsewhere: untrusted, but done long ago
+        self.write_db(d)
+        self.assertEqual(self.cgp("stats", "--json")["skipped"], 0)
+        self.assertEqual(self.cgp("stats", "--json", "--days", "3000")["skipped"], 1)
 
     def test_table_for_people_and_nothing_written(self):
         self.seed()
