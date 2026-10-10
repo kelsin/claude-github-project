@@ -11,4 +11,4 @@ The CLI is `scripts/cgp` at the plugin root, two directories above this skill's 
 - Existing issues: `<absolute path>/scripts/cgp import <label> [--repo <owner/name>]` puts every open issue with that label that is not on the board yet into Todo.
 - If the CLI says the board has no Priority field, tell the user to run `/cgp:setup <board-url>` again.
 
-The title and description are the user's own words; pass them as given. Write the title to a file with the Write tool and let the shell read it with `"$(cat <title file>)"` (as above) instead of typing it into the command line, so quotes and `$(...)` in it are never parsed as shell. Do not start `/cgp:run` unless asked.
+The description is the user's own words; pass them as given. The title is a short summary of the input (imperative, under about 70 characters, no trailing period); if the input is already a short single line, use it as the title. Write the title to a file with the Write tool and let the shell read it with `"$(cat <title file>)"` (as above) instead of typing it into the command line, so quotes and `$(...)` in it are never parsed as shell. Do not start `/cgp:run` unless asked.
