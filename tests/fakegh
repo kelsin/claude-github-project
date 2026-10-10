@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fake `gh` for tests: a tiny in-memory Projects v2 + issue comments, persisted in $FAKE_GH_DB."""
 import json, os, re, sys, time
+from urllib.parse import unquote
 
 try:
     import fcntl
@@ -231,6 +232,17 @@ elif args[:2] == ["api", "graphql"]:
         next(i for i in db["items"] if i["id"] == v["i"])["values"].pop(fname, None)
         db.setdefault("mutations", []).append({"op": "clear", "item": v["i"], "field": fname})
         r = {}
+    elif "timelineItems(" in q:  # db["timelines"][item id] = {"created": iso, "events": [timeline nodes]}; db["timeline_page"]: events per page
+        size = db.get("timeline_page") or 100
+        def timeline(tl, start):
+            more = start + size < len(tl["events"])
+            return {"pageInfo": {"hasNextPage": more, "endCursor": str(start + size) if more else None}, "nodes": tl["events"][start:start + size]}
+        db["timeline_calls"] = db.get("timeline_calls", 0) + 1
+        if "nodes(ids" in q:
+            r = {"nodes": [{"id": i, "content": {"createdAt": db["timelines"][i]["created"], "timelineItems": timeline(db["timelines"][i], 0)}}
+                           for i in v["ids"] if i in db.get("timelines", {})]}
+        else:
+            r = {"node": {"content": {"timelineItems": timeline(db["timelines"][v["i"]], int(v.get("after") or 0))}}}
     elif "items(first:100" in q:
         start, size = int(v.get("after") or 0), db.get("page_size") or len(db["items"])
         page = db["items"][start:start + size]
@@ -278,6 +290,12 @@ elif args[0] == "api" and re.fullmatch(r"repos/[^/]+/[^/]+(/actions/(runs|workfl
     if kind == "/actions/runs":
         db["runs_calls"] = db.get("runs_calls", 0) + 1
         save()
+        if "branch_runs" in db:  # db["branch_runs"]["acme/app@cgp/1"]: runs of a branch, served like `gh api --paginate`, a page object each
+            ref = re.search(r"branch=([^&]+)", path)
+            runs = db["branch_runs"].get(f"{repo}@{unquote(ref.group(1)) if ref else ''}", [])
+            for i in range(0, max(len(runs), 1), 100):
+                print(json.dumps({"total_count": len(runs), "workflow_runs": runs[i:i + 100]}))
+            sys.exit(0)
         print(json.dumps({"workflow_runs": db.get("workflow_runs", {}).get(repo, [])}))
     elif kind == "/actions/workflows":
         print(json.dumps({"workflows": db.get("workflows", {}).get(repo, [])}))

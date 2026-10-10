@@ -2665,3 +2665,145 @@ class TestStackedGuard(StackBase):
         self.git(self.wt, "rebase", "-q", "--onto", "origin/cgp/2", self.blocker_tip)
         self.assertTrue(os.path.exists(os.path.join(self.wt, ".cgp.json")))
         self.assertEqual(self.cgp("repo-config", "acme/app")["config"], {})
+
+
+H = 3600
+
+
+class TestStatsMath(unittest.TestCase):
+    def setUp(self):
+        test_cgp.load_cgp()
+        self.stats = importlib.import_module("cgp_lib.stats")
+
+    def test_durations_add_up_visits_and_skip_columns_never_entered(self):
+        moves = [(2 * H, "todo", "plan"), (3 * H, "plan", "plan_review"), (10 * H, "plan_review", "plan"), (11 * H, "plan", "plan_review"),
+                 (12 * H, "plan_review", "implement"), (14 * H, "implement", "done")]
+        got = self.stats.column_durations(0, moves)
+        self.assertEqual(got, {"todo": 2 * H, "plan": 2 * H, "plan_review": 8 * H, "implement": 2 * H})  # no plan_approved: absent, so not in its median
+        self.assertEqual(self.stats.sends_back(moves), 1)
+
+    def test_median_of_odd_and_even_counts(self):
+        self.assertEqual(self.stats.median([5, 1, 3]), 3)
+        self.assertEqual(self.stats.median([4, 1, 3, 2]), 2.5)
+
+    def test_duration_text(self):
+        d = self.stats.duration
+        self.assertEqual((d(0), d(34 * 60), d(2 * H + 10 * 60), d(3 * 86400 + H)), ("0m", "34m", "2h 10m", "3d 1h"))
+
+    def test_history_without_a_start_is_untrusted_but_an_added_event_anchors_it(self):
+        ev = lambda t, a, b, p="P1": {"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": t, "previousStatus": a, "status": b, "project": {"id": p}}
+        added = {"__typename": "AddedToProjectV2Event", "createdAt": "2026-01-01T00:00:00Z", "project": {"id": "P1"}}
+        late = [ev("2026-01-02T00:00:00Z", "🧠 Plan", "🙋 Plan Review")]
+        self.assertIsNone(self.stats.story_events("2025-12-31T00:00:00Z", late, "P1"))
+        anchor, moves = self.stats.story_events("2025-12-31T00:00:00Z", [added] + late, "P1")
+        self.assertEqual((anchor, [m[1:] for m in moves]), (self.stats.stamp("2026-01-01T00:00:00Z"), [("plan", "plan_review")]))
+        self.assertIsNone(self.stats.story_events("2025-12-31T00:00:00Z", [ev("2026-01-02T00:00:00Z", "🆕 Todo", "🧠 Plan", "OTHER")], "P1"))
+        self.assertIsNone(self.stats.story_events("2025-12-31T00:00:00Z", [ev("2026-01-02T00:00:00Z", "🆕 Todo", "Mystery")], "P1"))
+
+
+class TestStats(Base):
+    NAMES = {"todo": "🆕 Todo", "plan": "🧠 Plan", "plan_review": "🙋 Plan Review", "plan_approved": "✅ Plan Approved", "implement": "🔨 Implement",
+             "pr_review": "🚦 PR Review", "pr_approved": "🚀 PR Approved", "done": "🎉 Done"}
+
+    def ago(self, hours):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours * H))
+
+    def history(self, item, path, created=400, project="P1"):
+        """Seed a story's moves: path = [(hours ago, column)] from Todo on, oldest first; the story is created `created` hours ago."""
+        d = self.read_db()
+        events, prev = [], "todo"
+        for hours, col in path:
+            events.append({"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": self.ago(hours), "previousStatus": self.NAMES[prev],
+                           "status": self.NAMES[col], "project": {"id": project}})
+            prev = col
+        d.setdefault("timelines", {})[item] = {"created": self.ago(created), "events": events}
+        self.write_db(d)
+        self.force(item, path[-1][1])
+
+    def seed(self):
+        self.setup_board()
+        # one: created 400h ago, Todo 1h, Plan 1h, Plan Review 8h (sent back once, +2h in Plan), Implement 2h, Done 20h ago
+        self.history("i1", [(399, "plan"), (398, "plan_review"), (390, "plan"), (388, "plan_review"), (30, "implement"), (28, "pr_review"), (20, "done")])
+        # two: skipped planning
+        self.history("i2", [(30, "implement"), (24, "pr_review"), (22, "done")], created=36)
+        # three: done long ago, out of a 7 day window
+        self.history("i3", [(5000, "plan"), (4990, "done")], created=5001)
+
+    def test_json_numbers(self):
+        self.seed()
+        res = self.cgp("stats", "--json")
+        self.assertEqual((res["days"], res["stories"], res["skipped"], res["cost"]), (30, 2, 0, None))
+        cols = res["columns"]
+        self.assertEqual(set(cols), {"todo", "plan", "plan_review", "implement", "pr_review"})
+        near = lambda got, hours: self.assertAlmostEqual(got, hours * H, delta=5)
+        self.assertEqual((cols["todo"]["n"], cols["plan"]["n"], cols["plan_review"]["n"], cols["implement"]["n"]), (2, 1, 1, 2))
+        near(cols["todo"]["median"], 3.5)  # 1h and 6h
+        near(cols["todo"]["worst"], 6)
+        near(cols["plan"]["median"], 3)  # two visits: 1h + 2h
+        near(cols["plan_review"]["median"], 366)  # 8h + 358h
+        near(cols["implement"]["median"], 4)  # 2h and 6h
+        self.assertEqual(res["sentBack"], {"stories": 1, "sends": 1})
+
+    def test_days_window_and_validation(self):
+        self.seed()
+        self.assertEqual(self.cgp("stats", "--json", "--days", "3000")["stories"], 3)
+        self.assertEqual(self.cgp("stats", "--json")["stories"], 2)  # the default 30 days leave out the story done 208 days ago
+        for bad in ("0", "-5"):
+            self.assertNotEqual(self.cgp("stats", "--days", bad, ok=False).returncode, 0)
+
+    def test_other_projects_events_are_ignored_and_untrusted_history_is_skipped(self):
+        self.seed()
+        self.history("i1", [(20, "done")], project="OTHER")
+        res = self.cgp("stats", "--json")
+        self.assertEqual((res["stories"], res["skipped"]), (1, 1))
+
+    def test_table_for_people_and_nothing_written(self):
+        self.seed()
+        before = self.read_db().get("mutations", [])
+        text = self.cgp("stats", "--days", "10", ok=False).stdout
+        self.assertIn("Cycle time, last 10 days (2 stories done)", text)
+        self.assertIn("Plan Review", text)
+        self.assertIn("sent back       1 of 2 stories (50%), 1 sends", text)
+        self.assertIn("cost / story    n/a (no spend data)", text)
+        self.assertNotIn("{", text)
+        self.assertEqual(self.read_db().get("mutations", []), before)
+
+    def test_an_empty_window_says_so(self):
+        self.setup_board()
+        p = self.cgp("stats", ok=False)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("no stories done in this window", p.stdout)
+
+    def test_long_timelines_are_followed_by_cursor(self):
+        self.seed()
+        self.db_set(timeline_page=3)
+        res = self.cgp("stats", "--json")
+        self.assertEqual((res["stories"], res["sentBack"]["sends"]), (2, 1))
+        self.assertGreater(self.read_db()["timeline_calls"], 1)
+
+    def test_ci_reruns_sum_run_attempts_of_the_branch(self):
+        self.seed()
+        d = self.read_db()
+        for i in d["items"]:
+            if i["id"] in ("i1", "i2"):
+                i["values"]["PR"] = {"text": f"https://github.com/acme/app/pull/{i['content']['number'] + 10}"}
+        d["branch_runs"] = {"acme/app@cgp/1": [{"run_attempt": 3}, {"run_attempt": 1}], "acme/app@cgp/2": [{"run_attempt": 2}], "acme/app@cgp/3": [{"run_attempt": 9}]}
+        self.write_db(d)
+        res = self.cgp("stats", "--json")
+        self.assertEqual((res["ciReruns"], res["ciPrs"], res["ciLookupsFailed"]), (3, 2, 0))
+
+    def test_a_failing_runs_lookup_does_not_hide_the_other_numbers(self):
+        self.seed()
+        d = self.read_db()
+        for i in d["items"]:
+            if i["id"] in ("i1", "i2"):
+                i["values"]["PR"] = {"text": f"https://github.com/acme/app/pull/{i['content']['number'] + 10}"}
+        d["branch_runs"] = {"acme/app@cgp/1": [{"run_attempt": 3}], "acme/app@cgp/2": [{"run_attempt": 2}]}
+        d["failures"] = [{"match": "branch=cgp%2F2", "stderr": "HTTP 404", "times": 5}]
+        self.write_db(d)
+        res = self.cgp("stats", "--json")
+        self.assertEqual((res["ciReruns"], res["ciPrs"], res["ciLookupsFailed"], res["stories"]), (2, 1, 1, 2))
+        d["failures"] = [{"match": "actions/runs", "stderr": "HTTP 404", "times": 5}]
+        self.write_db(d)
+        res = self.cgp("stats", "--json")
+        self.assertEqual((res["ciReruns"], res["ciLookupsFailed"], res["stories"]), (None, 2, 2))

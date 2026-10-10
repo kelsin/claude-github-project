@@ -21,6 +21,7 @@ from .unstick import cmd_unstick
 from .resume import cmd_resume
 from .stack import cmd_stack
 from .spec import cmd_spec
+from .stats import cmd_stats
 from .session import cmd_release, cmd_session_title, cmd_stop, cmd_use, cmd_worker
 from .story import (cmd_answers, cmd_approve, cmd_ask, cmd_comment, cmd_feedback, cmd_move, cmd_prepare, cmd_preview, cmd_set)
 from .util import die
@@ -45,6 +46,8 @@ COMMANDS = [
         A("--html", nargs="?", const=True, metavar="PATH", help="write a self-contained HTML page (default: review.html in the cgp home) and print its path")]),
     ("status", cmd_status, "Human-readable board overview: counts, what waits on you, workers, blocked stories", [
         A("--json", action="store_true", help="the raw snapshot instead of the table")]),
+    ("stats", cmd_stats, "Cycle-time numbers for stories done in the last --days days: time per column, sends back, CI reruns", [
+        A("--days", type=int, default=30), A("--json", action="store_true", help="the raw numbers instead of the table")]),
     ("list", cmd_list, "JSON snapshot of the board (also files closed issues under Done and clears answered questions)", [
         A("--brief", action="store_true")]),
     ("wait", cmd_wait, "Poll until a story becomes actionable, a worker is released, all is Done, or the timeout passes", [
