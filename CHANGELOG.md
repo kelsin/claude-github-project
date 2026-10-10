@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.8.0](https://github.com/kelsin/claude-github-project/compare/v0.7.0...v0.8.0) (2026-10-10)
+
+
+### :tada: Features
+
+* add a review packet to every PR ([#96](https://github.com/kelsin/claude-github-project/issues/96)) ([a383abb](https://github.com/kelsin/claude-github-project/commit/a383abb22f16cceb2fac47803e32ed3ee20367df))
+* add cgp review digest and nag reminders ([#97](https://github.com/kelsin/claude-github-project/issues/97)) ([776b414](https://github.com/kelsin/claude-github-project/commit/776b414176fa9a9cb7e6645da09b62d6541b31c6))
+* add cgp stats command for cycle-time numbers ([#107](https://github.com/kelsin/claude-github-project/issues/107)) ([5a633bb](https://github.com/kelsin/claude-github-project/commit/5a633bbb06a087311e3a7f5f9946a90ce737f5a7))
+* add ci-triage to classify red ci before fixing ([#100](https://github.com/kelsin/claude-github-project/issues/100)) ([6d87b91](https://github.com/kelsin/claude-github-project/commit/6d87b91cf100e6dc082724a6e46f5afa3bb4297d))
+* add failing-main and dependency intake ([#90](https://github.com/kelsin/claude-github-project/issues/90)) ([0168c43](https://github.com/kelsin/claude-github-project/commit/0168c4343729d7b017dbb58de1b9dfbcadc3bcd1))
+* add human-only cgp approve command ([#98](https://github.com/kelsin/claude-github-project/issues/98)) ([e19fa88](https://github.com/kelsin/claude-github-project/commit/e19fa88a9b91de967415029b76e877487b8c416d))
+* add repo brief for workers ([#104](https://github.com/kelsin/claude-github-project/issues/104)) ([6b67275](https://github.com/kelsin/claude-github-project/commit/6b6727520b0c0ab69dea714ac07e684e9ad5f7ef))
+* add speculative implementation of low-risk stories ([#106](https://github.com/kelsin/claude-github-project/issues/106)) ([c60d215](https://github.com/kelsin/claude-github-project/commit/c60d2159eca0c94a6085aec1f0eaf8fb1b81b98e))
+* check a story is ready before planning it ([#92](https://github.com/kelsin/claude-github-project/issues/92)) ([d737157](https://github.com/kelsin/claude-github-project/commit/d7371573dd287a853ed8c8baff542924f92af2d3))
+* file deferred work from merged PRs as held stories ([#91](https://github.com/kelsin/claude-github-project/issues/91)) ([b329fec](https://github.com/kelsin/claude-github-project/commit/b329fec56c314f15e9643afccf49be39052dca26))
+* merge approved PRs as a train ([#105](https://github.com/kelsin/claude-github-project/issues/105)) ([3cb3653](https://github.com/kelsin/claude-github-project/commit/3cb36539a2adf1f1806c0853e178af7afe23bbdc))
+* propose house rules from review history ([#101](https://github.com/kelsin/claude-github-project/issues/101)) ([aa22313](https://github.com/kelsin/claude-github-project/commit/aa2231332cfe06898df0e0cf6aec26d921220e2f))
+* resume a story's worker on send-back ([#102](https://github.com/kelsin/claude-github-project/issues/102)) ([46dc3a6](https://github.com/kelsin/claude-github-project/commit/46dc3a628dc3b9cba331689dc940614cc369d98d))
+* start a story on its blocker open pr branch ([#103](https://github.com/kelsin/claude-github-project/issues/103)) ([7561568](https://github.com/kelsin/claude-github-project/commit/7561568a10252e294ed7cd77a2a1c98ce144d0dd))
+
+
+### :bug: Bug Fixes
+
+* remove worktrees of merged stories and say why one is kept ([#94](https://github.com/kelsin/claude-github-project/issues/94)) ([30fb732](https://github.com/kelsin/claude-github-project/commit/30fb73269f35922b549c7e2624ae1cde381493bd))
+
+
+### :book: Documentation
+
+* put a human summary first in the plan page ([#99](https://github.com/kelsin/claude-github-project/issues/99)) ([1117128](https://github.com/kelsin/claude-github-project/commit/111712882468e7de7c8a26b16719118206c43225))
+
 ## [0.7.0](https://github.com/kelsin/claude-github-project/compare/v0.6.0...v0.7.0) (2026-10-08)
 
 
