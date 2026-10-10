@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/kelsin/claude-github-project/compare/v0.8.0...v0.9.0) (2026-10-10)
+
+
+### :tada: Features
+
+* **add:** summarize the input into the issue title ([#108](https://github.com/kelsin/claude-github-project/issues/108)) ([84675ca](https://github.com/kelsin/claude-github-project/commit/84675ca7d0ca1b84cfcec4de96f7fedf535a4016))
+
 ## [0.8.0](https://github.com/kelsin/claude-github-project/compare/v0.7.0...v0.8.0) (2026-10-10)
 
 
