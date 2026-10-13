@@ -67,18 +67,24 @@ class TestDefer(test_cgp.PRBase):
             item = next(i for i in d["items"] if i["content"].get("number") == f["number"])
             self.assertEqual(item["values"]["Priority"], {"optionId": "o_Hold"})
         data = self.data()
-        self.assertEqual([k["number"] for k in data["deferred"]["i1"]], [f["number"] for f in r["filed"]])
+        self.assertEqual([k["number"] for k in data["deferredFiled"]["i1"]], [f["number"] for f in r["filed"]])
         self.assertNotIn("parents", data)
         self.assertNotIn("children", data)
         self.assertEqual(len([c for c in self.comments() if "Deferred work filed" in c]), 1)
         self.assertEqual(self.cgp("list")["held"].count("Tidy the parser"), 1)
+
+    def test_the_schedulers_deferred_list_does_not_break_it(self):
+        self.save_data(deferred=["i2"])  # the scheduler keeps a list of overlap-deferred item ids under this key
+        r = self.cgp("defer", "i1")
+        self.assertEqual([f["title"] for f in r["filed"]], ["Tidy the parser", "Add a test"])
+        self.assertEqual(self.data()["deferred"], ["i2"])
 
     def test_a_rerun_files_only_what_is_missing(self):
         self.cgp("defer", "i1")
         r = self.cgp("defer", "i1")
         self.assertEqual((r["filed"], len(r["already"])), ([], 2))
         self.assertEqual(len(self.issues()), 2)
-        self.save_data(deferred={"i1": self.data()["deferred"]["i1"][:1]})
+        self.save_data(deferredFiled={"i1": self.data()["deferredFiled"]["i1"][:1]})
         r = self.cgp("defer", "i1")
         self.assertEqual([f["title"] for f in r["filed"]], ["Add a test"])
         self.assertEqual(len(self.issues()), 3)
@@ -100,7 +106,7 @@ class TestDefer(test_cgp.PRBase):
         self.assertEqual([f["title"] for f in r["filed"]], ["b0", "b1", "b2", "b3"])
         self.assertEqual(r["skipped"], ["b4", "b5"])
         self.assertEqual(len(self.issues()), 10)
-        self.assertEqual(len(self.data()["deferred"]["i1"]), 10)
+        self.assertEqual(len(self.data()["deferredFiled"]["i1"]), 10)
 
     def test_a_failed_hold_leaves_nothing_dispatchable_and_no_duplicate(self):
         d = self.read_db()
@@ -111,7 +117,7 @@ class TestDefer(test_cgp.PRBase):
         self.assertEqual(len(self.issues()), 1)
         item = next(i for i in d["items"] if i["content"].get("number") == self.issues()[0]["number"])
         self.assertNotIn("Status", item["values"])  # never Todo without Hold
-        self.assertEqual(len(self.data()["deferred"]["i1"]), 1)
+        self.assertEqual(len(self.data()["deferredFiled"]["i1"]), 1)
         r = self.cgp("defer", "i1")
         self.assertEqual([f["title"] for f in r["filed"]], ["Add a test"])
         self.assertEqual(len(self.issues()), 2)

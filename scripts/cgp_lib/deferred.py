@@ -64,7 +64,7 @@ def cmd_defer(a):
         die("this board has no Priority field with a Hold option; run /cgp:setup again")
     hold = priority_option(c, "Hold")  # before anything is created
     items, skipped = parse_deferred(pr.get("body"))
-    known = {k["key"]: k for k in load_data().get("deferred", {}).get(a.item, [])}
+    known = {k["key"]: k for k in load_data().get("deferredFiled", {}).get(a.item, [])}
     parent = f"{it['issueRepo']}#{it['number']}"
     filed, already = [], []
     room = MAX_ITEMS - len(known)  # the cap is per story, over every run
@@ -84,7 +84,7 @@ def cmd_defer(a):
 
         def record(number, rec=rec):  # as soon as the issue exists, before it goes on the board
             rec["number"] = number
-            update_data(lambda d: d.setdefault("deferred", {}).setdefault(a.item, []).append(dict(rec)))
+            update_data(lambda d: d.setdefault("deferredFiled", {}).setdefault(a.item, []).append(dict(rec)))
         create_story(c, it["issueRepo"], i["title"].replace("@", "@​"), body, hold, on_issue=record)
         filed.append(rec)
     if filed:
