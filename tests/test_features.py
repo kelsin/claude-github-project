@@ -709,6 +709,52 @@ class TestPlanPolicy(PolicyBase):
         self.cgp("touches", "i1", "x\nCLAUDE.md")
         self.refused("not a plain file path")
 
+    def test_a_joiner_or_direction_mark_in_a_file_name_is_approved_inside_the_globs(self):
+        self.setting(autoApproveFiles=["docs/**"])
+        for name in ("docs/a\u200db.md", "docs/\u200fnote.md", "docs/n\u200eote.md"):
+            self.cgp("touches", "i1", name)
+            self.assertEqual(self.verdict("plan_review")[0], "plan_approved", name)
+            self.assertEqual(self.data()["approvedTouches"]["i1"], [name])
+            self.force("i1", "plan")
+
+    def test_other_invisible_characters_and_directory_segments_stay_refused(self):
+        self.setting(autoApproveFiles=["**"])
+        for name in ("docs/a\nb.md", "docs/a\tb.md", "docs/a\x7fb.md", "docs/a\x85b.md", "docs/a\u200bb.md",
+                     "docs/a\u200cb.md", "docs/a\u202eb.md", "docs/a\u2066b.md", "docs/a\ufeffb.md", "docs/a\u2028b.md",
+                     "do\u200dcs/a.md", "docs/.\u200d.", "docs/\u200d", "docs/\u200d/a.md"):
+            self.cgp("touches", "i1", name)
+            self.refused("not a plain file path")
+
+    def test_a_lookalike_of_a_denied_or_guarded_name_is_refused_in_any_case(self):
+        self.setting(autoApproveFiles=["**"])
+        for name, why in (("AGEN\u200dTS.md", "never auto-approved"), ("agen\u200dts.md", "never auto-approved"), (".git\u200dhub/x.yml", "not a plain"),
+                          (".GitHub\u200d/x.yml", "not a plain"), (".husky/pre\u200d-commit", "guarded file"), (".HUSKY/PRE\u200f-commit", "guarded file")):
+            self.cgp("touches", "i1", name)
+            self.refused(why)
+
+    def test_a_joiner_name_outside_the_globs_is_refused_with_the_character_written_out(self):
+        self.cgp("touches", "i1", "src/a\u200d\u202eb.py")
+        self.refused("not a plain file path")
+        self.cgp("touches", "i1", "src/a\u200d\u200fb.py")
+        reason = self.verdict("plan_review")[1]["reason"]
+        self.assertIn("src/a\\u200d\\u200fb.py is outside autoApproveFiles", reason)
+        self.assertFalse(any(ch in reason for ch in "\u200d\u200e\u200f\u202e"))
+
+    def test_a_joiner_directory_touch_stays_strict(self):
+        self.setting(autoApproveFiles=["**"])
+        self.cgp("touches", "i1", "dir\u200d/")
+        self.refused("not a plain file path")
+
+    def test_reasons_never_hold_the_characters_and_long_names_are_cut_before_escaping(self):
+        test_cgp.load_cgp()
+        pol = importlib.import_module("cgp_lib.policy")
+        name = "a" * 79 + "\u200d" + "b" * 20
+        self.assertEqual(pol.nm(name), "a" * 79 + "\\u200d")
+        self.assertIn("not a plain file path", pol.forbidden([], "docs/a\x00b.md"))  # argv cannot carry a NUL, so this one is checked directly
+        self.assertEqual(pol.nm("x\u200e\u200f"), "x\\u200e\\u200f")
+        self.assertEqual(pol.sanitize(pol.nm("x\u200d\u202e")), "x\\u200d")
+        self.assertEqual(pol.sanitize("a\u200d\u200fb"), "a b")
+
     def test_a_directory_is_approved_when_one_glob_covers_its_whole_subtree(self):
         self.setting(autoApproveFiles=["notes/**"])
         self.cgp("touches", "i1", "notes/")
@@ -1009,6 +1055,37 @@ class TestPRPolicy(PolicyBase):
                       [{"filename": "CLAUDE.md\n"}]):
             self.db_set(pr_files={"acme/app#1": files})
             self.refused("not a plain file path")
+
+    def test_joiner_and_direction_mark_names_are_approved_inside_the_globs_and_plan(self):
+        for name in ("docs/a\u200db.md", "docs/\u200fb.md"):
+            self.set_data(approvedTouches={"i1": [name]})
+            self.db_set(pr_files={"acme/app#1": [name]})
+            self.assertEqual(self.verdict("pr_review")[0], "pr_approved", name)
+            self.set_data(reviewed={}, policy={})
+            self.force("i1", "implement")
+
+    def test_pr_lookalikes_and_odd_names_are_refused(self):
+        self.setting(autoApproveFiles=["**"])
+        for name, why in (("AGEN\u200dTS.md", "never auto-approved"), (".husky/pre\u200d-commit", "guarded file"), ("docs/a\u200cb.md", "not a plain"),
+                          ("do\u200dcs/a.md", "not a plain"), ("docs/a\u202eb.md", "not a plain"), ("docs/.\u200d.", "not a plain")):
+            self.set_data(approvedTouches={"i1": [name]})
+            self.db_set(pr_files={"acme/app#1": [name]})
+            self.refused(why)
+
+    def test_a_renames_old_name_gets_the_same_checks(self):
+        self.setting(autoApproveFiles=["**"])
+        new = "docs/a\u200db.md"
+        for old, why in (("AGEN\u200dTS.md", "never auto-approved"), ("docs/x\u200cy.md", "not a plain")):
+            self.set_data(approvedTouches={"i1": [new, old]})
+            self.db_set(pr_files={"acme/app#1": [{"filename": new, "status": "renamed", "previous_filename": old}]})
+            self.refused(why)
+        self.setting(autoApproveFiles=["docs/a*"])
+        self.set_data(approvedTouches={"i1": [new, "docs/old.md"]})
+        self.db_set(pr_files={"acme/app#1": [{"filename": new, "status": "renamed", "previous_filename": "docs/old.md"}]})
+        self.refused("docs/old.md is outside autoApproveFiles")
+        self.set_data(approvedTouches={"i1": [new, "docs/ab.md"]})
+        self.db_set(pr_files={"acme/app#1": [{"filename": new, "status": "renamed", "previous_filename": "docs/ab.md"}]})
+        self.assertEqual(self.verdict("pr_review")[0], "pr_approved")
 
     def test_an_untrusted_author_is_refused(self):
         d = self.read_db(); d["issue_authors"] = {"acme/app#1": {"login": "mallory", "author_association": "NONE"}}; self.write_db(d)
@@ -1377,6 +1454,17 @@ class TestSubStories(PolicyBase):
         self.assertIn("control characters", self.declare(odd, ok=False).stderr)
         self.cgp("touches", "i1", ".github/workflows/ci.yml")
         self.declare(bad)
+
+    def test_declared_joiner_files_pass_but_other_invisible_characters_and_directories_do_not(self):
+        self.force("i1", "plan")
+        ok = [{"title": "A", "scope": "x", "files": ["docs/a\u200db.md"]}]
+        self.declare(ok)
+        self.assertNotEqual(self.declare([{"title": "A", "scope": "x", "files": ["docs/a\u200bb.md"]}], ok=False).returncode, 0)
+        err = self.declare([{"title": "A", "scope": "x", "files": ["dir\u200d/"]}], ok=False).stderr
+        self.assertIn("directory", err)
+        self.assertIn("invisible character", err)
+        self.assertNotIn("guarded file", err)
+        self.assertIn("is never auto-approved", self.declare([{"title": "A", "scope": "x", "files": ["AGEN\u200dTS.md"]}], ok=False).stderr)
 
     def test_a_second_split_is_a_no_op_and_a_short_one_is_not_closed(self):
         kids = self.split()

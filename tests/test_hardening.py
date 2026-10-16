@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import time
+import unittest
 from unittest import mock
 
 import test_cgp
@@ -297,6 +298,12 @@ class TestSyncRecords(test_cgp.SyncBase):
         self.commit(".github/wörkflow\u00e9.yml")  # git quotes non-ASCII names unless -z is used
         self.assertEqual(json.loads(self.cgp("guard", "i1", ok=False).stdout)["violations"], [".github/wörkflow\u00e9.yml"])
 
+    def test_guard_catches_a_joiner_lookalike_of_a_guarded_name(self):
+        os.makedirs(os.path.join(self.wt, ".husky"))
+        self.commit(".husky/pre\u200d-commit")
+        self.commit("Make\u200dfile")
+        self.assertEqual(sorted(json.loads(self.cgp("guard", "i1", ok=False).stdout)["violations"]), [".husky/pre\u200d-commit", "Make\u200dfile"])
+
     def test_guard_allows_only_the_touches_declared_at_approval(self):
         self.commit(".npmrc", "x\n")
         self.cgp("touches", "i1", ".npmrc")
@@ -336,6 +343,14 @@ class TestSyncRecords(test_cgp.SyncBase):
 
 def subprocess_out(path, *args):
     return subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, check=True).stdout.strip()
+
+
+class TestSanitizeKeepsPathEscapes(unittest.TestCase):
+    def test_joiner_and_marks_are_stripped_but_the_written_out_form_stays(self):
+        test_cgp.load_cgp()
+        pol = importlib.import_module("cgp_lib.policy")
+        self.assertEqual(pol.sanitize("a\u200db\u200fc\u202ed"), "a b c d")
+        self.assertEqual(pol.sanitize(pol.nm("a\u200db\u200f")), "a\\u200db\\u200f")
 
 
 class TestStalledWorkers(Base):

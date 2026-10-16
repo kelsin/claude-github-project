@@ -11,7 +11,7 @@ from .store import cfg, load_data, update_data
 from .board import get_item, parse_pr_ref, require_repo, set_text
 from .intake import create_story
 from .pr import pr_view
-from .policy import UNPRINTABLE, forbidden, nm
+from .policy import forbidden, nm, plain_path
 from .repoconf import merged_globs
 from .story import ask_user, author_trusted
 
@@ -36,7 +36,10 @@ def read_specs(c, parent, raw, allowed=()):
             die(f"sub-story {n} needs a scope text")
         if not isinstance(files, list) or not all(isinstance(f, str) and f.strip() for f in files):
             die(f"sub-story {n}: files must be a list of paths")
-        if any(re.search(f"[{UNPRINTABLE}]", f) for f in files):
+        bad_dir = next((f for f in files if f.endswith("/") and not plain_path(f + "_")), None)
+        if bad_dir:
+            die(f"sub-story {n}: the directory {nm(bad_dir)} contains a disallowed invisible character")
+        if not all(plain_path(f) for f in files):
             die(f"sub-story {n}: file names must not contain control characters")
         after = s.get("after", [])
         if not isinstance(after, list) or not all(isinstance(t, str) for t in after):
