@@ -16,7 +16,7 @@ from .gitwt import cmd_sync, cmd_worktree
 from .pr import cancel_auto_merge, changed_since_review, cmd_pr_state, default_branch, forget_review, pr_view, record_reviewed, stack_gate, stack_of
 from .stack import prepare_stack, stale as stack_stale
 from .spec import prepare_hook, refuse_while_drafting
-from .policy import GATE_KEYS, current_rating, evaluate, public, record_decision, require_human
+from .policy import GATE_KEYS, current_rating, evaluate, public, record_decision, record_refusal, require_human
 
 
 def list_replies_since(repo, number, marker_ids, since=None):
@@ -145,6 +145,8 @@ def cmd_move(a):
     if policy_ok:
         post_comment(it["issueRepo"], it["number"], f"{MARK}\nAuto-approved by the policy ({'plan' if a.column == 'plan_approved' else 'PR'}): {verdict['reason']}.")
         advance_cursor(a.item)  # like `cgp comment`: posting counts as having read the feedback so far
+    elif verdict and record_refusal(it, target, verdict["reason"], lambda text: post_comment(it["issueRepo"], it["number"], text)):
+        advance_cursor(a.item)  # a refusal is posted once per reason; the person it was meant for sees it in the story
     out({"item": a.item, "column": a.column, **({"autoApproved": True} if requested or policy_ok else {}), **({"requested": requested} if requested else {}),
          **({"policy": public(verdict)} if verdict else {})})
 
@@ -187,7 +189,8 @@ def cmd_approve(a):
                 if target in DEFAULT_PHASE:
                     w.update(phase=DEFAULT_PHASE[target], phaseAt=now_iso())
     update_state(upd)
-    update_data(lambda d: (d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]), reset_strikes(d, a.item)))
+    update_data(lambda d: (d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]), reset_strikes(d, a.item),
+                           d.get("policyRefusal", {}).pop(a.item, None)))
     out({"item": a.item, "column": target, "approved": True, **({"sha": sha, "reviewed": reviewed} if sha else {"plan": it["plan"]})})
 
 

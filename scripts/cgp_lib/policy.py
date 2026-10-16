@@ -6,6 +6,7 @@ import functools
 import os
 import re
 import sys
+from .consts import MARK
 from .util import covers, die, norm_path, now_iso, out
 from .gh import rest
 from .models import RATINGS
@@ -24,6 +25,18 @@ ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKI
                "docs/conf.py", "docs/_config.yml", "docs/package.json", "**/.vitepress/**", "**/.docusaurus/**", ".readthedocs.y*ml",
                "**/CLAUDE*.md", "**/GEMINI.md", ".cursor/**", ".windsurf/**", ".agents/**", "**/.claude/**", "**/*.mdc", "**/CONTRIBUTING.md",
                ".github/**", ".cgp-rules.md"]
+
+
+def sanitize(text, cap=300):
+    """A reason can name files of a PR, which anyone can write: one line, no control or bidi characters, backticks, angle brackets (so no
+    agent marker) or live @mentions."""
+    t = re.sub(r"[\s\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+", " ", str(text or ""))
+    return re.sub(r"[`<>]", "", t).strip().replace("@", "@\u200b")[:cap]
+
+
+def nm(name):
+    """A file name as it appears in a reason: capped, so one long name cannot crowd out the rest."""
+    return str(name)[:80]
 
 
 def parse(value):
@@ -83,12 +96,12 @@ def forbidden(guarded, n):
     """Why a path may never be touched without a person (None when it may): not a plain file path, on the always-deny list, or a guarded
     file. `guarded` is the lower-cased guardFiles globs."""
     if not n or n.startswith("/") or n.endswith("/") or any(s in ("", ".", "..") for s in n.split("/")):
-        return f"{n or '(no name)'} is not a plain file path"
+        return f"{nm(n) or '(no name)'} is not a plain file path"
     if any(glob_match(g, n) for g in ALWAYS_DENY):
-        return f"{n} is never auto-approved"
+        return f"{nm(n)} is never auto-approved"
     low = n.lower()
     if any(fnmatch.fnmatchcase(x, g) for g in guarded for x in (low, os.path.basename(low))):
-        return f"{n} is a guarded file"
+        return f"{nm(n)} is a guarded file"
     return None
 
 
@@ -101,7 +114,7 @@ def vet(c, repos, names, globs):
         if why:
             return why
         if not any(glob_match(g, n) for g in globs):
-            return f"{n} is outside autoApproveFiles"
+            return f"{nm(n)} is outside autoApproveFiles"
     return None
 
 
@@ -176,7 +189,7 @@ def evaluate(c, it, gate, author_trusted):
         return no(why)
     extra = next((n for n in names if not any(covers(t, n) for t in approved)), None)
     if extra:
-        return no(f"{extra} is not in the approved plan's files")
+        return no(f"{nm(extra)} is not in the approved plan's files")
     again = pr_view(*ref, check=False)
     if not again or again.get("headRefOid") != v["headRefOid"]:
         return no("the PR head moved while it was checked")
@@ -195,11 +208,28 @@ def record_decision(it, gate, verdict):
     in the same locked update, so the files evaluated are the files approved."""
     def upd(d):
         d.setdefault("policy", {})[it["item"]] = {"gate": gate, "at": now_iso(), **public(verdict)}
+        d.get("policyRefusal", {}).pop(it["item"], None)
         if verdict["approved"] and "touches" in verdict:
             d.setdefault("approvedTouches", {})[it["item"]] = list(verdict["touches"])
             if it["item"] not in d.setdefault("policyPlans", []):  # sub-stories are only created from a plan a person approved (epics.cmd_split)
                 d["policyPlans"].append(it["item"])
     update_data(upd)
+
+
+def record_refusal(it, gate, reason, post):
+    """Store why the policy did not approve the story (apart from `policy`, which holds approvals). `post(text)` comments on the story
+    when the gate or reason differs from the last stored refusal; the record is written only after the post succeeded, so a failed
+    comment is retried by the next move and never fails it. True when a comment was posted."""
+    reason = sanitize(reason)
+    old = (load_data().get("policyRefusal") or {}).get(it["item"]) or {}
+    if (old.get("gate"), old.get("reason")) == (gate, reason):
+        return False
+    try:
+        post(f"{MARK}\nNot auto-approved by the policy ({'plan' if GATE_KEYS[gate] == 'plan' else 'PR'}): {reason}")
+    except (SystemExit, Exception):
+        return False
+    update_data(lambda d: d.setdefault("policyRefusal", {}).__setitem__(it["item"], {"gate": gate, "at": now_iso(), "approved": False, "reason": reason}))
+    return True
 
 
 def cmd_rate(a):
