@@ -720,6 +720,80 @@ class TestPlanPolicy(PolicyBase):
         self.set_data(tainted=["i1"])
         self.refused("by hand")
 
+    def refusals(self):
+        return [c for c in self.comments() if "Not auto-approved by the policy" in c]
+
+    def test_a_refusal_is_stored_and_posted_once_per_reason(self):
+        self.cgp("rate", "i1", "medium")
+        self.assertEqual(self.verdict("plan_review")[0], "plan_review")
+        rec = self.data()["policyRefusal"]["i1"]
+        self.assertEqual((rec["gate"], rec["approved"], rec["reason"]), ("plan_approved", False, "rated medium, above the low the policy allows for the plan"))
+        self.assertNotIn("i1", self.data().get("policy", {}))
+        self.assertEqual(len(self.refusals()), 1)
+        self.assertIn("<!-- cgp -->\nNot auto-approved by the policy (plan): rated medium", self.refusals()[0])
+        self.assertEqual(self.data().get("pending", {}), {})  # the cursor advanced past the comment
+        self.force("i1", "plan")
+        self.verdict("plan_review")
+        self.assertEqual(len(self.refusals()), 1)  # same reason: no second comment
+        self.force("i1", "plan")
+        self.set_data(ratings={})
+        self.verdict("plan_review")
+        self.assertEqual(len(self.refusals()), 2)  # a new reason is posted
+
+    def test_an_approval_clears_the_refusal_and_keeps_its_behaviour(self):
+        self.cgp("rate", "i1", "medium")
+        self.verdict("plan_review")
+        self.force("i1", "plan")
+        self.cgp("rate", "i1", "low")
+        r = self.cgp("move", "i1", "plan_review")
+        self.assertEqual((r["column"], r["autoApproved"]), ("plan_approved", True))
+        self.assertNotIn("i1", self.data()["policyRefusal"])
+        self.assertEqual(len(self.refusals()), 1)
+        self.assertTrue(any("Auto-approved by the policy (plan)" in c for c in self.comments()))
+
+    def test_a_move_from_the_wrong_column_gets_a_short_reason(self):
+        self.force("i1", "todo")
+        self.assertEqual(self.verdict("plan_review")[1]["reason"], "the story is not in Plan")
+        self.assertIn("not in Plan", self.data()["policyRefusal"]["i1"]["reason"])
+
+    def test_nothing_is_recorded_or_posted_when_the_level_is_never(self):
+        self.setting(autoApprove="plan:never,pr:never")
+        self.force("i1", "todo")
+        self.assertEqual(self.verdict("plan_review"), ("plan_review", None))
+        self.assertNotIn("policyRefusal", self.data())
+        self.assertEqual(self.refusals(), [])
+
+    def test_a_file_name_cannot_inject_into_the_comment_or_the_digest(self):
+        evil = "@x\n`foo`.md"
+        self.setting(autoApproveFiles=["docs/**"])
+        self.cgp("touches", "i1", evil)
+        self.verdict("plan_review")
+        for text in (self.refusals()[0], self.data()["policyRefusal"]["i1"]["reason"]):
+            self.assertNotIn("\n@", text)
+            self.assertNotIn("`", text)
+            self.assertNotIn("@x", text)
+            self.assertIn("@\u200bx foo.md", text)
+        self.assertEqual(self.refusals()[0].count("\n"), 1)  # the marker line and one line of text
+        self.force("i1", "plan_review")
+        row = self.cgp("review")["stories"][0]
+        self.assertIn("@\u200bx foo.md", row["refusal"])
+        self.assertEqual(row["packet"]["refusal"], row["refusal"])
+        path = os.path.join(self.tmp, "digest.html")
+        self.cgp("review", "--html", path)
+        with open(path) as f:
+            self.assertIn("not auto-approved: ", f.read())
+
+    def test_a_plan_approval_record_survives_a_later_pr_refusal(self):
+        self.assertEqual(self.verdict("plan_review")[0], "plan_approved")
+        self.force("i1", "implement")
+        self.cgp("rate", "i1", "low")
+        self.prs(self.view())
+        self.assertEqual(self.verdict("pr_review")[0], "pr_review")  # no approved files on record for the PR
+        d = self.data()
+        self.assertEqual((d["policy"]["i1"]["gate"], d["policy"]["i1"]["approved"]), ("plan_approved", True))
+        self.assertEqual(d["policyRefusal"]["i1"]["gate"], "pr_approved")
+        self.assertIn("Not auto-approved by the policy (PR)", self.refusals()[0])
+
 
 class TestPRPolicy(PolicyBase):
     FILE = "docs/guide.md"
@@ -752,6 +826,25 @@ class TestPRPolicy(PolicyBase):
     def test_off_by_default(self):
         self.setting(autoApprove="plan:low,pr:never")
         self.assertEqual(self.verdict("pr_review"), ("pr_review", None))
+        self.assertNotIn("policyRefusal", self.data())
+
+    def test_a_missing_pr_link_or_the_wrong_column_gets_a_short_reason(self):
+        d = self.read_db(); d["items"][0]["values"].pop("PR", None); self.write_db(d)
+        self.assertEqual(self.verdict("pr_review")[1]["reason"], "the story has no PR link")
+        self.force("i1", "plan")
+        self.assertEqual(self.verdict("pr_review")[1]["reason"], "the story is not in Implement")
+
+    def test_a_pr_refusal_is_posted_once_and_an_approval_clears_it(self):
+        self.cgp("rate", "i1", "medium")
+        self.verdict("pr_review")
+        self.assertIn("i1", self.data()["policyRefusal"])
+        self.force("i1", "implement")
+        self.verdict("pr_review")
+        self.assertEqual(len([c for c in self.comments() if "Not auto-approved by the policy (PR): rated medium" in c]), 1)
+        self.force("i1", "implement")
+        self.cgp("rate", "i1", "low")
+        self.assertEqual(self.verdict("pr_review")[0], "pr_approved")
+        self.assertNotIn("i1", self.data()["policyRefusal"])
 
     def test_a_stacked_story_or_another_base_is_never_approved_by_the_policy(self):
         self.set_data(stack={"i1": {"on": "i2", "branch": "cgp/2", "pr": "acme/app#2", "tip": "bbb222", "files": []}})
@@ -832,6 +925,8 @@ class TestPRPolicy(PolicyBase):
         column, policy = self.verdict("pr_review")
         self.assertEqual(column, "pr_review")
         self.assertIn("moved", policy["reason"])
+        self.assertIn("moved", self.data()["policyRefusal"]["i1"]["reason"])  # the downgrade is recorded and posted too
+        self.assertEqual(len([c for c in self.comments() if "Not auto-approved by the policy (PR)" in c and "moved" in c]), 1)
         self.assertEqual(self.data()["reviewed"]["i1"]["sha"], "bbb222")  # the commit the person is shown
 
         self.prs(self.view(), self.view(headRefOid="bbb222"))
@@ -1006,6 +1101,13 @@ class TestSubStories(PolicyBase):
         self.force("i1", "plan")
         self.cgp("list")
         self.assertEqual(self.data()["policyPlans"], [])  # re-planned: a person approves the next one
+
+    def test_a_stored_refusal_does_not_block_a_split_and_is_pruned(self):
+        self.approved()
+        self.set_data(policyRefusal={"i1": {"gate": "pr_approved", "approved": False, "reason": "x", "at": "now"}, "gone": {"reason": "y"}})
+        self.assertEqual(len(self.cgp("split", "i1")["children"]), 2)
+        self.cgp("list")
+        self.assertEqual(list(self.data()["policyRefusal"]), ["i1"])
 
     def test_a_policy_decision_on_record_blocks_a_split_even_without_the_marker(self):
         self.approved()
