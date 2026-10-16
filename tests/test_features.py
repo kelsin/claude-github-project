@@ -1357,8 +1357,20 @@ class TestSubStories(PolicyBase):
     def test_a_spec_naming_a_guarded_file_needs_the_plan_to_list_it(self):
         self.force("i1", "plan")
         bad = [{"title": "CI", "scope": "x", "files": [".github/workflows/ci.yml"]}]
-        self.assertIn("guarded", self.declare(bad, ok=False).stderr)
-        self.assertIn("guarded", self.declare([{"title": "A", "scope": "x", "files": ["CLAUDE.md"]}], ok=False).stderr)
+        self.assertIn("never auto-approved", self.declare(bad, ok=False).stderr)
+        self.assertIn("never auto-approved", self.declare([{"title": "A", "scope": "x", "files": ["CLAUDE.md"]}], ok=False).stderr)
+        err = self.declare([{"title": "A", "scope": "x", "files": ["a/../b"]}], ok=False).stderr
+        self.assertIn("a/../b is not a plain file path", err)
+        self.assertNotIn("must list it", err)
+        err = self.declare([{"title": "A", "scope": "x", "files": [".husky/pre-commit"]}], ok=False).stderr
+        self.assertIn("is a guarded file", err)
+        self.assertIn("must list it", err)
+        err = self.declare([{"title": "A", "scope": "x", "files": [".husky/"]}], ok=False).stderr
+        self.assertIn(".husky/ is a guarded file", err)
+        self.assertNotIn(".husky/_", err)
+        self.assertIn("must list it", err)
+        err = self.declare([{"title": "A", "scope": "x", "files": [".github/workflows/" + "a" * 80 + ".yml"]}], ok=False).stderr
+        self.assertIn(".yml is never auto-approved", err)
         odd = [{"title": "A", "scope": "x", "files": ["docs/x\nCLAUDE.md"]}]
         self.assertIn("control characters", self.declare(odd, ok=False).stderr)
         self.cgp("touches", "i1", "docs/x\nCLAUDE.md")  # listing it in the plan does not help
