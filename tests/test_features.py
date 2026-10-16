@@ -1369,6 +1369,8 @@ class TestSubStories(PolicyBase):
         self.assertIn(".husky/ is a guarded file", err)
         self.assertNotIn(".husky/_", err)
         self.assertIn("must list it", err)
+        err = self.declare([{"title": "A", "scope": "x", "files": [".github/workflows/" + "a" * 80 + ".yml"]}], ok=False).stderr
+        self.assertIn(".yml is never auto-approved", err)
         odd = [{"title": "A", "scope": "x", "files": ["docs/x\nCLAUDE.md"]}]
         self.assertIn("control characters", self.declare(odd, ok=False).stderr)
         self.cgp("touches", "i1", "docs/x\nCLAUDE.md")  # listing it in the plan does not help

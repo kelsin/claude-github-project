@@ -11,7 +11,7 @@ from .store import cfg, load_data, update_data
 from .board import get_item, parse_pr_ref, require_repo, set_text
 from .intake import create_story
 from .pr import pr_view
-from .policy import UNPRINTABLE, forbidden
+from .policy import UNPRINTABLE, forbidden, nm
 from .repoconf import merged_globs
 from .story import ask_user, author_trusted
 
@@ -51,7 +51,7 @@ def read_specs(c, parent, raw, allowed=()):
             if why and not any(covers(t, f) for t in allowed):
                 n, r = why
                 hint = "" if r.endswith("is not a plain file path") else "; the plan's files (cgp touches) must list it"
-                die(f"sub-story {s['title']!r}: {f}{r[len(n):]}{hint}")
+                die(f"sub-story {s['title']!r}: {f}{r[len(nm(n) or '(no name)'):]}{hint}")
     titles = [s["title"] for s in specs]
     if len(set(titles)) != len(titles):
         die("sub-story titles must be unique")
