@@ -26,6 +26,7 @@ ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKI
                "**/CLAUDE*.md", "**/GEMINI.md", ".cursor/**", ".windsurf/**", ".agents/**", "**/.claude/**", "**/*.mdc", "**/CONTRIBUTING.md",
                ".github/**", ".cgp-rules.md"]
 UNPRINTABLE = "\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff"  # control, zero-width, bidi and line-break characters
+PATH_OK = "\u200d\u200e\u200f"  # zero-width joiner, LRM, RLM: allowed in a file name (the last segment) only, shown escaped
 
 
 def sanitize(text, cap=300):
@@ -35,9 +36,21 @@ def sanitize(text, cap=300):
     return re.sub(r"[`<>]", "", t).strip().replace("@", "@\u200b")[:cap]
 
 
+def names(n):
+    """A path as written and with the PATH_OK characters removed: every deny and guard check runs on both, so a lookalike cannot dodge them."""
+    return [n, re.sub(f"[{PATH_OK}]", "", n)]
+
+
+def plain_path(n):
+    """No control, zero-width or bidi character in a directory segment; in the file name only the PATH_OK ones are allowed."""
+    d, _, b = n.rpartition("/")
+    return not re.search(f"[{UNPRINTABLE}]", d + "/" + names(b)[1])
+
+
 def nm(name):
-    """A file name as it appears in a reason: capped, so one long name cannot crowd out the rest."""
-    return str(name)[:80]
+    """A file name as it appears in a reason: capped, then every unprintable character written out (\\u200d), so the cut never lands inside an
+    escape and no invisible character is shown."""
+    return re.sub(f"[{UNPRINTABLE}]", lambda m: f"\\u{ord(m[0]):04x}", str(name)[:80])
 
 
 def parse(value):
@@ -96,12 +109,11 @@ def glob_match(glob, path):
 def forbidden(guarded, n):
     """Why a path may never be touched without a person (None when it may): not a plain file path, on the always-deny list, or a guarded
     file. `guarded` is the lower-cased guardFiles globs."""
-    if not n or n.startswith("/") or n.endswith("/") or any(s in ("", ".", "..") for s in n.split("/")) or re.search(f"[{UNPRINTABLE}]", n):
+    if not plain_path(n) or any(not x or x.startswith("/") or x.endswith("/") or any(t in ("", ".", "..") for t in x.split("/")) for x in names(n)):
         return f"{nm(n) or '(no name)'} is not a plain file path"
-    if any(glob_match(g, n) for g in ALWAYS_DENY):
+    if any(glob_match(g, x) for g in ALWAYS_DENY for x in names(n)):
         return f"{nm(n)} is never auto-approved"
-    low = n.lower()
-    if any(fnmatch.fnmatchcase(x, g) for g in guarded for x in (low, os.path.basename(low))):
+    if any(fnmatch.fnmatchcase(y, g) for g in guarded for x in names(n.lower()) for y in (x, os.path.basename(x))):
         return f"{nm(n)} is a guarded file"
     return None
 
@@ -109,8 +121,9 @@ def forbidden(guarded, n):
 def probes(guarded, n):
     """The paths to test for one declared or changed path: itself, a file below it (a directory touch) and the shape of every deny or
     guard glob that lives below it (`docs/conf.py`, `docs/*.md` -> `docs/x.md`)."""
+    base = n if n.endswith("/") else names(n)[1]  # a directory keeps the strict name; an allowed character in a file name is not a directory's
     n = n.rstrip("/")
-    return [n, n + "/x"] + [re.sub(r"[*?\[\]]+", "x", g) for g in [*ALWAYS_DENY, *guarded] if g.lower().startswith(n.lower() + "/")]
+    return [n, base.rstrip("/") + "/x"] + [re.sub(r"[*?\[\]]+", "x", g) for g in [*ALWAYS_DENY, *guarded] if g.lower().startswith(base.rstrip("/").lower() + "/")]
 
 
 def covers_subtree(g, parts):
@@ -126,10 +139,10 @@ def vet_dir(guarded, n, globs):
     whose prefix matches the directory or one above it."""
     d = n[:-1]
     parts = d.split("/")
-    why = forbidden(guarded, d)
+    why = forbidden(guarded, d) or (None if plain_path(n + "_") else f"{nm(n)} is not a plain file path")
     if why:
         return why
-    why = next((w for w in (forbidden(guarded, p) for p in probes(guarded, d)) if w), None)
+    why = next((w for w in (forbidden(guarded, p) for p in probes(guarded, n)) if w), None)
     if why:
         return f"{nm(n)} covers files that are never auto-approved or guarded ({why})"
     if not any(covers_subtree(g, parts) for g in globs):
