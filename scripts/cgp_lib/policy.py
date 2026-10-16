@@ -106,11 +106,36 @@ def forbidden(guarded, n):
     return None
 
 
-def vet(c, repos, names, globs):
+def probes(guarded, n):
+    """The paths to test for one declared or changed path: itself, a file below it (a directory touch) and the shape of every deny or
+    guard glob that lives below it (`docs/conf.py`, `docs/*.md` -> `docs/x.md`)."""
+    n = n.rstrip("/")
+    return [n, n + "/x"] + [re.sub(r"[*?\[\]]+", "x", g) for g in [*ALWAYS_DENY, *guarded] if g.lower().startswith(n.lower() + "/")]
+
+
+def vet_dir(guarded, n, globs):
+    """Why a directory entry of the plan (`docs/`) may not be auto-approved (None when it may): no always-deny or guarded pattern could
+    match a file inside it, and one glob covers everything beneath it (`**`, or `<glob>/**` where the glob matches the directory or one above it)."""
+    d = n[:-1]
+    parts = d.split("/")
+    why = next((w for w in (forbidden(guarded, p) for p in [d, *probes(guarded, d)]) if w), None)
+    if why:
+        return f"{nm(n)} covers files that are never auto-approved or guarded ({why})"
+    if not any(g == "**" or g.endswith("/**") and any(glob_match(g[:-3], "/".join(parts[:k])) for k in range(1, len(parts) + 1)) for g in globs):
+        return f"{nm(n)} is a directory and no autoApproveFiles glob covers everything beneath it"
+    return None
+
+
+def vet(c, repos, names, globs, dirs=False):
     """Why a changed path may not be auto-approved (None when every one may): it must be a plain file path inside `globs`, not on the
     always-deny list and not a guarded file (the guard ignores approvedTouches here: a guard hit is an absolute refusal)."""
     guarded = [g.lower() for g in merged_globs(c, "guardFiles", repos)]
     for n in names:
+        if dirs and n.endswith("/"):
+            why = vet_dir(guarded, n, globs)
+            if why:
+                return why
+            continue
         why = forbidden(guarded, n)
         if why:
             return why
@@ -153,7 +178,7 @@ def evaluate(c, it, gate, author_trusted):
         files = [norm_path(f) for f in data.get("touches", {}).get(item, [])]
         if not files:
             return no("the plan declares no files (cgp touches)")
-        why = vet(c, [repo], files, globs)
+        why = vet(c, [repo], files, globs, dirs=True)
         if why:
             return no(why)
         if not author_trusted():

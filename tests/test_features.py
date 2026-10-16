@@ -702,12 +702,56 @@ class TestPlanPolicy(PolicyBase):
         self.setting(autoApproveFiles=["**"])
         self.cgp("touches", "i1", "")
         self.refused("declares no files")
-        for path in ("docs/", "docs/../x.md", "/etc/x.md", "docs/x\nCLAUDE.md", "a\nb.md", "docs/a\tb.md"):
+        for path in ("./", "/", "docs//", "docs/./", "docs/../", "docs/../x.md", "/etc/x.md", "docs/x\nCLAUDE.md", "a\nb.md", "docs/a\tb.md"):
             self.cgp("touches", "i1", path)
             self.refused("not a plain file path")
         self.setting(autoApproveFiles=["*.md"])
         self.cgp("touches", "i1", "x\nCLAUDE.md")
         self.refused("not a plain file path")
+
+    def test_a_directory_is_approved_when_one_glob_covers_its_whole_subtree(self):
+        self.setting(autoApproveFiles=["notes/**"])
+        self.cgp("touches", "i1", "notes/")
+        self.assertEqual(self.verdict("plan_review")[0], "plan_approved")
+        self.assertEqual(self.data()["approvedTouches"]["i1"], ["notes/"])
+        self.force("i1", "plan")
+        self.setting(autoApproveFiles=["**"])
+        self.assertEqual(self.verdict("plan_review")[0], "plan_approved")
+        self.force("i1", "plan")
+        self.cgp("touches", "i1", "a/b/")
+        self.setting(autoApproveFiles=["a/**"])
+        self.assertEqual(self.verdict("plan_review")[0], "plan_approved")
+
+    def test_a_directory_without_a_glob_over_everything_beneath_it_is_refused(self):
+        self.cgp("touches", "i1", "notes/")
+        for globs in (["notes/*"], ["notes/**/*.md"], ["notes/*a*/**"], ["docs/**/*.md", "*.md"]):
+            self.setting(autoApproveFiles=globs)
+            self.refused("no autoApproveFiles glob covers everything beneath it")
+
+    def test_a_directory_that_could_hold_a_denied_or_guarded_file_is_refused(self):
+        self.setting(autoApproveFiles=["**"], guardFiles=["deploy/*"])
+        for path in ("docs/", "skills/", ".github/", ".claude/", "deploy/"):
+            self.cgp("touches", "i1", path)
+            self.refused("covers files that are never auto-approved or guarded")
+
+    def test_a_bad_directory_refuses_the_whole_plan(self):
+        self.setting(autoApproveFiles=["**"])
+        self.cgp("touches", "i1", "notes/a.md", "docs/")
+        self.refused("docs/ covers files")
+        self.assertNotIn("approvedTouches", self.data())
+
+    def test_a_directory_plan_gates_the_pr_by_what_is_beneath_it(self):
+        self.setting(autoApproveFiles=["notes/**"])
+        self.cgp("touches", "i1", "notes/")
+        self.assertEqual(self.verdict("plan_review")[0], "plan_approved")
+        self.force("i1", "implement")
+        self.cgp("rate", "i1", "low")
+        self.db_set(pr_files={"acme/app#1": ["notes/a/b.md"]})
+        self.prs(self.view())
+        self.assertEqual(self.verdict("pr_review")[0], "pr_approved")
+        self.force("i1", "implement")
+        self.db_set(pr_files={"acme/app#1": ["notes/a/b.md", "other.md"]})
+        self.assertIn("other.md", self.cgp("move", "i1", "pr_approved", ok=False).stderr)
 
     def test_hold_an_untrusted_author_and_the_wrong_column_veto_it(self):
         d = self.read_db(); d["items"][0]["values"]["Priority"] = {"optionId": "o_Hold"}; self.write_db(d)

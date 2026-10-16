@@ -302,6 +302,10 @@ class TestSpecCommands(SpecBase):
             res = self.cgp("spec", "start", "i1")
             self.assertFalse(res["started"], touch)
 
+    def test_a_plain_file_touch_under_a_directory_still_starts(self):
+        self.set_data(touches={"i1": ["notes/a.md"]}, spec={})
+        self.assertTrue(self.cgp("spec", "start", "i1")["started"])
+
     def test_a_transient_refusal_is_not_recorded(self):
         with open(os.path.join(self.wt, "dirty.txt"), "w") as f:
             f.write("x")
