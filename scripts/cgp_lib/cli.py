@@ -54,7 +54,7 @@ COMMANDS = [
         A("--timeout", type=int, default=540), A("--interval", type=int, default=0)]),
     ("approve", cmd_approve, "Approve the gate the story waits at (plan_review or pr_review); only you, in a terminal", [A("item")]),
     ("move", cmd_move, "Move a story to a column (human gates enforced)", [A("item"), A("column")]),
-    ("reevaluate", cmd_reevaluate, "Re-run the auto-approval policy for PR Review stories it refused and approve those that now qualify; only you, in a terminal", []),
+    ("reevaluate", cmd_reevaluate, "Re-run the auto-approval policy for PR Review stories it refused and approve those that now qualify; only you, in a terminal (exit 1: a story errored)", []),
     ("set", cmd_set, "Set the plan or pr field of a story", [A("item"), A("field"), A("value")]),
     ("preview", cmd_preview, "Copy the deploy preview URL from the story's PR into the Preview field", [A("item")]),
     ("comment", cmd_comment, "Comment on the story (or its PR with --pr); body on stdin", [A("item"), A("--pr", action="store_true")]),

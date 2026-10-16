@@ -8,7 +8,7 @@ import sys
 from urllib.parse import urlsplit
 from .consts import DEFAULT_PHASE, KEY_RENAMES, SKIP, LINKS_END, LINKS_START, MARK, NETLIFY_BOT, QMARK, TEXT_FIELDS
 from .util import call, die, norm_path, now_iso, out
-from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
+from .gh import RateLimited, gh, is_agent, is_bot, post_comment, rest, trusted
 from .store import cfg, load_data, update_data, update_state
 from .board import board_keys, clear_field, fetch_items, get_item, item_issue, parse_item, parse_pr_ref, set_single, set_text
 from .session import clear_phase, reset_strikes, set_phase, worker_pr
@@ -160,7 +160,7 @@ def move_item(c, it, column, verdict=None):
 
 
 def cmd_reevaluate(a):
-    """Re-runs the auto-approval policy for the PR Review stories it refused and approves those that now qualify (only you)."""
+    """Re-runs the auto-approval policy for the PR Review stories it refused and approves those that now qualify (only you). Exits 1 when any story errored; a rate limit stops the sweep."""
     c = cfg()
     require_human("`cgp reevaluate` can only be run by you, in a terminal outside a Claude session")
     refusals = load_data().get("policyRefusal") or {}
@@ -178,6 +178,10 @@ def cmd_reevaluate(a):
                 r = move_item(c, fake, "pr_approved", verdict) if verdict and verdict["approved"] else None
                 if verdict and not verdict["approved"]:
                     record_refusal(it, "pr_approved", verdict["reason"], lambda text, it=it: post_comment(it["issueRepo"], it["number"], text))
+        except RateLimited:  # the rest would fail the same way: stop, and leave them for the next run
+            res["errors"].append({"item": it["item"], "error": err.getvalue().strip()})
+            res["stopped"] = "rate limited"
+            break
         except SystemExit:
             res["errors"].append({"item": it["item"], "error": err.getvalue().strip()})
             continue
@@ -188,6 +192,8 @@ def cmd_reevaluate(a):
         else:
             res["refused"].append({"item": it["item"], "reason": (r or {}).get("policy", verdict)["reason"]})
     out(res)
+    if res["errors"]:
+        raise SystemExit(1)
 
 
 def cmd_approve(a):
