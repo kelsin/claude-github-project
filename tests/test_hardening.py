@@ -305,6 +305,14 @@ class TestSyncRecords(test_cgp.SyncBase):
         self.save_data(approvedTouches={"i1": [".npmrc"]})
         self.assertTrue(self.cgp("guard", "i1")["ok"])
 
+    def test_guard_lets_a_human_approved_directory_cover_guarded_files_but_not_a_policy_approved_one(self):
+        os.makedirs(os.path.join(self.wt, "notes"))
+        self.commit("notes/Makefile")
+        self.save_data(approvedTouches={"i1": ["notes/"]})
+        self.assertTrue(self.cgp("guard", "i1")["ok"])
+        self.save_data(policyPlans=["i1"])
+        self.assertEqual(self.cgp("guard", "i1", ok=False).returncode, 4)
+
     def test_guard_allows_nothing_guarded_for_a_skipped_plan(self):
         self.commit(".npmrc", "x\n")
         self.cgp("touches", "i1", ".npmrc")

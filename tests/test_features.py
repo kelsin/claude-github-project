@@ -730,9 +730,12 @@ class TestPlanPolicy(PolicyBase):
 
     def test_a_directory_that_could_hold_a_denied_or_guarded_file_is_refused(self):
         self.setting(autoApproveFiles=["**"], guardFiles=["deploy/*"])
-        for path in ("docs/", "skills/", ".github/", ".claude/", "deploy/"):
+        for path in ("docs/", "deploy/"):
             self.cgp("touches", "i1", path)
             self.refused("covers files that are never auto-approved or guarded")
+        for path in ("skills/", ".github/", ".claude/"):  # the directory itself is denied or guarded: its own reason, not wrapped
+            self.cgp("touches", "i1", path)
+            self.refused(f"{path.rstrip('/')} is ")
 
     def test_a_bad_directory_refuses_the_whole_plan(self):
         self.setting(autoApproveFiles=["**"])
@@ -744,6 +747,7 @@ class TestPlanPolicy(PolicyBase):
         self.setting(autoApproveFiles=["notes/**"])
         self.cgp("touches", "i1", "notes/")
         self.assertEqual(self.verdict("plan_review")[0], "plan_approved")
+        self.setting(autoApproveFiles=["notes/**", "*.md"])
         self.force("i1", "implement")
         self.cgp("rate", "i1", "low")
         self.db_set(pr_files={"acme/app#1": ["notes/a/b.md"]})
@@ -751,7 +755,9 @@ class TestPlanPolicy(PolicyBase):
         self.assertEqual(self.verdict("pr_review")[0], "pr_approved")
         self.force("i1", "implement")
         self.db_set(pr_files={"acme/app#1": ["notes/a/b.md", "other.md"]})
-        self.assertIn("other.md", self.cgp("move", "i1", "pr_approved", ok=False).stderr)
+        err = self.cgp("move", "i1", "pr_approved", ok=False).stderr
+        self.assertIn("other.md", err)
+        self.assertIn("not in the approved plan", err)
 
     def test_hold_an_untrusted_author_and_the_wrong_column_veto_it(self):
         d = self.read_db(); d["items"][0]["values"]["Priority"] = {"optionId": "o_Hold"}; self.write_db(d)
