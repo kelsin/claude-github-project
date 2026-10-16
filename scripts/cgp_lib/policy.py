@@ -25,12 +25,13 @@ ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKI
                "docs/conf.py", "docs/_config.yml", "docs/package.json", "**/.vitepress/**", "**/.docusaurus/**", ".readthedocs.y*ml",
                "**/CLAUDE*.md", "**/GEMINI.md", ".cursor/**", ".windsurf/**", ".agents/**", "**/.claude/**", "**/*.mdc", "**/CONTRIBUTING.md",
                ".github/**", ".cgp-rules.md"]
+UNPRINTABLE = "\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff"  # control, zero-width, bidi and line-break characters
 
 
 def sanitize(text, cap=300):
     """A reason can name files of a PR, which anyone can write: one line, no control or bidi characters, backticks, angle brackets (so no
     agent marker) or live @mentions."""
-    t = re.sub(r"[\s\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]+", " ", str(text or ""))
+    t = re.sub(rf"[\s{UNPRINTABLE}]+", " ", str(text or ""))
     return re.sub(r"[`<>]", "", t).strip().replace("@", "@\u200b")[:cap]
 
 
@@ -95,7 +96,7 @@ def glob_match(glob, path):
 def forbidden(guarded, n):
     """Why a path may never be touched without a person (None when it may): not a plain file path, on the always-deny list, or a guarded
     file. `guarded` is the lower-cased guardFiles globs."""
-    if not n or n.startswith("/") or n.endswith("/") or any(s in ("", ".", "..") for s in n.split("/")):
+    if not n or n.startswith("/") or n.endswith("/") or any(s in ("", ".", "..") for s in n.split("/")) or re.search(f"[{UNPRINTABLE}]", n):
         return f"{nm(n) or '(no name)'} is not a plain file path"
     if any(glob_match(g, n) for g in ALWAYS_DENY):
         return f"{nm(n)} is never auto-approved"

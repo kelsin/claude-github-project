@@ -1,9 +1,7 @@
 """Sub-stories: a planner declares a split (`cgp split <item> --declare`), the approved declaration is snapshotted like touches, and
 `cgp split <item>` then creates exactly those stories. The parent is not implemented: it waits for its children and is closed
 when every one of them reached Done by a merged PR. One nesting level; links live in cgp's data and in a `Part of` line in each child."""
-import fnmatch
 import json
-import os
 import re
 import sys
 from .consts import ALL_KEYS, MARK
@@ -13,7 +11,7 @@ from .store import cfg, load_data, update_data
 from .board import get_item, parse_pr_ref, require_repo, set_text
 from .intake import create_story
 from .pr import pr_view
-from .policy import ALWAYS_DENY, glob_match
+from .policy import UNPRINTABLE, forbidden
 from .repoconf import merged_globs
 from .story import ask_user, author_trusted
 
@@ -38,6 +36,8 @@ def read_specs(c, parent, raw, allowed=()):
             die(f"sub-story {n} needs a scope text")
         if not isinstance(files, list) or not all(isinstance(f, str) and f.strip() for f in files):
             die(f"sub-story {n}: files must be a list of paths")
+        if any(re.search(f"[{UNPRINTABLE}]", f) for f in files):
+            die(f"sub-story {n}: file names must not contain control characters")
         after = s.get("after", [])
         if not isinstance(after, list) or not all(isinstance(t, str) for t in after):
             die(f"sub-story {n}: after must be a list of sub-story titles")
@@ -47,8 +47,7 @@ def read_specs(c, parent, raw, allowed=()):
         guarded = [g.lower() for g in merged_globs(c, "guardFiles", [s["repo"]])]
         for f in s["files"]:
             names = [f.rstrip("/")] + ([f + "_"] if f.endswith("/") else [])
-            hit = any(glob_match(g, n) for g in ALWAYS_DENY for n in names) or any(
-                fnmatch.fnmatchcase(x.lower(), g) for g in guarded for n in names for x in (n, os.path.basename(n)))
+            hit = any(forbidden(guarded, n) for n in names)
             if hit and not any(covers(t, f) for t in allowed):
                 die(f"sub-story {s['title']!r}: {f} is a guarded file; the plan's files (cgp touches) must list it")
     titles = [s["title"] for s in specs]
