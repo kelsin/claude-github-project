@@ -1449,9 +1449,12 @@ class TestSubStories(PolicyBase):
         bad = [{"title": "CI", "scope": "x", "files": [".github/workflows/ci.yml"]}]
         self.assertIn("never auto-approved", self.declare(bad, ok=False).stderr)
         self.assertIn("never auto-approved", self.declare([{"title": "A", "scope": "x", "files": ["CLAUDE.md"]}], ok=False).stderr)
-        err = self.declare([{"title": "A", "scope": "x", "files": ["a/../b"]}], ok=False).stderr
-        self.assertIn("a/../b is not a plain file path", err)
-        self.assertNotIn("must list it", err)
+        for p in ("a/../b", "a/../b/", "/etc/passwd"):
+            with self.subTest(p):
+                self.cgp("touches", "i1", p)  # listing it in the plan does not help
+                err = self.declare([{"title": "A", "scope": "x", "files": [p]}], ok=False).stderr
+                self.assertIn(f"{p} is not a plain file path", err)
+                self.assertNotIn("must list it", err)
         err = self.declare([{"title": "A", "scope": "x", "files": [".husky/pre-commit"]}], ok=False).stderr
         self.assertIn("is a guarded file", err)
         self.assertIn("must list it", err)
