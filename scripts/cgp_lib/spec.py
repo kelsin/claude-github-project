@@ -5,7 +5,6 @@ branch is reset to where the draft started. State per story is data["spec"][item
 startedAt, trusted, artifactComments}, state one of running, ready, failed, discarded, adopted. The draft's worker row is keyed
 "<item>:spec" (consts.SPEC_SUFFIX) so it never replaces the story's own row."""
 import os
-import re
 import hashlib
 import subprocess
 from .consts import SPEC_SUFFIX
@@ -15,7 +14,7 @@ from .store import cfg, load_data, load_json, state_path, update_data, update_st
 from .board import fetch_items, issue_item, parse_item
 from .gitutil import default_ref, git, wt_path
 from .gitwt import cmd_sync, cmd_worktree, is_ancestor, uncommitted_work
-from .policy import ALWAYS_DENY, forbidden
+from .policy import forbidden, probes
 from .repoconf import merged_globs, repo_config, rules_text
 
 LIVE = ("running", "ready")  # states in which the branch holds (or is getting) commits nobody has reviewed
@@ -57,13 +56,6 @@ def local_problem(c, data, it):
     if not touches_of(data, it["item"]):
         return "the plan declares no files (cgp touches)"
     return None
-
-
-def probes(guarded, n):
-    """The paths to test for one declared or changed path: itself, a file below it (a directory touch) and the shape of every deny or
-    guard glob that lives below it (`docs/conf.py`, `docs/*.md` -> `docs/x.md`)."""
-    n = n.rstrip("/")
-    return [n, n + "/x"] + [re.sub(r"[*?\[\]]+", "x", g) for g in [*ALWAYS_DENY, *guarded] if g.lower().startswith(n.lower() + "/")]
 
 
 def bad_touches(c, it, names):
