@@ -13,7 +13,7 @@ from .gh import gh
 from .store import cfg, load_data
 from .board import fetch_items, parse_item, parse_pr_ref
 from .notify import REVIEW
-from .policy import current_rating, sanitize
+from .policy import current_rating
 from .pr import ci_state, pr_checks
 
 PR_TIMEOUT = 10  # seconds to wait for one PR's gh calls; a slow or failing gh gives null PR facts
@@ -57,12 +57,13 @@ def collect(c):
         since = entry.get("since") if entry.get("column") == it["column"] and entry.get("waiting") == it["waiting"] else None
         approx = since is None or bool(entry.get("approx"))
         rating = current_rating(data, it)
+        refusal = (data.get("policyRefusal") or {}).get(it["item"]) or {}
         files = data.get("touches", {}).get(it["item"]) or facts["files"] or None
         hours = int(age_seconds(since) // 3600) if since else None
         row = {"title": it["title"], "url": it["url"], "column": it["column"], "waitingSince": since, "waitingHours": hours,
                "approximate": approx, "rating": rating, "files": files, "diff": facts["diff"], "ci": facts["ci"],
                "preview": it["preview"], "pr": it["pr"], "plan": it["plan"],
-               "refusal": sanitize(((data.get("policyRefusal") or {}).get(it["item"]) or {}).get("reason")) or None}
+               "refusal": refusal.get("reason") if refusal.get("gate") == {"plan_review": "plan_approved", "pr_review": "pr_approved"}.get(it["column"]) else None}
         row["packet"] = {k: row[k] for k in ("plan", "pr", "preview", "ci", "diff", "files", "rating", "refusal")}
         d = facts["diff"]
         size = (d.get("additions") or 0) + (d.get("deletions") or 0) if d else None

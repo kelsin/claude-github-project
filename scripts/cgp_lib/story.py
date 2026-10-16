@@ -83,7 +83,7 @@ def cmd_move(a):
     target = {"plan_review": "plan_approved", "pr_review": "pr_approved"}.get(a.column, a.column)
     # the user's Auto Approve field (read live: they may have set it after the worker started) or, failing that, the policy delegates a gate
     field_ok = target in GATE_KEYS and auto_allows(c, it, target)
-    verdict = policy_verdict(c, it, target) if target in GATE_KEYS and not field_ok else None
+    verdict = policy_verdict(c, it, target) if target in GATE_KEYS and not field_ok and gate_open(c, it, target) else None
     stacked = stack_gate(c, it) if field_ok and target == "pr_approved" else None
     if stacked and a.column == "pr_approved":
         die(f"refusing to approve the PR: {stacked}")
@@ -189,7 +189,8 @@ def cmd_approve(a):
                 if target in DEFAULT_PHASE:
                     w.update(phase=DEFAULT_PHASE[target], phaseAt=now_iso())
     update_state(upd)
-    update_data(lambda d: (d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]), reset_strikes(d, a.item)))
+    update_data(lambda d: (d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]), reset_strikes(d, a.item),
+                           d.get("policyRefusal", {}).pop(a.item, None)))
     out({"item": a.item, "column": target, "approved": True, **({"sha": sha, "reviewed": reviewed} if sha else {"plan": it["plan"]})})
 
 
