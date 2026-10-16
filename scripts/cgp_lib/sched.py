@@ -512,9 +512,10 @@ def cmd_wait(a):
         # with a stop requested the loop is only waiting for its workers; once none are left there is nothing to wait for
         stopped = snap["stopRequested"] and not snap["inFlight"]
         # `done` with a worker still running (its issue was closed, or a stop is pending) keeps waiting for that worker
-        over = snap["status"] == "work" or (snap["status"] == "done" and not snap["inFlight"])
-        if over or released or stopped or not poll.wait():
+        finished = snap["status"] == "done" and not snap["inFlight"]
+        if stopped or finished or snap["status"] == "work" or released or not poll.wait():
             snap.pop("items")
+            snap["reason"] = "stop" if stopped else "done" if finished else "actionable" if snap["status"] == "work" else "released" if released else "timeout"
             out(snap)
             return
 

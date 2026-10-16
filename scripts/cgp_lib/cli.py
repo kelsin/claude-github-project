@@ -50,7 +50,7 @@ COMMANDS = [
         A("--days", type=int, default=30), A("--json", action="store_true", help="the raw numbers instead of the table")]),
     ("list", cmd_list, "JSON snapshot of the board (also files closed issues under Done and clears answered questions)", [
         A("--brief", action="store_true")]),
-    ("wait", cmd_wait, "Poll until a story becomes actionable, a worker is released, all is Done, or the timeout passes", [
+    ("wait", cmd_wait, "Poll until a story becomes actionable, a worker is released, all is Done, or the timeout passes; `reason` in the result says which (stop, done, actionable, released, timeout)", [
         A("--timeout", type=int, default=540), A("--interval", type=int, default=0)]),
     ("approve", cmd_approve, "Approve the gate the story waits at (plan_review or pr_review); only you, in a terminal", [A("item")]),
     ("move", cmd_move, "Move a story to a column (human gates enforced)", [A("item"), A("column")]),

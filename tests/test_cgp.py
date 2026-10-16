@@ -252,7 +252,33 @@ class TestListAndMove(Base):
         for i in ("i1", "i2", "i4"):
             self.force(i, "pr_review")
         r = self.cgp("wait", "--timeout", "0")
-        self.assertEqual(r["status"], "idle")
+        self.assertEqual((r["status"], r["reason"]), ("idle", "timeout"))
+        self.assertNotIn("reason", self.cgp("list"))
+
+    def test_wait_reason_stop_done_and_actionable(self):
+        self.setup_board()
+        self.cgp("stop")
+        self.assertEqual(self.cgp("wait", "--timeout", "0")["reason"], "stop")
+        self.cgp("stop", "--cancel")
+        self.assertEqual(self.cgp("wait", "--timeout", "0")["reason"], "actionable")
+        for i in ("i1", "i2", "i4"):
+            self.force(i, "done")
+        self.assertEqual(self.cgp("wait", "--timeout", "0")["reason"], "done")
+
+    def test_wait_reason_released_when_a_worker_stops(self):
+        self.setup_board()
+        for i in ("i1", "i2", "i4"):
+            self.force(i, "pr_review")
+        self.cgp("worker", "start", "i1", "todo", "one")
+        self.cgp("worker", "start", "i2", "todo", "two")
+        self.cgp("stop")
+        p = subprocess.Popen([sys.executable, CGP, "wait", "--timeout", "30", "--interval", "1"],
+                             stdout=subprocess.PIPE, text=True, env=self.env)
+        time.sleep(2)  # past the first snapshot, which is the baseline
+        self.cgp("worker", "stop", "i1")
+        out, _ = p.communicate(timeout=20)
+        r = json.loads(out)
+        self.assertEqual((r["reason"], r["status"], r["inFlight"]), ("released", "idle", ["i2"]))
 
     def test_run_skill_tells_the_loop_to_wait_again_on_idle(self):
         text = read_text("skills", "run", "SKILL.md")
@@ -260,6 +286,9 @@ class TestListAndMove(Base):
         step6 = text.split("\n6. Worker completions")[1].split("\n## Rules")[0]
         self.assertIn("An `idle` result (empty batch, nothing new, with or without workers in flight, and a plain timeout) is not a reason to stop: print the waiting list only if it changed, then run `CGP wait` again; the only exits are step 2 (stop) and step 3 (done and nothing in flight).", step5)
         self.assertIn("Then continue: run `CGP wait` again (step 5); never end the turn while the board is not Done and no stop was requested.", step6)
+        self.assertIn("only `stop` and `done` end the run; any other reason, including `timeout` and `released` with `status: \"idle\"`, means process the notifications, then run `CGP wait` again.", step5)
+        self.assertIn("Put the waiting-list report and the `CGP wait` Bash call in the same message", step5)
+        self.assertIn("- Never end the turn to hand control back: only the done and stop exits end the run.", text.split("\n## Rules")[1])
 
     def test_stop_request_is_reported_and_wakes_wait(self):
         self.setup_board()
