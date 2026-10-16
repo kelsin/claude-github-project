@@ -254,6 +254,13 @@ class TestListAndMove(Base):
         r = self.cgp("wait", "--timeout", "0")
         self.assertEqual(r["status"], "idle")
 
+    def test_run_skill_tells_the_loop_to_wait_again_on_idle(self):
+        text = read_text("skills", "run", "SKILL.md")
+        step5 = text.split("\n5. Wait:")[1].split("\n6. ")[0]
+        step6 = text.split("\n6. Worker completions")[1].split("\n## Rules")[0]
+        self.assertIn("An `idle` result (empty batch, nothing new, with or without workers in flight, and a plain timeout) is not a reason to stop: print the waiting list only if it changed, then run `CGP wait` again; the only exits are step 2 (stop) and step 3 (done and nothing in flight).", step5)
+        self.assertIn("Then continue: run `CGP wait` again (step 5); never end the turn while the board is not Done and no stop was requested.", step6)
+
     def test_stop_request_is_reported_and_wakes_wait(self):
         self.setup_board()
         for i in ("i1", "i2", "i4"):
