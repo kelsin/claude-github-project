@@ -1,5 +1,7 @@
 """Per-story commands: comments, questions, feedback, field updates, moves, prepare."""
+import contextlib
 import hashlib
+import io
 import json
 import re
 import sys
@@ -8,7 +10,7 @@ from .consts import DEFAULT_PHASE, KEY_RENAMES, SKIP, LINKS_END, LINKS_START, MA
 from .util import call, die, norm_path, now_iso, out
 from .gh import gh, is_agent, is_bot, post_comment, rest, trusted
 from .store import cfg, load_data, update_data, update_state
-from .board import board_keys, clear_field, get_item, item_issue, parse_pr_ref, set_single, set_text
+from .board import board_keys, clear_field, fetch_items, get_item, item_issue, parse_item, parse_pr_ref, set_single, set_text
 from .session import clear_phase, reset_strikes, set_phase, worker_pr
 from .brief import cmd_brief
 from .repoconf import repo_config, rules_text, safe_pattern
@@ -72,83 +74,120 @@ def ready_pr(ref):
 
 def cmd_move(a):
     c = cfg()
-    a.column = KEY_RENAMES.get(a.column, a.column)  # the user's columns were called plan_approval / pr_approval before schema 3
-    if a.column not in board_keys(c):
+    column = KEY_RENAMES.get(a.column, a.column)  # the user's columns were called plan_approval / pr_approval before schema 3
+    if column not in board_keys(c):
         die(f"column must be one of {board_keys(c)}")
-    it = get_item(c, a.item)
-    if it["column"] == a.column:
-        out({"item": a.item, "column": a.column, "unchanged": True, "note": f"already in {a.column}"})
-        return
+    out(move_item(c, get_item(c, a.item), column))
+
+
+def move_item(c, it, column, verdict=None):
+    """Moves the story and returns the result. A passed `verdict` (the policy's, already evaluated) replaces the Auto Approve field and the
+    evaluation: the move happens only when it approves."""
+    item = it["item"]
+    if it["column"] == column:
+        return {"item": item, "column": column, "unchanged": True, "note": f"already in {column}"}
     requested = None
-    target = {"plan_review": "plan_approved", "pr_review": "pr_approved"}.get(a.column, a.column)
+    target = {"plan_review": "plan_approved", "pr_review": "pr_approved"}.get(column, column)
     # the user's Auto Approve field (read live: they may have set it after the worker started) or, failing that, the policy delegates a gate
-    field_ok = target in GATE_KEYS and auto_allows(c, it, target)
-    verdict = policy_verdict(c, it, target) if target in GATE_KEYS and not field_ok and gate_open(c, it, target) else None
+    field_ok = verdict is None and target in GATE_KEYS and auto_allows(c, it, target)
+    if verdict is None and target in GATE_KEYS and not field_ok and gate_open(c, it, target):
+        verdict = policy_verdict(c, it, target)
     stacked = stack_gate(c, it) if field_ok and target == "pr_approved" else None
-    if stacked and a.column == "pr_approved":
+    if stacked and column == "pr_approved":
         die(f"refusing to approve the PR: {stacked}")
     field_ok = field_ok and not stacked  # a delegated move into PR Review then stays there for the user
     policy_ok = bool(verdict and verdict["approved"])
-    if target != a.column and (field_ok or policy_ok):
-        requested, a.column = a.column, target
-    if a.column in GATE_KEYS and not (field_ok or policy_ok):
-        die(f"only the user moves stories into {a.column}; it is a human approval (unless Auto Approve or the auto-approval policy covers it)"
+    if target != column and (field_ok or policy_ok):
+        requested, column = column, target
+    if column in GATE_KEYS and not (field_ok or policy_ok):
+        die(f"only the user moves stories into {column}; it is a human approval (unless Auto Approve or the auto-approval policy covers it)"
             + (f": the policy refused: {verdict['reason']}" if verdict else ""))
     if it["column"] in ("plan_review", "pr_review"):
         die(f"story is in {it['column']}: only the user moves it out")
     ref = parse_pr_ref(c, it["pr"])
-    if a.column == "done" and not (it["closed"] and it["kind"] == "issue"):  # a closed issue is finished already
+    if column == "done" and not (it["closed"] and it["kind"] == "issue"):  # a closed issue is finished already
         if it["column"] != "pr_approved" or not ref or pr_view(*ref)["state"] != "MERGED":
             die("a story reaches Done only from pr_approved, after its PR merged")
         why = stack_gate(c, it)
         if why:
             die(f"a story reaches Done only when its PR merged into the default branch: {why}")
-    if a.column != "done" and it["column"] == "pr_approved" and ref:
+    if column != "done" and it["column"] == "pr_approved" and ref:
         cancel_auto_merge(*ref)  # leaving PR Approved must not leave a merge armed
-    if policy_ok and a.column == "pr_approved":  # a policy approval stands in for the review: ready the PR and record the commit it checked
+    if policy_ok and column == "pr_approved":  # a policy approval stands in for the review: ready the PR and record the commit it checked
         if verdict["draft"]:
             ready_pr(ref)
-        record_reviewed(a.item, ref, verdict["sha"])  # (`merge` stays pinned to it: a later push is refused, exit 7)
+        record_reviewed(item, ref, verdict["sha"])  # (`merge` stays pinned to it: a later push is refused, exit 7)
         if (pr_view(*ref, check=False) or {}).get("headRefOid") != verdict["sha"]:  # pushed meanwhile: a person reviews it instead
-            verdict, policy_ok, requested, a.column = {"approved": False, "reason": "the PR head moved while it was being approved"}, False, None, "pr_review"
+            verdict, policy_ok, requested, column = {"approved": False, "reason": "the PR head moved while it was being approved"}, False, None, "pr_review"
     shown = None
-    if a.column == "pr_review" and ref:  # read the commit the user will be shown first: a failed read must abort the move,
+    if column == "pr_review" and ref:  # read the commit the user will be shown first: a failed read must abort the move,
         shown = pr_view(*ref)  # not leave the story in PR Review with no record of what was reviewed
         if not shown or not shown.get("headRefOid"):
             die("could not read the PR head; not moving the story to pr_review")
-        rec = stack_of(a.item)
+        rec = stack_of(item)
         why = stack_stale(rec) if rec else None
         if why:
             die(f"not moving the story to pr_review: {why}")
     if policy_ok:
-        record_decision(it, a.column, verdict)  # before the move: the files that were checked are the files approved
-    set_single(c, a.item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][a.column])
+        record_decision(it, column, verdict)  # before the move: the files that were checked are the files approved
+    set_single(c, item, c["fields"]["status"]["id"], c["fields"]["status"]["options"][column])
     if requested == "pr_review" and not policy_ok:  # redirected to pr_approved: no review to record, but a merge refuses a draft
         if (pr_view(*ref, check=False) or {}).get("isDraft"):
             ready_pr(ref)
     if shown:
         if shown["isDraft"]:  # draftPRs opens PRs as drafts: ready for review now
             ready_pr(ref)
-        record_reviewed(a.item, ref, shown["headRefOid"])  # the commit the user is about to review: merge accepts only this one
-    if a.column == "implement" and it["column"] == "plan_approved":
-        snapshot_touches(a.item)  # fills a missing snapshot only: what the user approved is what the guard allows
+        record_reviewed(item, ref, shown["headRefOid"])  # the commit the user is about to review: merge accepts only this one
+    if column == "implement" and it["column"] == "plan_approved":
+        snapshot_touches(item)  # fills a missing snapshot only: what the user approved is what the guard allows
 
     def upd(st):
         for w in st["workers"]:
-            if w["item"] == a.item:
-                w["column"] = a.column
+            if w["item"] == item:
+                w["column"] = column
                 clear_phase(w)  # a phase belongs to the column it was set in
-                if a.column in DEFAULT_PHASE:
-                    w.update(phase=DEFAULT_PHASE[a.column], phaseAt=now_iso())
+                if column in DEFAULT_PHASE:
+                    w.update(phase=DEFAULT_PHASE[column], phaseAt=now_iso())
     update_state(upd)
-    update_data(lambda d: (d.__setitem__("answered", [i for i in d.get("answered", []) if i != a.item]), reset_strikes(d, a.item)))
+    update_data(lambda d: (d.__setitem__("answered", [i for i in d.get("answered", []) if i != item]), reset_strikes(d, item)))
     if policy_ok:
-        post_comment(it["issueRepo"], it["number"], f"{MARK}\nAuto-approved by the policy ({'plan' if a.column == 'plan_approved' else 'PR'}): {verdict['reason']}.")
-        advance_cursor(a.item)  # like `cgp comment`: posting counts as having read the feedback so far
+        post_comment(it["issueRepo"], it["number"], f"{MARK}\nAuto-approved by the policy ({'plan' if column == 'plan_approved' else 'PR'}): {verdict['reason']}.")
+        advance_cursor(item)  # like `cgp comment`: posting counts as having read the feedback so far
     elif verdict and record_refusal(it, target, verdict["reason"], lambda text: post_comment(it["issueRepo"], it["number"], text)):
-        advance_cursor(a.item)  # a refusal is posted once per reason; the person it was meant for sees it in the story
-    out({"item": a.item, "column": a.column, **({"autoApproved": True} if requested or policy_ok else {}), **({"requested": requested} if requested else {}),
-         **({"policy": public(verdict)} if verdict else {})})
+        advance_cursor(item)  # a refusal is posted once per reason; the person it was meant for sees it in the story
+    return {"item": item, "column": column, **({"autoApproved": True} if requested or policy_ok else {}), **({"requested": requested} if requested else {}),
+         **({"policy": public(verdict)} if verdict else {})}
+
+
+def cmd_reevaluate(a):
+    """Re-runs the auto-approval policy for the PR Review stories it refused and approves those that now qualify (only you)."""
+    c = cfg()
+    require_human("`cgp reevaluate` can only be run by you, in a terminal outside a Claude session")
+    refusals = load_data().get("policyRefusal") or {}
+    rows = [parse_item(r, c) for r in fetch_items(c["board"]["id"], bool(c["settings"]["nativeDependencies"]))]
+    res = {"checked": 0, "approved": [], "refused": [], "skipped": [], "errors": []}
+    for it in rows:
+        if it["archived"] or it["kind"] != "issue" or it["column"] != "pr_review" or (refusals.get(it["item"]) or {}).get("gate") != "pr_approved":
+            continue
+        res["checked"] += 1
+        fake = {**it, "column": "implement"}  # the column the policy judges from, as in the worker's own `cgp move`
+        err = io.StringIO()  # a `die` in one story must not stop the sweep: its message is reported with the story
+        try:
+            with contextlib.redirect_stderr(err):
+                verdict = policy_verdict(c, fake, "pr_approved")
+                r = move_item(c, fake, "pr_approved", verdict) if verdict and verdict["approved"] else None
+                if verdict and not verdict["approved"]:
+                    record_refusal(it, "pr_approved", verdict["reason"], lambda text, it=it: post_comment(it["issueRepo"], it["number"], text))
+        except SystemExit:
+            res["errors"].append({"item": it["item"], "error": err.getvalue().strip()})
+            continue
+        if verdict is None:
+            res["skipped"].append({"item": it["item"], "why": "the policy is off for the PR gate"})
+        elif r and r["column"] == "pr_approved":
+            res["approved"].append(it["item"])
+        else:
+            res["refused"].append({"item": it["item"], "reason": (r or {}).get("policy", verdict)["reason"]})
+    out(res)
 
 
 def cmd_approve(a):

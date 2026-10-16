@@ -978,6 +978,143 @@ class TestPRPolicy(PolicyBase):
         self.assertIn("moved", self.verdict("pr_review")[1]["reason"])
 
 
+class TestReevaluate(PolicyBase):
+    FILE = TestPRPolicy.FILE
+
+    def setUp(self):
+        super().setUp()
+        self.force("i1", "implement")
+        self.set_data(approvedTouches={"i1": [self.FILE, "docs/"]})
+        self.db_set(pr_files={"acme/app#1": [self.FILE]})
+        self.prs(self.view())
+        self.refuse("medium")
+
+    def refuse(self, rating):
+        """The worker's own move: refused, so the story waits in PR Review with a stored refusal."""
+        self.force("i1", "implement")
+        self.cgp("rate", "i1", rating)
+        self.assertEqual(self.verdict("pr_review")[0], "pr_review")
+
+    def fix(self):
+        """The rating the policy wants, given where the worker gives it (the implement column), the story back in PR Review."""
+        self.force("i1", "implement")
+        self.cgp("rate", "i1", "low")
+        self.force("i1", "pr_review")
+
+    def column(self, item="i1"):
+        return next(i["column"] for i in self.cgp("list")["items"] if i["item"] == item)
+
+    def sweep(self, **kw):
+        p = self.tty("reevaluate", **kw)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def refusals(self):
+        return [c for c in self.comments() if "Not auto-approved by the policy (PR)" in c]
+
+    def test_a_refused_story_that_now_qualifies_is_approved_and_its_refusal_cleared(self):
+        self.fix()
+        r = self.sweep()
+        self.assertEqual((r["checked"], r["approved"], r["refused"], r["skipped"], r["errors"]), (1, ["i1"], [], [], []))
+        self.assertEqual(self.column(), "pr_approved")
+        self.assertNotIn("i1", self.data()["policyRefusal"])
+        self.assertEqual(self.data()["reviewed"]["i1"]["sha"], "aaa111")
+        self.assertTrue(any("Auto-approved by the policy (PR)" in c for c in self.comments()))
+
+    def test_a_story_that_is_still_refused_stays_put_and_is_not_commented_twice(self):
+        for _ in range(2):
+            r = self.sweep()
+            self.assertEqual((r["checked"], r["approved"], len(r["refused"])), (1, [], 1))
+            self.assertIn("rated medium", r["refused"][0]["reason"])
+        self.assertEqual(self.column(), "pr_review")
+        self.assertEqual(len(self.refusals()), 1)
+
+    def test_stories_without_a_refusal_and_plan_review_stories_are_untouched(self):
+        self.set_data(policyRefusal={})
+        self.fix()
+        self.assertEqual(self.sweep()["checked"], 0)
+        self.assertEqual(self.column(), "pr_review")
+        self.set_data(policyRefusal={"i1": {"gate": "plan_approved", "at": "2026-01-01T00:00:00Z", "approved": False, "reason": "rated medium"}})
+        self.assertEqual(self.sweep()["checked"], 0)
+        self.force("i1", "plan_review")
+        self.set_data(policyRefusal={"i1": {"gate": "pr_approved", "at": "2026-01-01T00:00:00Z", "approved": False, "reason": "rated medium"}})
+        self.assertEqual(self.sweep()["checked"], 0)
+        self.assertEqual(self.column(), "plan_review")
+
+    def test_a_changed_reason_is_posted_once(self):
+        self.fix()
+        self.set_data(approvedTouches={})
+        r = self.sweep()
+        self.assertEqual(len(r["refused"]), 1)
+        self.assertEqual(len(self.refusals()), 2)
+        self.assertIn("no approved plan files", self.data()["policyRefusal"]["i1"]["reason"])
+        self.sweep()
+        self.assertEqual(len(self.refusals()), 2)
+
+    def test_a_policy_that_is_off_changes_nothing(self):
+        self.fix()
+        self.setting(autoApprove="plan:low,pr:never")
+        before = self.data()["policyRefusal"]
+        r = self.sweep()
+        self.assertEqual((r["checked"], r["approved"], r["skipped"][0]["item"]), (1, [], "i1"))
+        self.assertEqual(self.column(), "pr_review")
+        self.assertEqual(self.data()["policyRefusal"], before)
+
+    def test_a_pr_head_that_moved_leaves_the_story_with_one_new_refusal_and_the_new_head_recorded(self):
+        self.fix()
+        self.prs(self.view(), self.view(), self.view(headRefOid="bbb222"))  # read, read after the files, read after recording
+        r = self.sweep()
+        self.assertEqual((r["approved"], len(r["refused"])), ([], 1))
+        self.assertIn("moved", r["refused"][0]["reason"])
+        self.assertEqual(self.column(), "pr_review")
+        self.assertEqual(len([c for c in self.refusals() if "moved" in c]), 1)
+        self.assertEqual(self.data()["reviewed"]["i1"]["sha"], "bbb222")
+
+    def test_the_auto_approve_field_is_not_a_way_around_the_policy(self):
+        d = self.read_db(); d["items"][0]["values"]["Auto Approve"] = {"text": "PR Approved"}; self.write_db(d)
+        before = self.data()["policyRefusal"]["i1"]
+        r = self.sweep()
+        self.assertEqual((r["approved"], len(r["refused"])), ([], 1))
+        self.assertEqual(self.column(), "pr_review")
+        self.assertEqual(self.data()["policyRefusal"]["i1"], before)
+        self.assertEqual(len(self.refusals()), 1)
+
+    def test_it_is_for_a_person_at_a_terminal(self):
+        self.fix()
+        for env, kw in (({"CGP_SESSION": "abc"}, {}), ({"CLAUDECODE": "1"}, {}), ({}, {"input": ""})):
+            p = self.cgp("reevaluate", ok=False, env=env, **kw)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("only be run by you", p.stderr)
+        self.assertEqual(self.column(), "pr_review")
+
+    def test_one_story_failing_is_reported_and_the_others_still_go(self):
+        self.fix()
+        self.db_set(prs={"acme/app#1": self.view(), "acme/app#2": self.view(headRefName="cgp/2")}, pr_files={"acme/app#1": [self.FILE], "acme/app#2": [self.FILE]})
+        self.cgp("set", "i2", "pr", "https://github.com/acme/app/pull/2")
+        self.force("i2", "implement")
+        self.cgp("rate", "i2", "low")
+        self.force("i2", "pr_review")
+        self.set_data(approvedTouches={"i1": [self.FILE], "i2": [self.FILE]}, policyRefusal={
+            **self.data()["policyRefusal"], "i2": {"gate": "pr_approved", "at": "2026-01-01T00:00:00Z", "approved": False, "reason": "x"}})
+        self.db_set(failures=[{"match": "i2", "stderr": "HTTP 502", "times": 99}])  # moving i2 fails
+        r = self.sweep()
+        self.assertEqual((r["checked"], r["approved"], [e["item"] for e in r["errors"]]), (2, ["i1"], ["i2"]))
+        self.assertIn("502", r["errors"][0]["error"])
+        self.assertEqual(self.column("i1"), "pr_approved")
+
+    def test_the_policy_is_evaluated_once_per_story(self):
+        self.force("i1", "implement")
+        self.cgp("rate", "i1", "low")
+        self.db_set(calls=[])
+        self.cgp("move", "i1", "pr_review")  # the worker's own approval: one evaluation
+        once = len(self.calls("view"))
+        refusal = {"gate": "pr_approved", "at": "2026-01-01T00:00:00Z", "approved": False, "reason": "rated medium"}
+        self.force("i1", "pr_review")
+        self.set_data(policyRefusal={"i1": refusal})
+        self.db_set(calls=[])
+        self.sweep()
+        self.assertEqual(len(self.calls("view")), once)  # not a second evaluation on top of the sweep's own
+
 class TestPolicySettings(PolicyBase):
     def test_a_person_at_a_terminal_can_set_the_policy_and_it_is_normalised(self):
         p = self.tty("config", "autoApprove", "pr:medium, plan:low")
