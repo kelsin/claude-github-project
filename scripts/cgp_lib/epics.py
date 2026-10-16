@@ -54,7 +54,7 @@ def read_specs(c, parent, raw, allowed=()):
             if why and not any(covers(t, f) for t in allowed):
                 n, r = why
                 hint = "" if r.endswith("is not a plain file path") else "; the plan's files (cgp touches) must list it"
-                die(f"sub-story {s['title']!r}: {f}{r[len(nm(n) or '(no name)'):]}{hint}")
+                die(f"sub-story {s['title']!r}: {nm(f)}{r[len(nm(n) or '(no name)'):]}{hint}")
     titles = [s["title"] for s in specs]
     if len(set(titles)) != len(titles):
         die("sub-story titles must be unique")

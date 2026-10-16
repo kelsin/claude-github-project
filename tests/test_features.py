@@ -752,7 +752,7 @@ class TestPlanPolicy(PolicyBase):
         self.assertEqual(pol.nm(name), "a" * 79 + "\\u200d")
         self.assertIn("not a plain file path", pol.forbidden([], "docs/a\x00b.md"))  # argv cannot carry a NUL, so this one is checked directly
         self.assertEqual(pol.nm("x\u200e\u200f"), "x\\u200e\\u200f")
-        self.assertEqual(pol.sanitize(pol.nm("x\u200d\u202e")), "x\\u200d")
+        self.assertEqual(pol.sanitize(pol.nm("x\u200d\u202e")), "x\\u200d\\u202e")
         self.assertEqual(pol.sanitize("a\u200d\u200fb"), "a b")
 
     def test_a_directory_is_approved_when_one_glob_covers_its_whole_subtree(self):
@@ -900,11 +900,11 @@ class TestPlanPolicy(PolicyBase):
             self.assertNotIn("`", text)
             self.assertNotIn("@x", text)
             self.assertNotIn("<", text.split("\n", 1)[-1])
-            self.assertIn("@\u200bx foo.md", text)
+            self.assertIn("@\u200bx\\u000afoo.md", text)
         self.assertEqual(self.refusals()[0].count("\n"), 1)  # the marker line and one line of text
         self.force("i1", "plan_review")
         row = self.cgp("review")["stories"][0]
-        self.assertIn("@\u200bx foo.md", row["refusal"])
+        self.assertIn("@\u200bx\\u000afoo.md", row["refusal"])
         self.assertNotIn("<", row["refusal"])
         self.assertEqual(row["packet"]["refusal"], row["refusal"])
         path = os.path.join(self.tmp, "digest.html")
@@ -1075,7 +1075,8 @@ class TestPRPolicy(PolicyBase):
     def test_a_renames_old_name_gets_the_same_checks(self):
         self.setting(autoApproveFiles=["**"])
         new = "docs/a\u200db.md"
-        for old, why in (("AGEN\u200dTS.md", "never auto-approved"), ("docs/x\u200cy.md", "not a plain")):
+        for old, why in (("AGEN\u200dTS.md", "never auto-approved"), ("docs/x\u200cy.md", "not a plain"),
+                         ("do\u200dcs/a.md", "not a plain"), (".husky/pre\u200d-commit", "guarded file")):
             self.set_data(approvedTouches={"i1": [new, old]})
             self.db_set(pr_files={"acme/app#1": [{"filename": new, "status": "renamed", "previous_filename": old}]})
             self.refused(why)
@@ -1447,13 +1448,20 @@ class TestSubStories(PolicyBase):
         self.assertNotIn(".husky/_", err)
         self.assertIn("must list it", err)
         err = self.declare([{"title": "A", "scope": "x", "files": [".github/workflows/" + "a" * 80 + ".yml"]}], ok=False).stderr
-        self.assertIn(".yml is never auto-approved", err)
+        self.assertIn("a" * 62 + " is never auto-approved", err)  # the name is capped at 80 characters
         odd = [{"title": "A", "scope": "x", "files": ["docs/x\nCLAUDE.md"]}]
         self.assertIn("control characters", self.declare(odd, ok=False).stderr)
         self.cgp("touches", "i1", "docs/x\nCLAUDE.md")  # listing it in the plan does not help
         self.assertIn("control characters", self.declare(odd, ok=False).stderr)
         self.cgp("touches", "i1", ".github/workflows/ci.yml")
         self.declare(bad)
+
+    def test_declare_errors_never_carry_raw_invisible_characters(self):
+        self.force("i1", "plan")
+        for f, shown in (("AGEN\u200dTS.md", "AGEN\\u200dTS.md"), ("docs/\u202e/", "docs/\\u202e/")):
+            err = self.declare([{"title": "A", "scope": "x", "files": [f]}], ok=False).stderr
+            self.assertIn(shown, err)
+            self.assertFalse(any(c in err for c in "\u200d\u202e"), err)
 
     def test_declared_joiner_files_pass_but_other_invisible_characters_and_directories_do_not(self):
         self.force("i1", "plan")

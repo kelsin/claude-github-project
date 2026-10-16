@@ -48,9 +48,9 @@ def plain_path(n):
 
 
 def nm(name):
-    """A file name as it appears in a reason: capped, then the PATH_OK characters written out (\\u200d), so the cut never lands inside an
+    """A file name as it appears in a reason: capped, then every unprintable character written out (\\u200d), so the cut never lands inside an
     escape and no invisible character is shown."""
-    return re.sub(f"[{PATH_OK}]", lambda m: f"\\u{ord(m[0]):04x}", str(name)[:80])
+    return re.sub(f"[{UNPRINTABLE}]", lambda m: f"\\u{ord(m[0]):04x}", str(name)[:80])
 
 
 def parse(value):
