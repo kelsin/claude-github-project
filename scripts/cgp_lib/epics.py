@@ -47,9 +47,11 @@ def read_specs(c, parent, raw, allowed=()):
         guarded = [g.lower() for g in merged_globs(c, "guardFiles", [s["repo"]])]
         for f in s["files"]:
             names = [f.rstrip("/")] + ([f + "_"] if f.endswith("/") else [])
-            hit = any(forbidden(guarded, n) for n in names)
-            if hit and not any(covers(t, f) for t in allowed):
-                die(f"sub-story {s['title']!r}: {f} is a guarded file; the plan's files (cgp touches) must list it")
+            why = next(((n, r) for n in names if (r := forbidden(guarded, n))), None)
+            if why and not any(covers(t, f) for t in allowed):
+                n, r = why
+                hint = "" if r.endswith("is not a plain file path") else "; the plan's files (cgp touches) must list it"
+                die(f"sub-story {s['title']!r}: {f}{r[len(n):]}{hint}")
     titles = [s["title"] for s in specs]
     if len(set(titles)) != len(titles):
         die("sub-story titles must be unique")
