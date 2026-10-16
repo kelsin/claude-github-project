@@ -21,6 +21,7 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `wait` | `--timeout` `--interval` | Poll until a story becomes actionable, a worker is released, all is Done, or the timeout passes; `reason` in the result says which (stop, done, actionable, released, timeout) |
 | `approve` | `item` | Approve the gate the story waits at (plan_review or pr_review); only you, in a terminal |
 | `move` | `item` `column` | Move a story to a column (human gates enforced) |
+| `reevaluate` |  | Re-run the auto-approval policy for PR Review stories it refused and approve those that now qualify; only you, in a terminal |
 | `set` | `item` `field` `value` | Set the plan or pr field of a story |
 | `preview` | `item` | Copy the deploy preview URL from the story's PR into the Preview field |
 | `comment` | `item` `--pr` | Comment on the story (or its PR with --pr); body on stdin |

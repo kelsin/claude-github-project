@@ -23,7 +23,7 @@ from .stack import cmd_stack
 from .spec import cmd_spec
 from .stats import cmd_stats
 from .session import cmd_release, cmd_session_title, cmd_stop, cmd_use, cmd_worker
-from .story import (cmd_answers, cmd_approve, cmd_ask, cmd_comment, cmd_feedback, cmd_move, cmd_prepare, cmd_preview, cmd_set)
+from .story import (cmd_answers, cmd_approve, cmd_ask, cmd_comment, cmd_feedback, cmd_move, cmd_prepare, cmd_preview, cmd_reevaluate, cmd_set)
 from .util import die
 
 A = lambda *names, **kw: (names, kw)  # one add_argument call
@@ -54,6 +54,7 @@ COMMANDS = [
         A("--timeout", type=int, default=540), A("--interval", type=int, default=0)]),
     ("approve", cmd_approve, "Approve the gate the story waits at (plan_review or pr_review); only you, in a terminal", [A("item")]),
     ("move", cmd_move, "Move a story to a column (human gates enforced)", [A("item"), A("column")]),
+    ("reevaluate", cmd_reevaluate, "Re-run the auto-approval policy for PR Review stories it refused and approve those that now qualify; only you, in a terminal", []),
     ("set", cmd_set, "Set the plan or pr field of a story", [A("item"), A("field"), A("value")]),
     ("preview", cmd_preview, "Copy the deploy preview URL from the story's PR into the Preview field", [A("item")]),
     ("comment", cmd_comment, "Comment on the story (or its PR with --pr); body on stdin", [A("item"), A("--pr", action="store_true")]),
