@@ -415,7 +415,7 @@ def snapshot(c):
         d["parents"] = {k: v for k, v in d.get("parents", {}).items() if k in live_ids}
         d["epicAsked"] = {k: v for k, v in d.get("epicAsked", {}).items() if k in live_ids}
         d["policyPlans"] = [i for i in d.get("policyPlans", []) if i in live_ids and by_id[i]["column"] not in ("todo", "plan", "plan_review")]
-        for k in ("reviewed", "cleanRebase", "asked", "ratings", "policy"):
+        for k in ("reviewed", "cleanRebase", "asked", "ratings", "policy", "policyRefusal"):
             d[k] = {i: v for i, v in d.get(k, {}).items() if i in live_ids or (k == "ratings" and i in created)}
         d["tainted"] = [i for i in d.get("tainted", []) if i in live_ids]
         live_prs = {f"{r[0]}#{r[1]}" for r in (parse_pr_ref(c, i.get("pr")) for i in live) if r}

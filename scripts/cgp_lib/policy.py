@@ -6,6 +6,7 @@ import functools
 import os
 import re
 import sys
+from .consts import MARK
 from .util import covers, die, norm_path, now_iso, out
 from .gh import rest
 from .models import RATINGS
@@ -24,6 +25,12 @@ ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKI
                "docs/conf.py", "docs/_config.yml", "docs/package.json", "**/.vitepress/**", "**/.docusaurus/**", ".readthedocs.y*ml",
                "**/CLAUDE*.md", "**/GEMINI.md", ".cursor/**", ".windsurf/**", ".agents/**", "**/.claude/**", "**/*.mdc", "**/CONTRIBUTING.md",
                ".github/**", ".cgp-rules.md"]
+
+
+def sanitize(text, cap=300):
+    """A reason can name files of a PR, which anyone can write: one line, no control or bidi characters, backticks or live @mentions."""
+    t = re.sub(r"[\s\x00-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069]+", " ", str(text or "").replace("@\u200b", "@")).replace("`", "").strip()  # (undoing our own mark keeps this idempotent)
+    return t.replace("@", "@\u200b")[:cap]
 
 
 def parse(value):
@@ -121,7 +128,12 @@ def evaluate(c, it, gate, author_trusted):
         level = "never"
     if level == "never":
         return None
-    no = lambda why: {"approved": False, "reason": why}
+    no = lambda why: {"approved": False, "reason": sanitize(why)}
+    src = {"plan_approved": "plan", "pr_approved": "implement"}[gate]  # a human gate can be passed for the agent only from the column before it
+    if it["column"] != src:
+        return no(f"the story is not in {src.capitalize()}")
+    if gate == "pr_approved" and not parse_pr_ref(c, it["pr"]):
+        return no("the story has no PR link")
     data = load_data()
     item, repo, rating = it["item"], it["issueRepo"], current_rating(data, it)
     if it["kind"] != "issue":
@@ -195,11 +207,29 @@ def record_decision(it, gate, verdict):
     in the same locked update, so the files evaluated are the files approved."""
     def upd(d):
         d.setdefault("policy", {})[it["item"]] = {"gate": gate, "at": now_iso(), **public(verdict)}
+        d.get("policyRefusal", {}).pop(it["item"], None)
         if verdict["approved"] and "touches" in verdict:
             d.setdefault("approvedTouches", {})[it["item"]] = list(verdict["touches"])
             if it["item"] not in d.setdefault("policyPlans", []):  # sub-stories are only created from a plan a person approved (epics.cmd_split)
                 d["policyPlans"].append(it["item"])
     update_data(upd)
+
+
+def record_refusal(it, gate, reason, post):
+    """Store why the policy did not approve the story (apart from `policy`, which holds approvals). `post(text)` comments on the story,
+    in the same locked update and only when the gate or reason differs from the last stored refusal; the record is kept only when the
+    post succeeds. True when a comment was posted."""
+    posted = []
+
+    def upd(d):
+        old = (d.get("policyRefusal") or {}).get(it["item"]) or {}
+        if (old.get("gate"), old.get("reason")) != (gate, reason):
+            label = "plan" if GATE_KEYS[gate] == "plan" else "PR"
+            post(f"{MARK}\nNot auto-approved by the policy ({label}): {sanitize(reason)}")
+            d.setdefault("policyRefusal", {})[it["item"]] = {"gate": gate, "at": now_iso(), "approved": False, "reason": reason}
+            posted.append(1)
+    update_data(upd)
+    return bool(posted)
 
 
 def cmd_rate(a):
