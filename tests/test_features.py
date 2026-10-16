@@ -702,9 +702,12 @@ class TestPlanPolicy(PolicyBase):
         self.setting(autoApproveFiles=["**"])
         self.cgp("touches", "i1", "")
         self.refused("declares no files")
-        for path in ("docs/", "docs/../x.md", "/etc/x.md"):
+        for path in ("docs/", "docs/../x.md", "/etc/x.md", "docs/x\nCLAUDE.md", "a\nb.md", "docs/a\tb.md"):
             self.cgp("touches", "i1", path)
             self.refused("not a plain file path")
+        self.setting(autoApproveFiles=["*.md"])
+        self.cgp("touches", "i1", "x\nCLAUDE.md")
+        self.refused("not a plain file path")
 
     def test_hold_an_untrusted_author_and_the_wrong_column_veto_it(self):
         d = self.read_db(); d["items"][0]["values"]["Priority"] = {"optionId": "o_Hold"}; self.write_db(d)
@@ -949,6 +952,14 @@ class TestPRPolicy(PolicyBase):
         d = self.read_db(); d["items"][0]["values"]["Plan"] = {"text": "Skip"}; self.write_db(d)
         self.refused("Plan: Skip")
 
+    def test_control_characters_in_a_file_name_are_refused(self):
+        self.setting(autoApproveFiles=["**"])
+        self.set_data(approvedTouches={"i1": ["docs/x\nCLAUDE.md", "CLAUDE.md\n"]})
+        for files in ([{"filename": "docs/x\nCLAUDE.md"}], [{"filename": self.FILE, "status": "renamed", "previous_filename": "docs/x\nCLAUDE.md"}],
+                      [{"filename": "CLAUDE.md\n"}]):
+            self.db_set(pr_files={"acme/app#1": files})
+            self.refused("not a plain file path")
+
     def test_an_untrusted_author_is_refused(self):
         d = self.read_db(); d["issue_authors"] = {"acme/app#1": {"login": "mallory", "author_association": "NONE"}}; self.write_db(d)
         self.refused("not written by someone you trust")
@@ -1161,6 +1172,10 @@ class TestSubStories(PolicyBase):
         bad = [{"title": "CI", "scope": "x", "files": [".github/workflows/ci.yml"]}]
         self.assertIn("guarded", self.declare(bad, ok=False).stderr)
         self.assertIn("guarded", self.declare([{"title": "A", "scope": "x", "files": ["CLAUDE.md"]}], ok=False).stderr)
+        odd = [{"title": "A", "scope": "x", "files": ["docs/x\nCLAUDE.md"]}]
+        self.assertIn("control characters", self.declare(odd, ok=False).stderr)
+        self.cgp("touches", "i1", "docs/x\nCLAUDE.md")  # listing it in the plan does not help
+        self.assertIn("control characters", self.declare(odd, ok=False).stderr)
         self.cgp("touches", "i1", ".github/workflows/ci.yml")
         self.declare(bad)
 
