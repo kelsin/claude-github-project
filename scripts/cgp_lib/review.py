@@ -13,7 +13,7 @@ from .gh import gh
 from .store import cfg, load_data
 from .board import fetch_items, parse_item, parse_pr_ref
 from .notify import REVIEW
-from .policy import current_rating
+from .policy import current_rating, sanitize
 from .pr import ci_state, pr_checks
 
 PR_TIMEOUT = 10  # seconds to wait for one PR's gh calls; a slow or failing gh gives null PR facts
@@ -61,8 +61,9 @@ def collect(c):
         hours = int(age_seconds(since) // 3600) if since else None
         row = {"title": it["title"], "url": it["url"], "column": it["column"], "waitingSince": since, "waitingHours": hours,
                "approximate": approx, "rating": rating, "files": files, "diff": facts["diff"], "ci": facts["ci"],
-               "preview": it["preview"], "pr": it["pr"], "plan": it["plan"]}
-        row["packet"] = {k: row[k] for k in ("plan", "pr", "preview", "ci", "diff", "files", "rating")}
+               "preview": it["preview"], "pr": it["pr"], "plan": it["plan"],
+               "refusal": sanitize(((data.get("policyRefusal") or {}).get(it["item"]) or {}).get("reason")) or None}
+        row["packet"] = {k: row[k] for k in ("plan", "pr", "preview", "ci", "diff", "files", "rating", "refusal")}
         d = facts["diff"]
         size = (d.get("additions") or 0) + (d.get("deletions") or 0) if d else None
         rows.append(((approx, -(hours or 0), size is None, size or 0, n), row))
@@ -99,9 +100,10 @@ def render_html(c, rows):
         for url, label in ((r["plan"], "Plan"), (r["pr"], "PR"), (r["preview"], "Preview")):
             if url:
                 links.append(link(url, label))
+        why = f'<br><small>not auto-approved: {esc(r["refusal"])}</small>' if r["refusal"] else ""
         body.append(
             f'<tr><td data-l="Waiting" class="{tone(r["waitingHours"])}">{age_text(r["waitingHours"])}{"~" if r["approximate"] else ""}</td>'
-            f'<td data-l="Story">{link(r["url"], r["title"])}<br><small>{esc(r["column"])}</small></td>'
+            f'<td data-l="Story">{link(r["url"], r["title"])}<br><small>{esc(r["column"])}</small>{why}</td>'
             f'<td data-l="Size">{size}</td><td data-l="Rating">{esc(r["rating"] or "")}</td>'
             f'<td data-l="CI">{esc(r["ci"] or "")}</td><td data-l="Links">{" &middot; ".join(links)}</td></tr>')
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
