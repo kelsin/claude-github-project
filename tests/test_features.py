@@ -1132,9 +1132,9 @@ class TestReevaluate(PolicyBase):
     def column(self, item="i1"):
         return next(i["column"] for i in self.cgp("list")["items"] if i["item"] == item)
 
-    def sweep(self, **kw):
+    def sweep(self, expect=0, **kw):
         p = self.tty("reevaluate", **kw)
-        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.returncode, expect, p.stderr)
         return json.loads(p.stdout)
 
     def refusals(self):
@@ -1215,7 +1215,7 @@ class TestReevaluate(PolicyBase):
             self.assertIn("only be run by you", p.stderr)
         self.assertEqual(self.column(), "pr_review")
 
-    def test_one_story_failing_is_reported_and_the_others_still_go(self):
+    def two_stories(self):
         self.fix()
         self.db_set(prs={"acme/app#1": self.view(), "acme/app#2": self.view(headRefName="cgp/2")}, pr_files={"acme/app#1": [self.FILE], "acme/app#2": [self.FILE]})
         self.cgp("set", "i2", "pr", "https://github.com/acme/app/pull/2")
@@ -1224,11 +1224,23 @@ class TestReevaluate(PolicyBase):
         self.force("i2", "pr_review")
         self.set_data(approvedTouches={"i1": [self.FILE], "i2": [self.FILE]}, policyRefusal={
             **self.data()["policyRefusal"], "i2": {"gate": "pr_approved", "at": "2026-01-01T00:00:00Z", "approved": False, "reason": "x"}})
+
+    def test_one_story_failing_is_reported_and_the_others_still_go(self):
+        self.two_stories()
         self.db_set(failures=[{"match": "i2", "stderr": "HTTP 502", "times": 99}])  # moving i2 fails
-        r = self.sweep()
+        r = self.sweep(expect=1)
         self.assertEqual((r["checked"], r["approved"], [e["item"] for e in r["errors"]]), (2, ["i1"], ["i2"]))
         self.assertIn("502", r["errors"][0]["error"])
         self.assertEqual(self.column("i1"), "pr_approved")
+
+    def test_a_rate_limit_stops_the_sweep(self):
+        self.two_stories()
+        before = len(self.refusals())
+        self.db_set(failures=[{"match": "i1", "stderr": "API rate limit exceeded", "times": 99}])
+        r = self.sweep(expect=1)
+        self.assertEqual((r["stopped"], r["checked"], [e["item"] for e in r["errors"]]), ("rate limited", 1, ["i1"]))
+        self.assertEqual(self.column("i2"), "pr_review")
+        self.assertEqual(len(self.refusals()), before)
 
     def test_the_policy_is_evaluated_once_per_story(self):
         self.force("i1", "implement")
