@@ -73,6 +73,15 @@ Globs are matched per path segment, not with `fnmatch`: `*.md` matches `README.m
 | U+FE00-FE0F variation selectors | invisible after the base character; a bare emoji works without them |
 | U+115F, U+1160 Hangul fillers | fillers; never produced by composing or decomposing real syllables |
 | U+3164, U+FFA0 Hangul fillers | blank glyphs, not White_Space |
+| U+034F combining grapheme joiner | renders as nothing; only changes how text is split into grapheme clusters |
+| U+061C Arabic letter mark | invisible bidi mark, same class as U+200E and U+200F |
+| U+180E Mongolian vowel separator | invisible; no longer a space, still renders as nothing |
+| U+2061-2064 invisible operators | zero-width math operators, same class as U+2060 |
+| U+17B4, U+17B5 Khmer inherent vowels | invisible vowel marks with no glyph |
+| U+E0000-E007F tag characters | invisible; used to hide text inside a name |
+| U+E0100-E01EF variation selectors supplement | invisible after the base character, same class as U+FE00-FE0F |
+
+Characters above U+FFFF are shown in a reason as `\U000e0001` (8 hex digits).
 
 `cgp reevaluate` re-runs the policy for the PR Review stories it refused (those with a stored PR-gate `policyRefusal`) and approves the ones that now qualify, through the same path as `cgp move <item> pr_review`: the approval is recorded at the commit that was checked and clears the refusal. A story that fails is listed under `errors` and the command exits 1; a rate limit stops the sweep (`stopped`), leaving the remaining stories for the next run. It never approves through the `Auto Approve` field, posts nothing new for a refusal whose reason is unchanged, and leaves stories without a refusal, a policy that is off for the gate, and all of Plan Review alone. When the PR head moved since the refusal, the new head is recorded as reviewed and exactly one new refusal comment is posted. It runs only when invoked, and only by you: like `cgp approve`, it refuses inside a Claude session or without a terminal.
 
