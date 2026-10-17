@@ -1704,6 +1704,15 @@ class TestFewerQuestionsText(unittest.TestCase):
         self.assertIn("**Questions:**", s)
         self.assertIn("confidence", s)
 
+    def test_open_questions_do_not_block_auto_approve_and_duplicate_wording_matches(self):
+        plan = test_cgp.read_text("skills", "run", "columns", "plan.md")
+        self.assertNotIn("Open questions and `CGP ask`", plan)
+        self.assertNotIn("If the plan has Open questions, do not auto-approve", plan)
+        phrase = "a likely duplicate of an open issue"
+        self.assertIn(phrase, test_cgp.read_text("skills", "run", "columns", "todo.md"))
+        self.assertIn(phrase, test_cgp.read_text("skills", "run", "columns", "shared.md"))
+        self.assertIn(phrase, test_cgp.read_text("docs", "workflow.md"))
+
     def test_plan_artifact_has_questions_and_answers(self):
         self.assertIn("Questions and answers", test_cgp.read_text("skills", "run", "columns", "plan_artifact.md"))
 
