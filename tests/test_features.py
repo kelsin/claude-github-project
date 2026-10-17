@@ -1692,6 +1692,41 @@ class TestMandatorySubagents(unittest.TestCase):
             self.assertIn("at least one", test_cgp.read_text("skills", "run", "columns", name))
 
 
+class TestFewerQuestionsText(unittest.TestCase):
+    def test_ready_check_does_not_ask(self):
+        s = test_cgp.read_text("skills", "run", "columns", "todo.md")
+        self.assertIn("Ready check", s)
+        self.assertIn("CGP comment", s)
+        self.assertNotIn("Question for you", s)
+
+    def test_plan_researches_questions(self):
+        s = test_cgp.read_text("skills", "run", "columns", "plan.md")
+        self.assertIn("**Questions:**", s)
+        self.assertIn("confidence", s)
+
+    def test_open_questions_do_not_block_auto_approve_and_duplicate_wording_matches(self):
+        plan = test_cgp.read_text("skills", "run", "columns", "plan.md")
+        self.assertNotIn("Open questions and `CGP ask`", plan)
+        self.assertNotIn("If the plan has Open questions, do not auto-approve", plan)
+        phrase = "a likely duplicate of an open issue"
+        self.assertIn(phrase, test_cgp.read_text("skills", "run", "columns", "todo.md"))
+        self.assertIn(phrase, test_cgp.read_text("skills", "run", "columns", "shared.md"))
+        self.assertIn(phrase, test_cgp.read_text("docs", "workflow.md"))
+
+    def test_plan_artifact_has_questions_and_answers(self):
+        self.assertIn("Questions and answers", test_cgp.read_text("skills", "run", "columns", "plan_artifact.md"))
+
+    def test_shared_rule_3_asks_for_real_blockers_only(self):
+        s = test_cgp.read_text("skills", "run", "columns", "shared.md")
+        self.assertIn("Ask only for real blockers", s)
+        self.assertIn("3 rounds of questions", s)
+
+    def test_workflow_drops_old_ready_check_sentence(self):
+        s = test_cgp.read_text("docs", "workflow.md")
+        self.assertNotIn("asks, at most once per story", s)
+        self.assertIn("Questions and answers", s)
+
+
 class TestResumableWorkersText(unittest.TestCase):
     def test_run_skill_resumes_with_send_message_and_falls_back_cold(self):
         s = test_cgp.read_text("skills", "run", "SKILL.md")
