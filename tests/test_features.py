@@ -745,13 +745,27 @@ class TestPlanPolicy(PolicyBase):
 
     def test_more_invisible_characters_in_a_name_or_directory_are_refused(self):
         self.setting(autoApproveFiles=["**"])
-        for ch in ("\u00ad", "\u2060", "\ufe0f", "\ufe00", "\u115f", "\u1160", "\u3164", "\uffa0", "\u034f", "\u061c", "\u17b4", "\u17b5", "\u180e", "\u2061", "\u2064", "\U000e0000", "\U000e0001", "\U000e007f", "\U000e0100", "\U000e01ef"):
+        for ch in ("\u00ad", "\u2060", "\ufe0f", "\ufe00", "\u115f", "\u1160", "\u3164", "\uffa0", "\u034f", "\u061c", "\u17b4", "\u17b5", "\u180e", "\u2061", "\u2064", "\U000e0000", "\U000e0001", "\U000e007f", "\U000e0100", "\U000e01ef",
+                   "\u206a", "\u206f", "\u180b", "\u180d", "\u180f", "\ufff9", "\ufffb", "\U0001d173", "\U0001d17a", "\U0001bca0", "\U0001bca3", "\U00013430", "\U0001343f"):
             for name in ("docs/a%sb.md" % ch, "do%scs/a.md" % ch, "dir%s/" % ch):
                 self.cgp("touches", "i1", name)
                 self.refused("not a plain file path")
         for name in ("AGEN\u00adTS.md", ".husky/pre\u2060-commit"):
             self.cgp("touches", "i1", name)
             self.refused("not a plain")
+
+    def test_a_mongolian_selector_is_allowed_only_in_a_file_name_directly_after_a_mongolian_letter(self):
+        self.setting(autoApproveFiles=["**"])
+        for name in ("docs/\u1820\u180b.md", "docs/a\u1820\u180db.md", "docs/\u1800\u180f.md", "docs/\u180a\u180b.md", "docs/\u1810\u180c.md", "docs/\u18af\u180b.md"):
+            self.cgp("touches", "i1", name)
+            self.assertEqual(self.verdict("plan_review")[0], "plan_approved", name)
+            self.force("i1", "plan")
+        for name in ("docs/\u180bx.md", "docs/a\u180b.md", "docs/\u1820\u180b\u180c.md", "docs/\u1820\u180e\u180b.md", "docs/\u1820\u200d\u180b.md",
+                     "do\u1820\u180bcs/a.md", "docs/\u17ff\u180b.md", "docs/\u18b0\u180b.md", "AGEN\u180bTS.md", "\u1820\u180b/a.md"):
+            self.cgp("touches", "i1", name)
+            self.refused("not a plain file path")
+        self.cgp("touches", "i1", "dir\u1820\u180b/")
+        self.refused("not a plain file path")
 
     def test_more_invisible_characters_are_escaped_and_sanitized(self):
         test_cgp.load_cgp()
@@ -763,8 +777,17 @@ class TestPlanPolicy(PolicyBase):
         self.assertEqual(pol.nm("a\U000e0001"), "a\\U000e0001")
         self.assertEqual(pol.nm("\U000e0000\U000e007f\U000e0100\U000e01ef"), "\\U000e0000\\U000e007f\\U000e0100\\U000e01ef")
         self.assertEqual(pol.sanitize("a\U000e0001b\u034fc\u180ed"), "a b c d")
-        for ch in ("\u2061", "\u2062", "\u2063", "\u2064", "\U000e0000", "\U000e007f", "\U000e0100", "\U000e01ef"):
+        self.assertEqual(pol.nm("a\u206a\u206f\u180b\u180f\ufff9\ufffb"), "a\\u206a\\u206f\\u180b\\u180f\\ufff9\\ufffb")
+        self.assertEqual(pol.nm("\U0001d173\U0001d17a\U0001bca0\U0001bca3\U00013430\U0001343f"), "\\U0001d173\\U0001d17a\\U0001bca0\\U0001bca3\\U00013430\\U0001343f")
+        self.assertEqual(pol.sanitize("a\u206ab\ufff9c\U0001d173d\u180be"), "a b c d e")
+        for ch in ("\u2061", "\u2062", "\u2063", "\u2064", "\U000e0000", "\U000e007f", "\U000e0100", "\U000e01ef", "\u206a", "\u206f", "\ufff9", "\ufffb",
+                   "\U0001d173", "\U0001d17a", "\U0001bca0", "\U0001bca3", "\U00013430", "\U0001343f", "\u180b", "\u180f"):
             self.assertFalse(pol.plain_path("a/b" + ch), ch)
+        self.assertTrue(pol.plain_path("a/\u1820\u180b"))
+        self.assertFalse(pol.plain_path("a\u1820\u180b/b"))
+        for ch in ("\u2070", "\ufff8", "\ufffc", "\U0001d172", "\U0001d17b", "\U0001bc9f", "\U0001bca4", "\U0001342f", "\U00013440", "\u180a", "\u1810"):
+            self.assertTrue(pol.plain_path("a/b" + ch), ch)
+            self.assertEqual(pol.nm("a" + ch), "a" + ch, ch)
         for ch in ("\U000dffff", "\U000e0080", "\U000e00ff", "\U000e01f0"):
             self.assertTrue(pol.plain_path("a" + ch), ch)
 
@@ -1118,7 +1141,9 @@ class TestPRPolicy(PolicyBase):
                           ("do\u200dcs/a.md", "not a plain"), ("docs/a\u202eb.md", "not a plain"), ("docs/.\u200d.", "not a plain"),
                           ("AGEN\u00adTS.md", "not a plain"), (".husky/pre\u2060-commit", "not a plain"), ("docs/a\ufe0fb.md", "not a plain"), ("docs/a\u3164b.md", "not a plain"),
                           ("docs/a\u034fb.md", "not a plain"), ("docs/a\u061cb.md", "not a plain"), ("docs/a\u180eb.md", "not a plain"), ("docs/a\u2062b.md", "not a plain"),
-                          ("docs/a\U000e0001b.md", "not a plain"), ("do\U000e0100cs/a.md", "not a plain")):
+                          ("docs/a\U000e0001b.md", "not a plain"), ("do\U000e0100cs/a.md", "not a plain"),
+                          ("docs/a\u206ab.md", "not a plain"), ("docs/a\ufff9b.md", "not a plain"), ("docs/a\U0001d173b.md", "not a plain"), ("docs/a\U00013430b.md", "not a plain"),
+                          ("docs/a\u180bb.md", "not a plain"), ("do\u1820\u180bcs/a.md", "not a plain"), ("docs/\u1820\u200d\u180b.md", "not a plain")):
             self.set_data(approvedTouches={"i1": [name]})
             self.db_set(pr_files={"acme/app#1": [name]})
             self.refused(why)
