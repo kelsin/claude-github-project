@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.10.0](https://github.com/kelsin/claude-github-project/compare/v0.9.0...v0.10.0) (2026-10-17)
+
+
+### :tada: Features
+
+* **defer:** review deferred items before filing them ([#144](https://github.com/kelsin/claude-github-project/issues/144)) ([0711fcf](https://github.com/kelsin/claude-github-project/commit/0711fcf7800c384e3057393760d9fe640f19befe))
+* **guard:** report unprintable lookalikes with a reason ([#157](https://github.com/kelsin/claude-github-project/issues/157)) ([fd32e0c](https://github.com/kelsin/claude-github-project/commit/fd32e0c52e8e7f66a232085cb97ea19b243ba517))
+* let a plan directory cover files the globs allow ([#129](https://github.com/kelsin/claude-github-project/issues/129)) ([7ac9e91](https://github.com/kelsin/claude-github-project/commit/7ac9e919102b4e5a80a547be31975c5cd851d70b))
+* **policy:** allow joiner and direction marks in file names for auto-approval ([#132](https://github.com/kelsin/claude-github-project/issues/132)) ([5d903ad](https://github.com/kelsin/claude-github-project/commit/5d903ad6546eed16c9aa3ec2c3f48b702748029e))
+* **policy:** allow ZWNJ in file names ([#140](https://github.com/kelsin/claude-github-project/issues/140)) ([39d8ed0](https://github.com/kelsin/claude-github-project/commit/39d8ed0bbedc1f55deff9d2fdad934259ca3b3c3))
+* **policy:** refuse remaining default-ignorable characters in file names ([#156](https://github.com/kelsin/claude-github-project/issues/156)) ([d60808b](https://github.com/kelsin/claude-github-project/commit/d60808b535f8bae95cb369b534592ab2ef8d6db9))
+* **reevaluate:** add cgp reevaluate sweep for PR Review stories ([#126](https://github.com/kelsin/claude-github-project/issues/126)) ([dd3b5d4](https://github.com/kelsin/claude-github-project/commit/dd3b5d4d40b671e4962a78396cd41df7363323ad))
+* **reevaluate:** pass through stderr of stories that succeed ([#139](https://github.com/kelsin/claude-github-project/issues/139)) ([39e0606](https://github.com/kelsin/claude-github-project/commit/39e0606930c01e2009a5619f779ba6abab1d5337))
+* **run:** research ready-check questions in plan instead of asking in todo ([#145](https://github.com/kelsin/claude-github-project/issues/145)) ([c44694c](https://github.com/kelsin/claude-github-project/commit/c44694c28a22227db3e6bbd8b1626819b2469a22))
+* **wait:** report why cgp wait returned ([#122](https://github.com/kelsin/claude-github-project/issues/122)) ([8c131cd](https://github.com/kelsin/claude-github-project/commit/8c131cdcca4ed4c8778989c6d73eb6f70cdd4a66))
+
+
+### :bug: Bug Fixes
+
+* **guard:** strip every unprintable character when matching guarded paths ([#151](https://github.com/kelsin/claude-github-project/issues/151)) ([1cea813](https://github.com/kelsin/claude-github-project/commit/1cea813d1d3caa60da4d7707aba0ac4fd7f79b43))
+* **policy:** re-raise RateLimited so a rate limit in policy evaluation stops the sweep ([#142](https://github.com/kelsin/claude-github-project/issues/142)) ([19f83d6](https://github.com/kelsin/claude-github-project/commit/19f83d693bce3403e8f1bb5e665234794b7ec688))
+* **policy:** record and post auto-approve refusals ([#118](https://github.com/kelsin/claude-github-project/issues/118)) ([d18fb93](https://github.com/kelsin/claude-github-project/commit/d18fb93f6e19af0c7078b47baa66c0c66f79ca63))
+* **policy:** refuse control characters in file names for auto-approval ([#123](https://github.com/kelsin/claude-github-project/issues/123)) ([ffb4ab4](https://github.com/kelsin/claude-github-project/commit/ffb4ab422396a1211d4339278299f944c93a016f))
+* **policy:** refuse more invisible characters in file names ([#146](https://github.com/kelsin/claude-github-project/issues/146)) ([dc20a14](https://github.com/kelsin/claude-github-project/commit/dc20a1471b9b12be8d5fbee9fb5a9a429e202ce4))
+* **policy:** refuse more invisible characters in file names ([#153](https://github.com/kelsin/claude-github-project/issues/153)) ([f9051bb](https://github.com/kelsin/claude-github-project/commit/f9051bbc6e45970d32221bac6ce929f92ccfa8ab))
+* re-raise rate limits from author_trusted and the stack gate read ([#149](https://github.com/kelsin/claude-github-project/issues/149)) ([fa54166](https://github.com/kelsin/claude-github-project/commit/fa54166a74d412b691b33476a53b2f7b346adb9e))
+* **reevaluate:** exit 1 when stories errored and stop on a rate limit ([#134](https://github.com/kelsin/claude-github-project/issues/134)) ([aaeed11](https://github.com/kelsin/claude-github-project/commit/aaeed110c63d30244d388a3d86fc0ff83e867583))
+* **split:** name the real reason in the guarded-file error ([#130](https://github.com/kelsin/claude-github-project/issues/130)) ([ad224ec](https://github.com/kelsin/claude-github-project/commit/ad224ecaf59d622c52eeac38760ef130a318d5f6))
+* **split:** refuse non-plain paths even when the plan lists them ([#138](https://github.com/kelsin/claude-github-project/issues/138)) ([23ed63c](https://github.com/kelsin/claude-github-project/commit/23ed63c0e941e003f4767240cb39e110db81ac59))
+* **trust:** a rate limit on the permission lookup raises instead of caching 'untrusted' ([#155](https://github.com/kelsin/claude-github-project/issues/155)) ([b8134b5](https://github.com/kelsin/claude-github-project/commit/b8134b5daabc21401a1b68de776645e8e603614c))
+
+
+### :book: Documentation
+
+* **run:** remove duplicated stopDrafts bullet ([#117](https://github.com/kelsin/claude-github-project/issues/117)) ([4cb35da](https://github.com/kelsin/claude-github-project/commit/4cb35da7363effd1255605fc5295c5fde5dde5d5))
+* **run:** tell the loop to wait again on an idle result ([#112](https://github.com/kelsin/claude-github-project/issues/112)) ([e5c86c0](https://github.com/kelsin/claude-github-project/commit/e5c86c051b8b7e9dee69164bd676dfc27b218091))
+
 ## [0.9.0](https://github.com/kelsin/claude-github-project/compare/v0.8.0...v0.9.0) (2026-10-13)
 
 
