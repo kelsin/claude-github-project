@@ -992,6 +992,28 @@ class TestTrust(Base):
         bodies = [f["body"] for f in self.cgp("feedback", "i1")["comments"]]
         self.assertEqual(bodies, ["alice says"])
 
+    def test_a_rate_limit_on_the_permission_lookup_hides_nothing(self):
+        self.setup_board()
+        d = self.read_db(); d["perms"] = {"alice": "write"}; self.write_db(d)
+        self.stranger("alice says", "2026-01-01T00:03:00Z", "COLLABORATOR", "alice")
+        self.db_set(failures=[{"match": "collaborators/alice/permission", "times": 99, "stderr": "gh: HTTP 429: API rate limit exceeded"}])
+        for cmd in ("feedback", "answers"):
+            self.assertNotEqual(self.cgp(cmd, "i1", ok=False).returncode, 0, cmd)
+        self.db_set(failures=[])
+        fb = self.cgp("feedback", "i1")
+        self.assertEqual([f["body"] for f in fb["comments"]], ["alice says"])
+        self.assertEqual(fb["ignoredUntrusted"], [])
+
+    def test_a_rate_limit_during_prepare_does_not_advance_the_feedback_cursor(self):
+        self.setup_board()
+        d = self.read_db(); d["perms"] = {"alice": "write"}; self.write_db(d)
+        self.stranger("alice says", "2026-01-01T00:03:00Z", "COLLABORATOR", "alice")
+        self.db_set(failures=[{"match": "collaborators/alice/permission", "times": 99, "stderr": "gh: HTTP 429: API rate limit exceeded"}])
+        self.cgp("prepare", "i1")
+        self.db_set(failures=[])
+        self.cgp("comment", "i1", input="status: working")
+        self.assertEqual([f["body"] for f in self.cgp("feedback", "i1")["comments"]], ["alice says"])
+
     def test_spoofed_agent_marker_does_not_hide_real_feedback(self):
         self.setup_board()
         d = self.read_db()

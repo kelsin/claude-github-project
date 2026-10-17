@@ -500,7 +500,6 @@ def cmd_feedback(a):
 
     def pend(st):
         st.setdefault("pending", {})[a.item] = max(seen, cursor)
-    update_data(pend)
     found, ignored = [], []
     for w, cms in sources:
         for cm in cms:
@@ -512,6 +511,7 @@ def cmd_feedback(a):
                 found.append({**row, "body": cm.get("body")})
             else:
                 ignored.append(row)  # no body: text from people without write access is never shown to agents
+    update_data(pend)
     out({"comments": sorted(found, key=lambda f: f["at"]), "ignoredUntrusted": ignored})
 
 

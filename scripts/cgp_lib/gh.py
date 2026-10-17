@@ -108,7 +108,8 @@ def is_agent(comment):
 
 
 def trusted(repo, comment):
-    """Only the gh account itself, repo owners and collaborators with write access may give instructions."""
+    """Only the gh account itself, repo owners and collaborators with write access may give instructions. A rate limit on the permission lookup raises RateLimited and is not
+    cached (a cached "no" would hide real comments for the rest of the run); a 404 or unreadable answer is cached as untrusted."""
     login = (comment.get("user") or {}).get("login")
     assoc = comment.get("author_association")
     if not login:
@@ -120,6 +121,8 @@ def trusted(repo, comment):
     key = ("perm", repo, login)
     if key not in _cache:
         p = gh("api", f"repos/{repo}/collaborators/{login}/permission", check=False)
+        if p.returncode and RATE_LIMIT.search(p.stderr or ""):
+            fail(f"gh api repos/{repo}/collaborators/{login}/permission failed: {(p.stderr or p.stdout).strip()}", p.stderr)
         try:
             _cache[key] = p.returncode == 0 and json.loads(p.stdout).get("permission") in ("admin", "maintain", "write")
         except json.JSONDecodeError:
