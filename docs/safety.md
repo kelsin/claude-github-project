@@ -71,7 +71,7 @@ Globs are matched per path segment, not with `fnmatch`: `*.md` matches `README.m
 | U+00AD soft hyphen | renders as nothing, only hyphenation hints |
 | U+2060 word joiner | zero-width lookalike, same class as U+200B and U+FEFF |
 | U+FE00-FE0F variation selectors | invisible after the base character; a bare emoji works without them |
-| U+115F, U+1160 Hangul fillers | jamo composition only; real Korean names are precomposed |
+| U+115F, U+1160 Hangul fillers | fillers; never produced by composing or decomposing real syllables |
 | U+3164, U+FFA0 Hangul fillers | blank glyphs, not White_Space |
 
 `cgp reevaluate` re-runs the policy for the PR Review stories it refused (those with a stored PR-gate `policyRefusal`) and approves the ones that now qualify, through the same path as `cgp move <item> pr_review`: the approval is recorded at the commit that was checked and clears the refusal. A story that fails is listed under `errors` and the command exits 1; a rate limit stops the sweep (`stopped`), leaving the remaining stories for the next run. It never approves through the `Auto Approve` field, posts nothing new for a refusal whose reason is unchanged, and leaves stories without a refusal, a policy that is off for the gate, and all of Plan Review alone. When the PR head moved since the refusal, the new head is recorded as reviewed and exactly one new refusal comment is posted. It runs only when invoked, and only by you: like `cgp approve`, it refuses inside a Claude session or without a terminal.
