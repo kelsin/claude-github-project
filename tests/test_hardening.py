@@ -277,6 +277,7 @@ class TestSyncRecords(test_cgp.SyncBase):
         p = self.cgp("guard", "i1", ok=False)
         self.assertEqual(p.returncode, 4)
         self.assertEqual(json.loads(p.stdout)["violations"], [".npmrc"])
+        self.assertEqual(json.loads(p.stdout)["reasons"], {})
         self.cgp("touches", "i1", ".npmrc")
         self.assertTrue(self.cgp("guard", "i1")["ok"])
         self.cgp("touches", "i1", "")
@@ -304,8 +305,23 @@ class TestSyncRecords(test_cgp.SyncBase):
         self.commit("Make\u200dfile")
         self.commit(".husky/pre\u200c-commit")
         self.commit("Make\u200cfile")
-        self.assertEqual(sorted(json.loads(self.cgp("guard", "i1", ok=False).stdout)["violations"]),
-                         sorted([".husky/pre\u200d-commit", "Make\u200dfile", ".husky/pre\u200c-commit", "Make\u200cfile"]))
+        r = json.loads(self.cgp("guard", "i1", ok=False).stdout)
+        self.assertEqual(sorted(r["violations"]), sorted([".husky/pre\u200d-commit", "Make\u200dfile", ".husky/pre\u200c-commit", "Make\u200cfile"]))
+        self.assertEqual(r["reasons"], {})  # a joiner in a file name is a plain path
+
+    def test_guard_reports_a_joiner_in_a_directory_segment(self):
+        os.makedirs(os.path.join(self.wt, ".hus\u200dky"))
+        self.commit(".hus\u200dky/pre-commit")
+        r = json.loads(self.cgp("guard", "i1", ok=False).stdout)
+        n = ".hus\u200dky/pre-commit"
+        self.assertEqual((r["violations"], r["reasons"]), ([n], {n: f"{n} is not a plain file path"}))
+
+    def test_guard_reports_an_invisible_directory_with_a_guarded_basename(self):
+        os.makedirs(os.path.join(self.wt, "a\u00ad"))
+        self.commit("a\u00ad/.npmrc")
+        r = json.loads(self.cgp("guard", "i1", ok=False).stdout)
+        n = "a\u00ad/.npmrc"
+        self.assertEqual((r["violations"], r["reasons"]), ([n], {n: f"{n} is not a plain file path"}))
 
     def test_guard_catches_any_unprintable_lookalike_of_a_guarded_name(self):
         want = []
@@ -316,8 +332,9 @@ class TestSyncRecords(test_cgp.SyncBase):
                 want.append(n)
             os.makedirs(os.path.join(self.wt, "docs"), exist_ok=True)
             self.commit(f"docs/ok{ch}.md")
-        got = json.loads(self.cgp("guard", "i1", ok=False).stdout)["violations"]
-        self.assertEqual(sorted(got), sorted(want))
+        r = json.loads(self.cgp("guard", "i1", ok=False).stdout)
+        self.assertEqual(sorted(r["violations"]), sorted(want))
+        self.assertEqual(r["reasons"], {n: f"{n} is not a plain file path" for n in want})  # docs/ok<ch>.md is neither
 
     def test_guard_allows_only_the_touches_declared_at_approval(self):
         self.commit(".npmrc", "x\n")

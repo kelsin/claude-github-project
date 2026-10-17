@@ -11,7 +11,7 @@ from .store import cfg, load_data, update_data
 from .board import issue_item, known_repo, parse_pr_ref
 from .gitutil import default_ref, fetch, git, resolve_repo_path, wt_path
 from .repoconf import merged_globs
-from .policy import names as path_names
+from .policy import names as path_names, plain_path
 from .pr import allow_head, cancel_auto_merge, forget_review, is_approved_head, pr_view
 from .gh import gh
 from .stack import blocker_ref, pr_files
@@ -325,7 +325,7 @@ def cmd_guard(a):
     guarded = [g.lower() for g in merged_globs(c, "guardFiles", [it["issueRepo"]])]
     bad = [n for n in names if any(fnmatch.fnmatchcase(x.lower(), g) for g in guarded for y in path_names(n) for x in (y, os.path.basename(y)))
            and not any(covers(t, n) for t in allowed)]
-    out({"ok": not bad, "violations": bad})
+    out({"ok": not bad, "violations": bad, "reasons": {n: f"{n} is not a plain file path" for n in bad if not plain_path(n)}})
     if bad:
         sys.exit(4)
 
