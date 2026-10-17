@@ -1127,6 +1127,13 @@ class TestPRPolicy(PolicyBase):
             self.db_set(pr_files={"acme/app#1": files})
             self.refused("not a plain file path")
 
+    def test_a_lookalike_of_a_guarded_file_is_refused_as_not_a_plain_path(self):
+        self.setting(autoApproveFiles=["**"])
+        for name in (".np\u00admrc", ".hus\u200bky/pre-commit"):
+            self.set_data(approvedTouches={"i1": [name]})
+            self.db_set(pr_files={"acme/app#1": [name]})
+            self.refused("is not a plain file path")
+
     def test_joiner_and_direction_mark_names_are_approved_inside_the_globs_and_plan(self):
         for name in ("docs/a\u200db.md", "docs/\u200fb.md", "docs/a\u200cb.md"):
             self.set_data(approvedTouches={"i1": [name]})
@@ -1659,6 +1666,11 @@ class TestSubStories(PolicyBase):
             err = self.declare([{"title": "A", "scope": "x", "files": [f]}], ok=False).stderr
             self.assertIn(shown, err)
             self.assertFalse(any(c in err for c in "\u200d\u202e"), err)
+
+    def test_declare_refuses_an_invisible_lookalike_of_a_guarded_file(self):
+        self.force("i1", "plan")
+        err = self.declare([{"title": "A", "scope": "x", "files": ["CODE\ufeffOWNERS"]}], ok=False).stderr
+        self.assertIn("control characters", err)
 
     def test_declared_joiner_files_pass_but_other_invisible_characters_and_directories_do_not(self):
         self.force("i1", "plan")
