@@ -743,6 +743,23 @@ class TestPlanPolicy(PolicyBase):
         self.assertIn("src/a\\u200d\\u200fb.py is outside autoApproveFiles", reason)
         self.assertFalse(any(ch in reason for ch in "\u200d\u200e\u200f\u202e"))
 
+    def test_more_invisible_characters_in_a_name_or_directory_are_refused(self):
+        self.setting(autoApproveFiles=["**"])
+        for ch in ("\u00ad", "\u2060", "\ufe0f", "\ufe00", "\u115f", "\u1160", "\u3164", "\uffa0"):
+            for name in ("docs/a%sb.md" % ch, "do%scs/a.md" % ch, "dir%s/" % ch):
+                self.cgp("touches", "i1", name)
+                self.refused("not a plain file path")
+        for name in ("AGEN\u00adTS.md", ".husky/pre\u2060-commit"):
+            self.cgp("touches", "i1", name)
+            self.refused("not a plain")
+
+    def test_more_invisible_characters_are_escaped_and_sanitized(self):
+        test_cgp.load_cgp()
+        pol = importlib.import_module("cgp_lib.policy")
+        self.assertEqual(pol.nm("a\u00ad"), "a\\u00ad")
+        self.assertEqual(pol.nm("a\ufe0f\u3164\uffa0\u2060\u115f\u1160"), "a\\ufe0f\\u3164\\uffa0\\u2060\\u115f\\u1160")
+        self.assertEqual(pol.sanitize("a\u00adb\u3164c\ufe0fd"), "a b c d")
+
     def test_a_joiner_directory_touch_stays_strict(self):
         self.setting(autoApproveFiles=["**"])
         for name in ("dir\u200d/", "dir\u200c/", "do\u200ccs/a.md"):
@@ -1081,7 +1098,8 @@ class TestPRPolicy(PolicyBase):
     def test_pr_lookalikes_and_odd_names_are_refused(self):
         self.setting(autoApproveFiles=["**"])
         for name, why in (("AGEN\u200dTS.md", "never auto-approved"), (".husky/pre\u200d-commit", "guarded file"), ("docs/a\u200bb.md", "not a plain"),
-                          ("do\u200dcs/a.md", "not a plain"), ("docs/a\u202eb.md", "not a plain"), ("docs/.\u200d.", "not a plain")):
+                          ("do\u200dcs/a.md", "not a plain"), ("docs/a\u202eb.md", "not a plain"), ("docs/.\u200d.", "not a plain"),
+                          ("AGEN\u00adTS.md", "not a plain"), (".husky/pre\u2060-commit", "not a plain"), ("docs/a\ufe0fb.md", "not a plain"), ("docs/a\u3164b.md", "not a plain")):
             self.set_data(approvedTouches={"i1": [name]})
             self.db_set(pr_files={"acme/app#1": [name]})
             self.refused(why)

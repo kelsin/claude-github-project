@@ -25,7 +25,7 @@ ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKI
                "docs/conf.py", "docs/_config.yml", "docs/package.json", "**/.vitepress/**", "**/.docusaurus/**", ".readthedocs.y*ml",
                "**/CLAUDE*.md", "**/GEMINI.md", ".cursor/**", ".windsurf/**", ".agents/**", "**/.claude/**", "**/*.mdc", "**/CONTRIBUTING.md",
                ".github/**", ".cgp-rules.md"]
-UNPRINTABLE = "\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff"  # control, zero-width, bidi and line-break characters
+UNPRINTABLE = "\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff\u00ad\u2060\ufe00-\ufe0f\u115f\u1160\u3164\uffa0"  # control, zero-width, bidi, line-break, soft hyphen, word joiner, variation selector and blank-glyph characters
 PATH_OK = "\u200c\u200d\u200e\u200f"  # zero-width non-joiner and joiner, LRM, RLM: allowed in a file name (the last segment) only, shown escaped
 
 
