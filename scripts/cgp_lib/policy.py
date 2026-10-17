@@ -106,10 +106,16 @@ def glob_match(glob, path):
     return go(0, 0)
 
 
+def not_plain(n):
+    """The path is not a plain file path: invisible characters, an empty, `.` or `..` segment, a leading or trailing slash. It is separate
+    from `forbidden` because split refuses these even when the plan lists them."""
+    return not plain_path(n) or any(not x or x.startswith("/") or x.endswith("/") or any(t in ("", ".", "..") for t in x.split("/")) for x in names(n))
+
+
 def forbidden(guarded, n):
     """Why a path may never be touched without a person (None when it may): not a plain file path, on the always-deny list, or a guarded
     file. `guarded` is the lower-cased guardFiles globs."""
-    if not plain_path(n) or any(not x or x.startswith("/") or x.endswith("/") or any(t in ("", ".", "..") for t in x.split("/")) for x in names(n)):
+    if not_plain(n):
         return f"{nm(n) or '(no name)'} is not a plain file path"
     if any(glob_match(g, x) for g in ALWAYS_DENY for x in names(n)):
         return f"{nm(n)} is never auto-approved"

@@ -11,7 +11,7 @@ from .store import cfg, load_data, update_data
 from .board import get_item, parse_pr_ref, require_repo, set_text
 from .intake import create_story
 from .pr import pr_view
-from .policy import forbidden, nm, plain_path
+from .policy import forbidden, nm, not_plain, plain_path
 from .repoconf import merged_globs
 from .story import ask_user, author_trusted
 
@@ -20,7 +20,8 @@ MAX_CHILDREN = 10
 
 def read_specs(c, parent, raw, allowed=()):
     """The normalised list of child specs {title, repo, scope, files, after} from parsed JSON; dies on anything invalid, so nothing
-    half-valid is ever stored or created. A spec may name a guarded or always-denied file only when `allowed` (the plan's touches) lists it."""
+    half-valid is ever stored or created. A spec may name a guarded or always-denied file only when `allowed` (the plan's touches) lists it; a path that is
+    not plain is refused even then."""
     if not isinstance(raw, list) or not raw:
         die("the declaration must be a non-empty JSON list of {title, scope, files, repo?, after?}")
     if len(raw) > MAX_CHILDREN:
@@ -50,11 +51,12 @@ def read_specs(c, parent, raw, allowed=()):
         guarded = [g.lower() for g in merged_globs(c, "guardFiles", [s["repo"]])]
         for f in s["files"]:
             names = [f.rstrip("/")] + ([f + "_"] if f.endswith("/") else [])
+            if any(not_plain(n) for n in names):
+                die(f"sub-story {s['title']!r}: {nm(f)} is not a plain file path")
             why = next(((n, r) for n in names if (r := forbidden(guarded, n))), None)
             if why and not any(covers(t, f) for t in allowed):
                 n, r = why
-                hint = "" if r.endswith("is not a plain file path") else "; the plan's files (cgp touches) must list it"
-                die(f"sub-story {s['title']!r}: {nm(f)}{r[len(nm(n) or '(no name)'):]}{hint}")
+                die(f"sub-story {s['title']!r}: {nm(f)}{r[len(nm(n) or '(no name)'):]}; the plan's files (cgp touches) must list it")
     titles = [s["title"] for s in specs]
     if len(set(titles)) != len(titles):
         die("sub-story titles must be unique")
