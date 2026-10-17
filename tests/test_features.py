@@ -713,7 +713,7 @@ class TestPlanPolicy(PolicyBase):
 
     def test_a_joiner_or_direction_mark_in_a_file_name_is_approved_inside_the_globs(self):
         self.setting(autoApproveFiles=["docs/**"])
-        for name in ("docs/a\u200db.md", "docs/\u200fnote.md", "docs/n\u200eote.md"):
+        for name in ("docs/a\u200db.md", "docs/\u200fnote.md", "docs/n\u200eote.md", "docs/a\u200cb.md", "docs/\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645.md"):
             self.cgp("touches", "i1", name)
             self.assertEqual(self.verdict("plan_review")[0], "plan_approved", name)
             self.assertEqual(self.data()["approvedTouches"]["i1"], [name])
@@ -722,7 +722,7 @@ class TestPlanPolicy(PolicyBase):
     def test_other_invisible_characters_and_directory_segments_stay_refused(self):
         self.setting(autoApproveFiles=["**"])
         for name in ("docs/a\nb.md", "docs/a\tb.md", "docs/a\x7fb.md", "docs/a\x85b.md", "docs/a\u200bb.md",
-                     "docs/a\u200cb.md", "docs/a\u202eb.md", "docs/a\u2066b.md", "docs/a\ufeffb.md", "docs/a\u2028b.md",
+                     "docs/a\u202eb.md", "docs/a\u2066b.md", "docs/a\ufeffb.md", "docs/a\u2028b.md",
                      "do\u200dcs/a.md", "docs/.\u200d.", "docs/\u200d", "docs/\u200d/a.md"):
             self.cgp("touches", "i1", name)
             self.refused("not a plain file path")
@@ -730,7 +730,8 @@ class TestPlanPolicy(PolicyBase):
     def test_a_lookalike_of_a_denied_or_guarded_name_is_refused_in_any_case(self):
         self.setting(autoApproveFiles=["**"])
         for name, why in (("AGEN\u200dTS.md", "never auto-approved"), ("agen\u200dts.md", "never auto-approved"), (".git\u200dhub/x.yml", "not a plain"),
-                          (".GitHub\u200d/x.yml", "not a plain"), (".husky/pre\u200d-commit", "guarded file"), (".HUSKY/PRE\u200f-commit", "guarded file")):
+                          (".GitHub\u200d/x.yml", "not a plain"), (".husky/pre\u200d-commit", "guarded file"), (".HUSKY/PRE\u200f-commit", "guarded file"),
+                          ("AGEN\u200cTS.md", "never auto-approved"), (".husky/pre\u200c-commit", "guarded file")):
             self.cgp("touches", "i1", name)
             self.refused(why)
 
@@ -744,8 +745,9 @@ class TestPlanPolicy(PolicyBase):
 
     def test_a_joiner_directory_touch_stays_strict(self):
         self.setting(autoApproveFiles=["**"])
-        self.cgp("touches", "i1", "dir\u200d/")
-        self.refused("not a plain file path")
+        for name in ("dir\u200d/", "dir\u200c/", "do\u200ccs/a.md"):
+            self.cgp("touches", "i1", name)
+            self.refused("not a plain file path")
 
     def test_reasons_never_hold_the_characters_and_long_names_are_cut_before_escaping(self):
         test_cgp.load_cgp()
@@ -756,6 +758,8 @@ class TestPlanPolicy(PolicyBase):
         self.assertEqual(pol.nm("x\u200e\u200f"), "x\\u200e\\u200f")
         self.assertEqual(pol.sanitize(pol.nm("x\u200d\u202e")), "x\\u200d\\u202e")
         self.assertEqual(pol.sanitize("a\u200d\u200fb"), "a b")
+        self.assertEqual(pol.nm("x\u200c"), "x\\u200c")
+        self.assertEqual(pol.sanitize(pol.nm("x\u200c")), "x\\u200c")
 
     def test_a_directory_is_approved_when_one_glob_covers_its_whole_subtree(self):
         self.setting(autoApproveFiles=["notes/**"])
@@ -1059,7 +1063,7 @@ class TestPRPolicy(PolicyBase):
             self.refused("not a plain file path")
 
     def test_joiner_and_direction_mark_names_are_approved_inside_the_globs_and_plan(self):
-        for name in ("docs/a\u200db.md", "docs/\u200fb.md"):
+        for name in ("docs/a\u200db.md", "docs/\u200fb.md", "docs/a\u200cb.md"):
             self.set_data(approvedTouches={"i1": [name]})
             self.db_set(pr_files={"acme/app#1": [name]})
             self.assertEqual(self.verdict("pr_review")[0], "pr_approved", name)
@@ -1068,7 +1072,7 @@ class TestPRPolicy(PolicyBase):
 
     def test_pr_lookalikes_and_odd_names_are_refused(self):
         self.setting(autoApproveFiles=["**"])
-        for name, why in (("AGEN\u200dTS.md", "never auto-approved"), (".husky/pre\u200d-commit", "guarded file"), ("docs/a\u200cb.md", "not a plain"),
+        for name, why in (("AGEN\u200dTS.md", "never auto-approved"), (".husky/pre\u200d-commit", "guarded file"), ("docs/a\u200bb.md", "not a plain"),
                           ("do\u200dcs/a.md", "not a plain"), ("docs/a\u202eb.md", "not a plain"), ("docs/.\u200d.", "not a plain")):
             self.set_data(approvedTouches={"i1": [name]})
             self.db_set(pr_files={"acme/app#1": [name]})
@@ -1077,7 +1081,7 @@ class TestPRPolicy(PolicyBase):
     def test_a_renames_old_name_gets_the_same_checks(self):
         self.setting(autoApproveFiles=["**"])
         new = "docs/a\u200db.md"
-        for old, why in (("AGEN\u200dTS.md", "never auto-approved"), ("docs/x\u200cy.md", "not a plain"),
+        for old, why in (("AGEN\u200dTS.md", "never auto-approved"), ("docs/x\u200by.md", "not a plain"),
                          ("do\u200dcs/a.md", "not a plain"), (".husky/pre\u200d-commit", "guarded file")):
             self.set_data(approvedTouches={"i1": [new, old]})
             self.db_set(pr_files={"acme/app#1": [{"filename": new, "status": "renamed", "previous_filename": old}]})

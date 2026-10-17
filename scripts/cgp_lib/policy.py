@@ -26,7 +26,7 @@ ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKI
                "**/CLAUDE*.md", "**/GEMINI.md", ".cursor/**", ".windsurf/**", ".agents/**", "**/.claude/**", "**/*.mdc", "**/CONTRIBUTING.md",
                ".github/**", ".cgp-rules.md"]
 UNPRINTABLE = "\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff"  # control, zero-width, bidi and line-break characters
-PATH_OK = "\u200d\u200e\u200f"  # zero-width joiner, LRM, RLM: allowed in a file name (the last segment) only, shown escaped
+PATH_OK = "\u200c\u200d\u200e\u200f"  # zero-width non-joiner and joiner, LRM, RLM: allowed in a file name (the last segment) only, shown escaped
 
 
 def sanitize(text, cap=300):

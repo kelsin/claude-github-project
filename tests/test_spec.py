@@ -303,8 +303,8 @@ class TestSpecCommands(SpecBase):
             self.assertFalse(res["started"], touch)
 
     def test_a_joiner_file_touch_starts_but_a_joiner_directory_or_a_hidden_deny_name_does_not(self):
-        for touch, started in (("notes/a\u200db.md", True), ("no\u200dtes/a.md", False), ("dir\u200d/", False), ("AGEN\u200dTS.md", False),
-                               (".husky/pre\u200d-commit", False)):
+        for touch, started in (("notes/a\u200db.md", True), ("notes/a\u200cb.md", True), ("no\u200dtes/a.md", False), ("no\u200ctes/a.md", False), ("dir\u200d/", False),
+                               ("dir\u200c/", False), ("AGEN\u200dTS.md", False), ("AGEN\u200cTS.md", False), (".husky/pre\u200d-commit", False)):
             self.set_data(touches={"i1": [touch]}, spec={})
             self.assertEqual(self.cgp("spec", "start", "i1")["started"], started, touch)
 
