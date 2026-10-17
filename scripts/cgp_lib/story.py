@@ -185,6 +185,8 @@ def cmd_reevaluate(a):
         except SystemExit:
             res["errors"].append({"item": it["item"], "error": err.getvalue().strip()})
             continue
+        for line in err.getvalue().strip().splitlines():  # what a story that succeeded said (warnings) is not lost with the buffer
+            print(f"{it['item']}: {line}", file=sys.stderr)
         if verdict is None:
             res["skipped"].append({"item": it["item"], "why": "the policy is off for the PR gate"})
         elif r and r["column"] == "pr_approved":

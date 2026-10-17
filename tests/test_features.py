@@ -1,5 +1,7 @@
 """Priority, intake, notifications, repo config, preview providers, models, draft PRs."""
+import contextlib
 import importlib
+import io
 import json
 import os
 import shutil
@@ -1135,6 +1137,7 @@ class TestReevaluate(PolicyBase):
     def sweep(self, expect=0, **kw):
         p = self.tty("reevaluate", **kw)
         self.assertEqual(p.returncode, expect, p.stderr)
+        self.last = p
         return json.loads(p.stdout)
 
     def refusals(self):
@@ -1144,6 +1147,7 @@ class TestReevaluate(PolicyBase):
         self.fix()
         r = self.sweep()
         self.assertEqual((r["checked"], r["approved"], r["refused"], r["skipped"], r["errors"]), (1, ["i1"], [], [], []))
+        self.assertEqual(self.last.stderr, "")
         self.assertEqual(self.column(), "pr_approved")
         self.assertNotIn("i1", self.data()["policyRefusal"])
         self.assertEqual(self.data()["reviewed"]["i1"]["sha"], "aaa111")
@@ -1154,6 +1158,7 @@ class TestReevaluate(PolicyBase):
             r = self.sweep()
             self.assertEqual((r["checked"], r["approved"], len(r["refused"])), (1, [], 1))
             self.assertIn("rated medium", r["refused"][0]["reason"])
+            self.assertEqual(self.last.stderr, "")
         self.assertEqual(self.column(), "pr_review")
         self.assertEqual(len(self.refusals()), 1)
 
@@ -1231,7 +1236,23 @@ class TestReevaluate(PolicyBase):
         r = self.sweep(expect=1)
         self.assertEqual((r["checked"], r["approved"], [e["item"] for e in r["errors"]]), (2, ["i1"], ["i2"]))
         self.assertIn("502", r["errors"][0]["error"])
+        self.assertNotIn("502", self.last.stderr)  # a failing story's message is reported in `errors`, not passed through
         self.assertEqual(self.column("i1"), "pr_approved")
+
+    def test_the_stderr_of_a_story_that_succeeds_is_passed_through_with_its_item(self):
+        test_cgp.load_cgp()  # a fresh import under the test's HOME
+        story = importlib.import_module("cgp_lib.story")
+        row = {"item": "i1", "archived": False, "kind": "issue", "column": "pr_review", "issueRepo": "acme/app", "number": 1}
+        def verdict(*a):
+            print("warning: preview not ready\nsecond line", file=sys.stderr)
+            return {"approved": True, "reason": "ok"}
+        with mock.patch.multiple(story, cfg=lambda: {"board": {"id": "b"}, "settings": {"nativeDependencies": False}}, require_human=lambda m: None,
+                                 load_data=lambda: {"policyRefusal": {"i1": {"gate": "pr_approved"}}}, fetch_items=lambda *a: [row],
+                                 parse_item=lambda r, c: r, policy_verdict=verdict, move_item=lambda *a: {"column": "pr_approved"}, out=lambda r: None):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                story.cmd_reevaluate(None)
+        self.assertEqual(err.getvalue(), "i1: warning: preview not ready\ni1: second line\n")
 
     def test_a_rate_limit_stops_the_sweep(self):
         self.two_stories()
