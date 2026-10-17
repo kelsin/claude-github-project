@@ -1421,6 +1421,37 @@ class TestDoctorRecovery(test_cgp.SyncBase):
         self.assertIn("⚠️  Test Board 1: workers' stories are on the board  gone in dead are not on the board", self.cgp("doctor", "--deep", ok=False).stdout)
 
 
+class TestTrustedRateLimit(unittest.TestCase):
+    def lookup(self, stdout, stderr, code=1):
+        gh = test_cgp.load_cgp().mods["gh"]
+        gh._cache.clear()
+        cm = {"user": {"login": "alice"}, "author_association": "COLLABORATOR"}
+        run = mock.Mock(return_value=subprocess.CompletedProcess([], code, stdout, stderr))
+        with mock.patch.object(gh, "viewer", return_value="me"), mock.patch.object(gh, "BACKOFF", (0, 0)), mock.patch("subprocess.run", run):
+            try:
+                return gh, cm, gh.trusted("a/b", cm)
+            except gh.RateLimited:
+                return gh, cm, None
+
+    def test_a_rate_limit_raises_and_is_not_cached(self):
+        gh, cm, res = self.lookup("", "gh: HTTP 429: API rate limit exceeded")
+        self.assertIsNone(res)
+        self.assertNotIn(("perm", "a/b", "alice"), gh._cache)
+        ok = mock.Mock(return_value=subprocess.CompletedProcess([], 0, '{"permission": "write"}', ""))
+        with mock.patch.object(gh, "viewer", return_value="me"), mock.patch("subprocess.run", ok):
+            self.assertTrue(gh.trusted("a/b", cm))
+
+    def test_only_stderr_counts_as_a_rate_limit(self):
+        gh, cm, res = self.lookup("rate limit", "gh: HTTP 404")
+        self.assertIs(res, False)
+
+    def test_a_404_or_bad_json_is_untrusted_and_cached(self):
+        for stdout, stderr, code in (("", "gh: HTTP 404: Not Found", 1), ("not json", "", 0)):
+            gh, cm, res = self.lookup(stdout, stderr, code)
+            self.assertIs(res, False)
+            self.assertIs(gh._cache[("perm", "a/b", "alice")], False)
+
+
 class TestSkillText(test_cgp.unittest.TestCase):
     def test_no_command_in_the_instructions_interpolates_a_title(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
