@@ -1367,6 +1367,32 @@ class TestReevaluate(PolicyBase):
         self.sweep()
         self.assertEqual(len(self.calls("view")), once)  # not a second evaluation on top of the sweep's own
 
+    def test_a_rate_limit_on_the_stack_gate_read_stops_the_sweep(self):
+        self.limited(match="pr view 1 ", skip=2)
+
+    def test_a_rate_limit_on_the_author_read_stops_the_sweep(self):
+        self.limited(match="api repos/acme/app/issues/1")
+        self.assertEqual(self.read_db()["failed_calls"], 1)
+
+    def test_an_unreadable_author_is_a_refusal_not_a_stop(self):
+        r = self.sweep_past({"match": "api repos/acme/app/issues/1", "stderr": "HTTP 404"})
+        self.assertIn("not written by someone you trust", r["refused"][0]["reason"])
+
+    def test_an_unreadable_pr_at_the_stack_gate_is_a_refusal_not_a_stop(self):
+        r = self.sweep_past({"match": "pr view 1 ", "skip": 2, "stderr": "HTTP 404"})
+        self.assertIn("the PR could not be read", r["refused"][0]["reason"])
+
+    def test_prepare_stops_on_a_rate_limit_on_the_author_read(self):
+        self.db_set(failures=[{"match": "api repos/acme/app/issues/1", "stderr": "API rate limit exceeded", "times": 99}])
+        p = self.cgp("prepare", "i1", ok=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("rate limit", p.stderr.lower())
+
+    def test_prepare_with_an_unreadable_author_reports_it_untrusted(self):
+        self.env["CGP_GH_BACKOFF"] = "0,0"
+        self.db_set(failures=[{"match": "api repos/acme/app/issues/1", "stderr": "HTTP 404", "times": 99}])
+        self.assertFalse(self.cgp("prepare", "i1")["authorTrusted"])
+
 class TestPolicySettings(PolicyBase):
     def test_a_person_at_a_terminal_can_set_the_policy_and_it_is_normalised(self):
         p = self.tty("config", "autoApprove", "pr:medium, plan:low")

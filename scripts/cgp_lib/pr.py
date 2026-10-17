@@ -5,7 +5,7 @@ import re
 import time
 from .util import Poll, die, out
 from urllib.parse import quote
-from .gh import gh, gql, rest
+from .gh import RateLimited, gh, gql, rest
 from .store import cfg, load_data, update_data
 from .board import fetch_items, get_item, parse_item, parse_pr_ref, require_repo
 from .gitutil import default_ref
@@ -427,11 +427,17 @@ def base_problem(c, repo, view):
 def stack_gate(c, it, view=None):
     """Why the story's PR may not be approved, or count as merged, by anyone but the user: the story is stacked, or its PR does not
     target the default branch (also when it cannot be read or the default branch is unknown). None when nothing stands in the way.
-    `view` is the PR as already read, else it is read here."""
+    `view` is the PR as already read, else it is read here; a rate limit on that read propagates."""
     if stack_of(it["item"]):
         return STACKED
     ref = parse_pr_ref(c, it["pr"])
-    view = view or (ref and pr_view(*ref, check=False))
+    if not view and ref:
+        try:
+            view = pr_view(*ref)
+        except RateLimited:
+            raise
+        except SystemExit:
+            view = None
     return base_problem(c, ref[0], view) if view else "the PR could not be read"
 
 

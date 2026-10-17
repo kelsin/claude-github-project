@@ -517,10 +517,12 @@ def cmd_feedback(a):
 
 def author_trusted(it):
     """False when the issue was written by someone who may not steer the loop (not you, an owner, or a collaborator with write
-    access): its title and body are then only data. Fails closed when the author cannot be read."""
+    access): its title and body are then only data. Fails closed when the author cannot be read; a rate limit propagates."""
     try:
         issue = json.loads(gh("api", f"repos/{it['issueRepo']}/issues/{it['number']}").stdout)
         return trusted(it["issueRepo"], issue)
+    except RateLimited:
+        raise
     except (SystemExit, ValueError, TypeError):
         return False
 
@@ -528,7 +530,7 @@ def author_trusted(it):
 def cmd_prepare(a):
     """Everything a worker reads before acting, in one call: the story, feedback, the Q&A history when the user just
     answered, the PR state, and the worktree brought up to date. Each part fails on its own (`error`) so one problem
-    does not hide the rest."""
+    does not hide the rest. A rate limit on the author read aborts prepare rather than failing that part alone."""
     c = cfg()
     it = get_item(c, a.item)
 
