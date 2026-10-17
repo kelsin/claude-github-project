@@ -247,6 +247,9 @@ class TestDeferReview(DeferBase):
         r = self.review(drop=[{"key": self.A, "reason": "x"}, {"key": self.B, "reason": "x"}])
         self.assertEqual((r["filed"], r["dropped"], len(self.issues())), ([], [], 2))
 
+    def test_list_with_review_is_refused(self):
+        self.assertIn("cannot be combined", self.cgp("defer", "i1", "--list", "--review", "-", input="{}", ok=False).stderr)
+
     def test_no_flag_files_everything_on_hold_without_reading_stdin(self):
         r = self.cgp("defer", "i1", input="not json")
         self.assertEqual(len(r["filed"]), 2)

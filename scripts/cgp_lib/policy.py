@@ -213,7 +213,8 @@ def evaluate(c, it, gate, author_trusted):
         return no(f"rated {rating}, above the {level} the policy allows for the {key}")
     if item in data.get("tainted", []):
         return no("a conflict in the branch was resolved by hand")
-    if key == "plan" and item in data.get("deferredReviewed", []):
+    filed = [(k["repo"].lower(), k["number"]) for ks in data.get("deferredFiled", {}).values() for k in ks if k.get("priority")]
+    if key == "plan" and (item in data.get("deferredReviewed", []) or (repo.lower(), it["number"]) in filed):
         return no("filed from a deferred review: a person approves the plan")
     globs = c["settings"].get("autoApproveFiles") or []
     if key == "plan":

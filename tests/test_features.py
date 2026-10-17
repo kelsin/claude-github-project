@@ -829,6 +829,10 @@ class TestPlanPolicy(PolicyBase):
         self.set_data(deferredReviewed=["i1"])
         self.refused("deferred review")
 
+    def test_a_half_filed_deferred_story_is_refused_by_issue(self):
+        self.set_data(deferredFiled={"i9": [{"key": "k", "repo": "acme/app", "number": 1, "title": "t", "priority": "Low"}]})
+        self.refused("deferred review")
+
     def refusals(self):
         return [c for c in self.comments() if "Not auto-approved by the policy" in c]
 

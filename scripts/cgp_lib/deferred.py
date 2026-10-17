@@ -106,6 +106,8 @@ def cmd_defer(a):
     known = {k["key"]: k for k in data.get("deferredFiled", {}).get(a.item, [])}
     dropped = {k["key"]: k for k in data.get("deferredDropped", {}).get(a.item, [])}
     if a.list:
+        if a.review is not None:
+            die("--list and --review cannot be combined")
         out({"item": a.item, "items": [{k: i[k] for k in ("key", "title", "reason")} for i in items], "skipped": skipped,
              "filed": list(known), "dropped": list(dropped)})
         return
