@@ -25,7 +25,7 @@ ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKI
                "docs/conf.py", "docs/_config.yml", "docs/package.json", "**/.vitepress/**", "**/.docusaurus/**", ".readthedocs.y*ml",
                "**/CLAUDE*.md", "**/GEMINI.md", ".cursor/**", ".windsurf/**", ".agents/**", "**/.claude/**", "**/*.mdc", "**/CONTRIBUTING.md",
                ".github/**", ".cgp-rules.md"]
-UNPRINTABLE = "\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff\u00ad\u2060\ufe00-\ufe0f\u115f\u1160\u3164\uffa0"  # control, zero-width, bidi, line-break, soft hyphen, word joiner, variation selector and blank-glyph characters
+UNPRINTABLE = "\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff\u00ad\u2060\ufe00-\ufe0f\u115f\u1160\u3164\uffa0\u034f\u061c\u17b4\u17b5\u180e\u2061-\u2064\U000e0000-\U000e007f\U000e0100-\U000e01ef"  # control, zero-width, bidi, line-break, soft hyphen, word joiner, variation selector, blank-glyph, invisible-operator and tag characters
 PATH_OK = "\u200c\u200d\u200e\u200f"  # zero-width non-joiner and joiner, LRM, RLM: allowed in a file name (the last segment) only, shown escaped
 
 
@@ -48,9 +48,9 @@ def plain_path(n):
 
 
 def nm(name):
-    """A file name as it appears in a reason: capped, then every unprintable character written out (\\u200d), so the cut never lands inside an
+    """A file name as it appears in a reason: capped, then every unprintable character written out (\\u200d, or \\U000e0001 above U+FFFF), so the cut never lands inside an
     escape and no invisible character is shown."""
-    return re.sub(f"[{UNPRINTABLE}]", lambda m: f"\\u{ord(m[0]):04x}", str(name)[:80])
+    return re.sub(f"[{UNPRINTABLE}]", lambda m: f"\\u{ord(m[0]):04x}" if ord(m[0]) <= 0xFFFF else f"\\U{ord(m[0]):08x}", str(name)[:80])
 
 
 def parse(value):
