@@ -8,7 +8,7 @@ import re
 import sys
 from .consts import MARK
 from .util import covers, die, norm_path, now_iso, out
-from .gh import rest
+from .gh import RateLimited, rest
 from .models import RATINGS
 from .store import cfg, load_data, update_data
 from .board import get_item, parse_pr_ref
@@ -180,6 +180,16 @@ def current_rating(data, it):
     return r["rating"] if r and r.get("column") == it["column"] else None
 
 
+def read_pr(ref):
+    """pr_view or None when the read failed; a rate limit still propagates (the move and the sweep must stop, not read it as a refusal)."""
+    try:
+        return pr_view(*ref)
+    except RateLimited:
+        raise
+    except SystemExit:
+        return None
+
+
 def evaluate(c, it, gate, author_trusted):
     """None when the policy is off for this gate. Otherwise a verdict: {"approved", "reason"} plus, when approved, `touches` (plan) or
     `sha` and `draft` (pr), the exact things that were checked. Fails closed on anything unread, empty, unexpected or truncated."""
@@ -220,7 +230,7 @@ def evaluate(c, it, gate, author_trusted):
         return no("the story has no valid PR")
     if it["skipPlan"] or not approved:
         return no("no approved plan files are on record (Plan: Skip or none declared)")
-    v = pr_view(*ref, check=False)
+    v = read_pr(ref)
     if not v or not v.get("headRefOid"):
         return no("could not read the PR head")
     if ref[0].lower() != repo.lower():
@@ -235,6 +245,8 @@ def evaluate(c, it, gate, author_trusted):
         return no("the PR is a draft that this loop did not open (draftPRs is off)")
     try:
         files = rest(f"repos/{ref[0]}/pulls/{ref[1]}/files")
+    except RateLimited:
+        raise
     except SystemExit:
         return no("could not list the PR's files")
     if not files or len(files) >= MAX_FILES or not all(f.get("filename") for f in files):
@@ -246,7 +258,7 @@ def evaluate(c, it, gate, author_trusted):
     extra = next((n for n in names if not any(covers(t, n) for t in approved)), None)
     if extra:
         return no(f"{nm(extra)} is not in the approved plan's files")
-    again = pr_view(*ref, check=False)
+    again = read_pr(ref)
     if not again or again.get("headRefOid") != v["headRefOid"]:
         return no("the PR head moved while it was checked")
     if not author_trusted():
@@ -282,6 +294,8 @@ def record_refusal(it, gate, reason, post):
         return False
     try:
         post(f"{MARK}\nNot auto-approved by the policy ({'plan' if GATE_KEYS[gate] == 'plan' else 'PR'}): {reason}")
+    except RateLimited:
+        raise
     except (SystemExit, Exception):
         return False
     update_data(lambda d: d.setdefault("policyRefusal", {}).__setitem__(it["item"], {"gate": gate, "at": now_iso(), "approved": False, "reason": reason}))

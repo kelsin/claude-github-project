@@ -1267,6 +1267,67 @@ class TestReevaluate(PolicyBase):
         self.assertEqual(self.column("i2"), "pr_review")
         self.assertEqual(len(self.refusals()), before)
 
+    def limited(self, **fail):
+        """Two stories, a rate limit on the calls `fail` matches: the sweep stops at i1, leaving i2 and the stored refusal as they were."""
+        self.two_stories()
+        if "approvedTouches" in fail:
+            self.set_data(approvedTouches=fail.pop("approvedTouches"))  # a reason the stored refusal does not have: a new comment
+        refusal, n = self.data()["policyRefusal"]["i1"], len(self.refusals())
+        self.db_set(failures=[{"stderr": "API rate limit exceeded", "times": 99, **fail}])
+        r = self.sweep(expect=1)
+        self.assertEqual((r["stopped"], r["checked"], [e["item"] for e in r["errors"]]), ("rate limited", 1, ["i1"]))
+        self.assertEqual(self.column("i2"), "pr_review")
+        self.assertEqual(self.data()["policyRefusal"]["i1"], refusal)
+        self.assertEqual(len(self.refusals()), n)
+
+    def test_a_rate_limit_on_the_first_pr_read_stops_the_sweep(self):
+        self.limited(match="pr view 1 ")
+
+    def test_a_rate_limit_on_the_second_pr_read_stops_the_sweep(self):
+        self.limited(match="pr view 1 ", skip=1)
+
+    def test_a_rate_limit_on_the_file_list_stops_the_sweep(self):
+        self.limited(match="pulls/1/files")
+
+    def test_a_rate_limit_on_the_refusal_comment_stops_the_sweep(self):
+        self.limited(match="Not auto-approved", approvedTouches={"i2": [self.FILE]})
+
+    def sweep_past(self, fail, touches=None):
+        """A failure that is no rate limit refuses (or skips the comment of) i1 and the sweep goes on to approve i2."""
+        self.env["CGP_GH_BACKOFF"] = "0,0"
+        self.two_stories()
+        if touches:
+            self.set_data(approvedTouches=touches)
+        self.db_set(failures=[{"times": 99, **fail}])
+        r = self.sweep()
+        self.assertNotIn("stopped", r)
+        self.assertEqual((r["approved"], r["errors"]), (["i2"], []))
+        self.assertEqual(self.column("i2"), "pr_approved")
+        return r
+
+    def test_a_missing_pr_is_a_refusal_not_a_stop(self):
+        r = self.sweep_past({"match": "pr view 1 ", "stderr": "HTTP 404"})
+        self.assertIn("could not read the PR head", r["refused"][0]["reason"])
+
+    def test_a_failing_file_list_is_a_refusal_not_a_stop(self):
+        r = self.sweep_past({"match": "pulls/1/files", "stderr": "HTTP 502"})
+        self.assertIn("could not list the PR's files", r["refused"][0]["reason"])
+
+    def test_a_failing_refusal_comment_is_retried_by_the_next_sweep(self):
+        r = self.sweep_past({"match": "Not auto-approved", "stderr": "HTTP 502"}, {"i2": [self.FILE]})
+        self.assertEqual(len(r["refused"]), 1)
+        self.assertEqual(self.data()["policyRefusal"]["i1"]["reason"], "rated medium, above the low the policy allows for the pr")
+
+    def test_a_rate_limit_on_the_refusal_comment_of_a_move_still_returns_the_move(self):
+        self.force("i1", "implement")
+        self.cgp("rate", "i1", "medium")
+        self.set_data(policyRefusal={})
+        self.db_set(failures=[{"match": "Not auto-approved", "stderr": "API rate limit exceeded", "times": 99}])
+        r = self.cgp("move", "i1", "pr_review")
+        self.assertEqual(r["column"], "pr_review")
+        self.assertFalse(r["policy"]["approved"])
+        self.assertNotIn("i1", self.data()["policyRefusal"])
+
     def test_the_policy_is_evaluated_once_per_story(self):
         self.force("i1", "implement")
         self.cgp("rate", "i1", "low")
