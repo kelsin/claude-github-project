@@ -37,8 +37,8 @@ def sanitize(text, cap=300):
 
 
 def names(n):
-    """A path as written and with the PATH_OK characters removed: every deny and guard check runs on both, so a lookalike cannot dodge them."""
-    return [n, re.sub(f"[{PATH_OK}]", "", n)]
+    """A path as written, with the PATH_OK characters removed (index 1: the form plain_path and probes index), and with every unprintable removed: every deny and guard check runs on all, so a lookalike cannot dodge them."""
+    return [n, re.sub(f"[{PATH_OK}]", "", n), re.sub(f"[{UNPRINTABLE}]", "", n)]
 
 
 def plain_path(n):

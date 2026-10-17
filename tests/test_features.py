@@ -778,6 +778,15 @@ class TestPlanPolicy(PolicyBase):
         self.assertEqual(pol.nm("x\u200c"), "x\\u200c")
         self.assertEqual(pol.sanitize(pol.nm("x\u200c")), "x\\u200c")
 
+    def test_names_strips_every_unprintable_in_a_third_variant(self):
+        test_cgp.load_cgp()
+        pol = importlib.import_module("cgp_lib.policy")
+        self.assertEqual(pol.names("a\u00adb\u200dc"), ["a\u00adb\u200dc", "a\u00adbc", "abc"])
+        self.assertEqual(pol.names("a\u200d")[1], "a")
+        self.assertEqual(pol.names("a\u00ad")[1], "a\u00ad")
+        self.assertTrue(pol.plain_path("a\u200d"))
+        self.assertFalse(pol.plain_path("a\u00ad"))
+
     def test_a_directory_is_approved_when_one_glob_covers_its_whole_subtree(self):
         self.setting(autoApproveFiles=["notes/**"])
         self.cgp("touches", "i1", "notes/")

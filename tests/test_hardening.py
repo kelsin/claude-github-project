@@ -307,6 +307,18 @@ class TestSyncRecords(test_cgp.SyncBase):
         self.assertEqual(sorted(json.loads(self.cgp("guard", "i1", ok=False).stdout)["violations"]),
                          sorted([".husky/pre\u200d-commit", "Make\u200dfile", ".husky/pre\u200c-commit", "Make\u200cfile"]))
 
+    def test_guard_catches_any_unprintable_lookalike_of_a_guarded_name(self):
+        want = []
+        for ch in ("\x01", "\u00ad", "\u200b", "\u2060", "\ufeff", "\ufe0f", "\u3164"):
+            os.makedirs(os.path.join(self.wt, f".hus{ch}ky"), exist_ok=True)
+            for n in (f".hus{ch}ky/pre-commit", f".np{ch}mrc", f"CODE{ch}OWNERS"):
+                self.commit(n)
+                want.append(n)
+            os.makedirs(os.path.join(self.wt, "docs"), exist_ok=True)
+            self.commit(f"docs/ok{ch}.md")
+        got = json.loads(self.cgp("guard", "i1", ok=False).stdout)["violations"]
+        self.assertEqual(sorted(got), sorted(want))
+
     def test_guard_allows_only_the_touches_declared_at_approval(self):
         self.commit(".npmrc", "x\n")
         self.cgp("touches", "i1", ".npmrc")
