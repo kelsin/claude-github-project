@@ -49,7 +49,7 @@ errors go to stderr with a non-zero exit code (3: missing token scope, 4: guard 
 | `merge-wait` | `item` `--timeout` `--interval` | Wait for the story's PR to merge, keeping it up to date; behind the merge train it only waits (pending with ahead), in a merge queue repo it only watches (dequeued when the queue drops it) |
 | `add` | `title` `--repo` `--body` `--priority` | Create an issue and put it on the board in Todo (body on stdin with --body -) |
 | `split` | `item` `--declare` | Sub-stories: declare a split in the plan (--declare, JSON on stdin), or create the approved ones |
-| `defer` | `item` | After the merge: file the PR's `## Deferred` entries as Todo stories on hold (safe to rerun) |
+| `defer` | `item` `--list` `--review` | After the merge: file the PR's `## Deferred` entries as Todo stories on hold (safe to rerun); --list shows them with keys, --review - files a reviewer's JSON decision (stdin) at Medium or Low |
 | `import` | `label` `--repo` | Put open issues with a label on the board in Todo |
 | `models` | `rating` | The model for each sub-agent role at a risk rating (null: the session's model) |
 | `rate` | `item` `rating` | Record your risk rating of a story (the auto-approval policy reads it) |
