@@ -302,7 +302,10 @@ class TestSyncRecords(test_cgp.SyncBase):
         os.makedirs(os.path.join(self.wt, ".husky"))
         self.commit(".husky/pre\u200d-commit")
         self.commit("Make\u200dfile")
-        self.assertEqual(sorted(json.loads(self.cgp("guard", "i1", ok=False).stdout)["violations"]), [".husky/pre\u200d-commit", "Make\u200dfile"])
+        self.commit(".husky/pre\u200c-commit")
+        self.commit("Make\u200cfile")
+        self.assertEqual(sorted(json.loads(self.cgp("guard", "i1", ok=False).stdout)["violations"]),
+                         sorted([".husky/pre\u200d-commit", "Make\u200dfile", ".husky/pre\u200c-commit", "Make\u200cfile"]))
 
     def test_guard_allows_only_the_touches_declared_at_approval(self):
         self.commit(".npmrc", "x\n")
@@ -351,6 +354,7 @@ class TestSanitizeKeepsPathEscapes(unittest.TestCase):
         pol = importlib.import_module("cgp_lib.policy")
         self.assertEqual(pol.sanitize("a\u200db\u200fc\u202ed"), "a b c d")
         self.assertEqual(pol.sanitize(pol.nm("a\u200db\u200f")), "a\\u200db\\u200f")
+        self.assertEqual(pol.sanitize(pol.nm("a\u200c")), "a\\u200c")
 
 
 class TestStalledWorkers(Base):
