@@ -14,7 +14,7 @@ STRIKES = 3  # failed or fruitless runs of one story in one column before the us
 # unstick never touches it. A test fails when the code writes a key that is in neither, so a new key must be classified here.
 STORY_STATE = {"answered": "list", "daemonStrikes": "pipe", "resume": "pipe"}  # resume: {agent, head, at} of the worker to message on a send-back
 STORY_KEPT = ("asked", "cursors", "pending", "blocks", "epicOrder", "touches", "approvedTouches", "splits", "approvedSplits", "children",
-              "parents", "epicAsked", "policyPlans", "policy", "policyRefusal", "ratings", "reviewed", "cleanRebase", "notified", "deferred", "deferredFiled", "reasons",
+              "parents", "epicAsked", "policyPlans", "policy", "policyRefusal", "ratings", "reviewed", "cleanRebase", "notified", "deferred", "deferredFiled", "deferredDecision", "deferredDropped", "deferredReviewed", "reasons",
               "tainted", "intake", "reruns", "flakes", "stack", "spec")  # stack: {dependent: {on, branch, pr, tip, files}}, see stack.py; spec: a speculative draft of a Plan Review story, see spec.py; tainted: a review safety gate (a conflicting rebase), not for unstick to lift
 MARK = "<!-- cgp -->"
 QMARK = "<!-- cgp:question -->"

@@ -99,7 +99,8 @@ COMMANDS = [
         A("title"), A("--repo"), A("--body"), A("--priority", help="High, Medium, Low or Hold")]),
     ("split", cmd_split, "Sub-stories: declare a split in the plan (--declare, JSON on stdin), or create the approved ones", [
         A("item"), A("--declare", action="store_true")]),
-    ("defer", cmd_defer, "After the merge: file the PR's `## Deferred` entries as Todo stories on hold (safe to rerun)", [A("item")]),
+    ("defer", cmd_defer, "After the merge: file the PR's `## Deferred` entries as Todo stories on hold (safe to rerun); --list shows them with keys, --review - files a reviewer's JSON decision (stdin) at Medium or Low", [
+        A("item"), A("--list", action="store_true"), A("--review", metavar="-", help="the reviewer's decision as JSON on stdin")]),
     ("import", cmd_import, "Put open issues with a label on the board in Todo", [A("label"), A("--repo")]),
     ("models", cmd_models, "The model for each sub-agent role at a risk rating (null: the session's model)", [
         A("rating", choices=["low", "medium", "high"])]),

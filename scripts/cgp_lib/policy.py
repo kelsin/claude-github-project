@@ -213,6 +213,8 @@ def evaluate(c, it, gate, author_trusted):
         return no(f"rated {rating}, above the {level} the policy allows for the {key}")
     if item in data.get("tainted", []):
         return no("a conflict in the branch was resolved by hand")
+    if key == "plan" and item in data.get("deferredReviewed", []):
+        return no("filed from a deferred review: a person approves the plan")
     globs = c["settings"].get("autoApproveFiles") or []
     if key == "plan":
         files = [norm_path(f) for f in data.get("touches", {}).get(item, [])]
