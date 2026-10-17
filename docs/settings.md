@@ -23,7 +23,7 @@ Show all with `scripts/cgp config`; set one with `scripts/cgp config <key> <valu
 | `nagAfterHours` | 0 | with `notifyCommand` set, fire the `nag` event (the title includes how long the story has waited) when a story waiting on you or in a review column has waited this many hours, then again every this many hours; 0 = never. The wait is counted from when the loop first saw the story in its column, and a nag fires only while the loop runs `cgp list`. Enabling it does not nag the stories already waiting: they start counting when it is turned on. `cgp review` shows the digest |
 | `previewProvider` | `netlify` | where deploy previews come from: `netlify`, `vercel`, `cloudflare` (each read from the provider's bot comment on the PR) or `deployments` (GitHub's Deployments API, no bot). A repo's `.cgp.json` can override it |
 | `draftPRs` | 0 | 1: workers open PRs as drafts; moving the story to PR Review marks the PR ready |
-| `plannerModel`, `reviewerModel`, `implementerModel` | empty | the model for that sub-agent role: `sonnet`, `opus`, `haiku` or `fable`, or a rating map such as `low:haiku,medium:sonnet,high:opus`. Empty: the session's model. Workers read it with `cgp models <rating>`. The Todo ready check uses `reviewerModel`'s low-rating model |
+| `plannerModel`, `reviewerModel`, `implementerModel` | empty | the model for that sub-agent role: `sonnet`, `opus`, `haiku` or `fable`, or a rating map such as `low:haiku,medium:sonnet,high:opus`. Empty: the session's model. Workers read it with `cgp models <rating>`. The Todo ready check and the Plan research sub-agents use `reviewerModel`'s low-rating model |
 
 ## Per-repo settings: `.cgp.json`
 
