@@ -42,6 +42,10 @@ stdin = sys.stdin.read() if args[:2] == ["api", "graphql"] else ""
 # fail with that message, then the calls succeed; db["failed_calls"] counts them. A sequenced failure, like gh in an outage.
 for f in db.get("failures", []):
     if f.get("times", 1) > 0 and f.get("match", "") in " ".join(args) + stdin:
+        if f.get("skip", 0) > 0:  # the first n matching calls pass (and fall through to the next entry)
+            f["skip"] -= 1
+            save()
+            continue
         f["times"] = f.get("times", 1) - 1
         db["failed_calls"] = db.get("failed_calls", 0) + 1
         save()

@@ -153,8 +153,12 @@ def move_item(c, it, column, verdict=None):
     if policy_ok:
         post_comment(it["issueRepo"], it["number"], f"{MARK}\nAuto-approved by the policy ({'plan' if column == 'plan_approved' else 'PR'}): {verdict['reason']}.")
         advance_cursor(item)  # like `cgp comment`: posting counts as having read the feedback so far
-    elif verdict and record_refusal(it, target, verdict["reason"], lambda text: post_comment(it["issueRepo"], it["number"], text)):
-        advance_cursor(item)  # a refusal is posted once per reason; the person it was meant for sees it in the story
+    elif verdict:
+        try:
+            if record_refusal(it, target, verdict["reason"], lambda text: post_comment(it["issueRepo"], it["number"], text)):
+                advance_cursor(item)  # a refusal is posted once per reason; the person it was meant for sees it in the story
+        except RateLimited:
+            pass  # the move is done; the refusal is posted by the next move
     return {"item": item, "column": column, **({"autoApproved": True} if requested or policy_ok else {}), **({"requested": requested} if requested else {}),
          **({"policy": public(verdict)} if verdict else {})}
 
