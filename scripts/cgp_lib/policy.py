@@ -25,7 +25,8 @@ ALWAYS_DENY = ["CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", "**/SKI
                "docs/conf.py", "docs/_config.yml", "docs/package.json", "**/.vitepress/**", "**/.docusaurus/**", ".readthedocs.y*ml",
                "**/CLAUDE*.md", "**/GEMINI.md", ".cursor/**", ".windsurf/**", ".agents/**", "**/.claude/**", "**/*.mdc", "**/CONTRIBUTING.md",
                ".github/**", ".cgp-rules.md"]
-UNPRINTABLE = "\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff\u00ad\u2060\ufe00-\ufe0f\u115f\u1160\u3164\uffa0\u034f\u061c\u17b4\u17b5\u180e\u2061-\u2064\U000e0000-\U000e007f\U000e0100-\U000e01ef"  # control, zero-width, bidi, line-break, soft hyphen, word joiner, variation selector, blank-glyph, invisible-operator and tag characters
+UNPRINTABLE = "\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u206f\ufeff\u00ad\u2060\ufe00-\ufe0f\u115f\u1160\u3164\uffa0\u034f\u061c\u17b4\u17b5\u180e\u2061-\u2064\u180b-\u180d\u180f\ufff9-\ufffb\U0001d173-\U0001d17a\U0001bca0-\U0001bca3\U00013430-\U0001343f\U000e0000-\U000e007f\U000e0100-\U000e01ef"  # control, zero-width, bidi, line-break, soft hyphen, word joiner, variation selector, blank-glyph, invisible-operator, deprecated format, Mongolian free variation selector, interlinear annotation, musical and shorthand format, Egyptian hieroglyph format and tag characters
+_FVS_OK = re.compile("(?<=[\u1800-\u180a\u1810-\u18af])[\u180b-\u180d\u180f]")  # a Mongolian free variation selector directly after a Mongolian letter
 PATH_OK = "\u200c\u200d\u200e\u200f"  # zero-width non-joiner and joiner, LRM, RLM: allowed in a file name (the last segment) only, shown escaped
 
 
@@ -37,12 +38,12 @@ def sanitize(text, cap=300):
 
 
 def names(n):
-    """A path as written, with the PATH_OK characters removed (index 1: the form plain_path and probes index), and with every unprintable removed: every deny and guard check runs on all, so a lookalike cannot dodge them."""
-    return [n, re.sub(f"[{PATH_OK}]", "", n), re.sub(f"[{UNPRINTABLE}]", "", n)]
+    """A path as written, with the PATH_OK characters and a Mongolian free variation selector directly after a Mongolian letter removed (index 1: the form plain_path and probes index), and with every unprintable removed: every deny and guard check runs on all, so a lookalike cannot dodge them."""
+    return [n, re.sub(f"[{PATH_OK}]", "", _FVS_OK.sub("", n)), re.sub(f"[{UNPRINTABLE}]", "", n)]
 
 
 def plain_path(n):
-    """No control, zero-width or bidi character in a directory segment; in the file name only the PATH_OK ones are allowed."""
+    """No control, zero-width or bidi character in a directory segment; in the file name only the PATH_OK ones and a Mongolian selector directly after a Mongolian letter are allowed."""
     d, _, b = n.rpartition("/")
     return not re.search(f"[{UNPRINTABLE}]", d + "/" + names(b)[1])
 

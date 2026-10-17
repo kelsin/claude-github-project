@@ -80,8 +80,16 @@ Globs are matched per path segment, not with `fnmatch`: `*.md` matches `README.m
 | U+17B4, U+17B5 Khmer inherent vowels | invisible vowel marks with no glyph |
 | U+E0000-E007F tag characters | invisible; used to hide text inside a name |
 | U+E0100-E01EF variation selectors supplement | invisible after the base character, same class as U+FE00-FE0F |
+| U+206A-206F deprecated format characters | inhibit and activate shaping, symmetric swapping and digit shapes; deprecated, no glyph |
+| U+180B-180D, U+180F Mongolian free variation selectors | invisible after the base character (see the allowance below) |
+| U+FFF9-FFFB interlinear annotation anchors | invisible markers around annotated text |
+| U+1D173-1D17A musical symbol format characters | invisible beam, tie, slur and phrase controls |
+| U+1BCA0-1BCA3 shorthand format controls | invisible overlap and continuation controls |
+| U+13430-1343F Egyptian hieroglyph format controls | invisible layout controls |
 
-Characters above U+FFFF are shown in a reason as `\U000e0001` (8 hex digits).
+A Mongolian free variation selector (U+180B-180D, U+180F) is allowed in a file name (not in a directory) directly after a Mongolian letter (U+1800-18AF except the selectors and U+180E); at the start of a name, after any other character (including another selector or a joiner) it is refused.
+
+Characters above U+FFFF are shown in a reason as `\U000e0001` or `\U0001d173` (8 hex digits).
 
 `cgp reevaluate` re-runs the policy for the PR Review stories it refused (those with a stored PR-gate `policyRefusal`) and approves the ones that now qualify, through the same path as `cgp move <item> pr_review`: the approval is recorded at the commit that was checked and clears the refusal. A story that fails is listed under `errors` and the command exits 1; a rate limit stops the sweep (`stopped`), leaving the remaining stories for the next run. It never approves through the `Auto Approve` field, posts nothing new for a refusal whose reason is unchanged, and leaves stories without a refusal, a policy that is off for the gate, and all of Plan Review alone. When the PR head moved since the refusal, the new head is recorded as reviewed and exactly one new refusal comment is posted. It runs only when invoked, and only by you: like `cgp approve`, it refuses inside a Claude session or without a terminal.
 

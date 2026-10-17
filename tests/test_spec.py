@@ -307,7 +307,14 @@ class TestSpecCommands(SpecBase):
                                ("dir\u200c/", False), ("AGEN\u200dTS.md", False), ("AGEN\u200cTS.md", False), (".husky/pre\u200d-commit", False),
                                ("notes/a\u00adb.md", False), ("notes/a\u2060b.md", False), ("notes/a\ufe0fb.md", False), ("notes/a\u3164b.md", False), ("dir\u00ad/", False),
                                ("notes/a\u034fb.md", False), ("notes/a\u061cb.md", False), ("notes/a\u17b4b.md", False), ("notes/a\u180eb.md", False), ("notes/a\u2061b.md", False),
-                               ("notes/a\U000e0001b.md", False), ("notes/a\U000e0100b.md", False), ("dir\U000e007f/", False)):
+                               ("notes/a\U000e0001b.md", False), ("notes/a\U000e0100b.md", False), ("dir\U000e007f/", False),
+                               ("notes/a\u206ab.md", False), ("notes/a\ufff9b.md", False), ("notes/a\U0001d173b.md", False), ("notes/a\U0001bca0b.md", False), ("notes/a\U00013430b.md", False),
+                               ("notes/a\u180bb.md", False), ("notes/\u180bb.md", False), ("notes/\u1820\u180b\u180cb.md", False), ("notes/\u1820\u180e\u180bb.md", False),
+                               ("notes/\u1820\u200d\u180bb.md", False), ("notes/\u17ff\u180bb.md", False), ("notes/\u18b0\u180bb.md", False), ("no\u1820\u180btes/a.md", False),
+                               ("dir\u1820\u180b/", False), ("notes/\u1820\u180bb.md", True), ("notes/\u1800\u180fb.md", True), ("notes/\u180a\u180cb.md", True),
+                               ("notes/\u1810\u180db.md", True), ("notes/\u18af\u180bb.md", True), ("notes/a\u2070b.md", True), ("notes/a\ufff8b.md", True), ("notes/a\ufffcb.md", True),
+                               ("notes/a\U0001d172b.md", True), ("notes/a\U0001d17bb.md", True), ("notes/a\U0001bc9fb.md", True), ("notes/a\U0001bca4b.md", True),
+                               ("notes/a\U0001342fb.md", True), ("notes/a\U00013440b.md", True)):
             self.set_data(touches={"i1": [touch]}, spec={})
             self.assertEqual(self.cgp("spec", "start", "i1")["started"], started, touch)
 
